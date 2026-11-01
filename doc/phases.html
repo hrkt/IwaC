@@ -1076,11 +1076,13 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
     <div class="reg"><span class="rname">入口 (crt)</span><small>OS には引数の仕組みがまだ無いので、決め打ちの argv「iwac --kosaba hello.c」を合成して main を呼ぶ</small></div>
     <div class="reg"><span class="rname">読み書き (shim)</span><small>open/read/close は OS のシステムコールへ。出力は create/write で hello.elf というファイルへ</small></div>
   </div>
-  <p>途中、ひとつ発見がありました。現行の OS ではプログラムの置き場所が
-  「読み+実行のみ（書けない）」で、書き込みできるメモリはスタックだけ。
+  <p>途中、ひとつ発見がありました。OS ではプログラムの置き場所が
+  「読み+実行のみ（書けない）」で、書き込みできるメモリはスタックだけでした。
   手書きの小さなプログラムはそれで済みますが、大きな作業机（静的変数）が
-  要るコンパイラは置けませんでした。この検証では OS のコピー側で
-  コード領域を書き込み可にして確認し、本線の扱いは OS 側と相談中です。</p>
+  要るコンパイラは置けません。相談を受けた OS 側が「データ専用の
+  書き込みできる領域」を新設し、iwac 側も配置を合わせたことで、
+  今は OS 本線でそのまま動きます（プログラムの領域は
+  コード／データ／スタックの3つに分かれました）。</p>
   <div class="chips">
     <span class="chip">移植 = 差し替え</span><span class="chip">iwac.c 無変更</span>
     <span class="chip">OS 上でコンパイル</span><span class="chip">発見: 書けない机</span>
