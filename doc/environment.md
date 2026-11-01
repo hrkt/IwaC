@@ -57,8 +57,9 @@ git push origin main
 
 - 2026-11-01: KosabaOS 用の鍵で push を試みて
   "Permission to hrkt/IwaC.git denied to deploy key" と拒否されたのが、
-  専用鍵を作った理由。専用鍵の登録が済めば、ローカルにある
-  コミットをそのまま push できる。
+  専用鍵を作った理由。ユーザーが専用鍵を登録し、同日に初回コミット
+  `008fb4a` の push に成功、リモート main が同コミットを指すことを
+  `git ls-remote` で検証済み。以後はこのリポジトリで通常通り push できる。
 
 ## ビルドと検証のコマンド
 
