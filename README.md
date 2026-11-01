@@ -14,7 +14,20 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/phases.html`](doc/phases.html)（単体で開ける HTML、
 初心者向けに各フェーズで何をやったかを解説）。
 
-## 現在地: v9
+## 現在地: v10
+
+入力がファイルから読めるようになった:
+
+```
+iwac hello.c > hello.bin
+```
+
+同梱の `examples/hello.c` が、まさにその形でコンパイル
+できて QEMU で `Hello, World!` を出す。ファイルの中身の
+ために改行と行コメント `//` も読めるようになった。
+従来の引数に直接書く形も残してある。
+
+その下の土台（v9 まで）:
 
 配列が入った。宣言は `char buf[16];` の形で、要素は
 1バイト。置き場所はレジスタでなくメモリ（コード＋文字列の
@@ -81,7 +94,11 @@ gcc -std=c11 -Wall -Wextra -O2 -o iwac iwac.c
 コンパイルと実行:
 
 ```sh
-./iwac '65+1' > a.bin   # 24バイトのバイナリができる
+./iwac examples/hello.c > hello.bin   # ファイルから読む (v10〜)
+qemu-system-riscv64 -machine virt -bios default -kernel hello.bin \
+    -m 128M -nographic  # シリアルに Hello, World! と出る
+
+./iwac '65+1' > a.bin   # 従来の形 (引数そのものをコンパイル)
 qemu-system-riscv64 -machine virt -bios default -kernel a.bin \
     -m 128M -nographic  # シリアルに B と出て止まる (終了は Ctrl-A x)
 ```

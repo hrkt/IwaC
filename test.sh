@@ -27,6 +27,7 @@
 #       かっこ、両側が式になる計算 (スタック評価)
 #   v8: if / else / else if (while の中や関数の中でも)
 #   v9: 配列 (宣言・要素の読み書き・先頭アドレス・関数へ渡す)
+#   v10: ファイル入力 (iwac hello.c の形、改行・// コメント)
 set -e
 cd "$(dirname "$0")"
 
@@ -273,5 +274,43 @@ check_tail "$TMP/v9e.bin" 'Hi' "v9: 配列を関数へ渡す"
 check_error 'char b[0];' "配列の大きさ 0"
 check_error 'char b[2]; char b[3];' "配列の二重宣言"
 check_error 'c[0] = 65;' "宣言していない配列への書き込み"
+
+# --- v10: ファイル入力 (改行・コメント入りのソース) ---
+cat > "$TMP/prog.c" <<'EOF'
+// コメントと改行のあるプログラム
+void uart_puts(char *s) {
+    while (*s != 0) {
+        putc(*s);
+        s = s + 1;  // 次の文字へ
+    }
+}
+uart_puts("file");
+EOF
+"$IWAC" "$TMP/prog.c" > "$TMP/v10.bin"
+check_tail "$TMP/v10.bin" 'file' "v10: ファイル入力 (改行・コメント)"
+
+# リポジトリ同梱の examples/hello.c が Hello, World! を出す
+# (末尾の改行はシェルの変数代入で消えてしまうので、
+#  check_tail ではなくログ全体から探して確かめる)
+"$IWAC" examples/hello.c > "$TMP/hello.bin"
+timeout 3 "$QEMU" -machine virt -bios default -kernel "$TMP/hello.bin" \
+    -m 128M -display none -monitor none -serial "file:$TMP/serial.log" \
+    >/dev/null 2>&1 || true
+if grep -q 'Hello, World!' "$TMP/serial.log"; then
+    echo "ok: v10: examples/hello.c → 'Hello, World!' が出た"
+else
+    fail "v10: examples/hello.c: ログに Hello, World! が無い"
+fi
+
+check_error_file() {
+    if "$IWAC" "$1" > "$TMP/err.bin" 2> "$TMP/err.txt"; then
+        echo "FAIL: $2 (成功してしまった)"; exit 1
+    fi
+    if [ -s "$TMP/err.bin" ]; then
+        echo "FAIL: $2 (エラーなのに出力がある)"; exit 1
+    fi
+    echo "ok: $2 はエラーになり、出力は空だった"
+}
+check_error_file "$TMP/no-such-file.c" "存在しない .c ファイル"
 
 echo "PASS"

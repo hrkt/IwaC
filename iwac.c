@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v9)
+/* iwac -- Cコンパイラのサブセット (v10)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v9 の言語 (文法) ===
+ * === v10 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -154,6 +154,16 @@
  * 住所計算で、読みは lbu、書きは sb。配列はプログラム
  * 全体で共有の1つだけ (スコープも関数の局所配列も無い)。
  *
+ * v10 では入力がファイルから読めるようになった
+ * (iwac hello.c > hello.bin)。引数が .c で終わる名前
+ * ならファイルとして開き、それ以外でも同名ファイルが
+ * 開ければその中身を、無ければ引数そのものをプログラム
+ * として読む (従来の使い方も残る)。ファイルの中身の
+ * ために、空白として改行も飛ばせるようにし、行コメント
+ * // (行末まで) も入れた。ホストに頼る外部関数は
+ * write に open/read/close が加わって4つになった。
+ * ここが将来 KosabaOS 上で動かすときの差し替え場所。
+ *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
  * 文字列リテラルの「値」は、その先頭の住所である。住所は
@@ -193,8 +203,15 @@
  */
 
 /* 外部関数の宣言 (ヘッダの代わりに自分で書く)
- * write: fd へ buf の先頭 len バイトを書くホストの関数 */
+ * write: fd へ buf の先頭 len バイトを書くホストの関数
+ * open / read / close: ファイル入力 (v10) のための3つ。
+ * flags は読み専用の 0 を渡す。iwac がホストに頼るのは
+ * この4つだけで、ここが KosabaOS 上で動かすときに
+ * システムコールへ差し替える場所になる */
 long write(int fd, char *buf, long len);
+int open(char *path, int flags);
+long read(int fd, char *buf, long len);
+int close(int fd);
 
 /* ----------------------------------------------------------------
  * 道具: ホストへの出力と、エラー処理
@@ -519,9 +536,25 @@ static int parse_ident(void) {
 }
 
 /* 空白は意味を持たないので読み飛ばす (字句解析の仕事) */
+/* 空白とコメントを飛ばす。v10 で、ファイルから読む
+ * プログラムのために改行 (と CR) と行コメント // も
+ * 飛ばせるようにした。// から行末まではコメント。
+ * 除算の / と見分けるのは「/ が2つ続いたらコメント」で、
+ * 本物の C と同じ決め事 (文字列の中は対象外。文字列の
+ * 読み取りはこの関数を通らないので "http://..." の
+ * ような文字列も壊れない) */
 static void skip_spaces(void) {
-    while (*cur == ' ' || *cur == '\t')
-        cur++;
+    for (;;) {
+        while (*cur == ' ' || *cur == '\t' || *cur == '\n' ||
+               *cur == '\r')
+            cur++;
+        if (cur[0] == '/' && cur[1] == '/') {
+            while (*cur != '\0' && *cur != '\n')
+                cur++;
+            continue;
+        }
+        return;
+    }
 }
 
 /* カーソルの位置から数字を1つ読み、値を返す。
@@ -2137,17 +2170,88 @@ static void write_binary(void) {
 }
 
 /* ================================================================
+ * 入力 (v10): ファイルからプログラムを読む
+ *
+ * 引数が「.c で終わる名前」ならファイルとして開く
+ * (開けなければエラー)。それ以外でも、同名のファイルが
+ * 開けるならその中身を、開けないなら引数そのものを
+ * プログラムとして読む (従来の使い方もそのまま残す)。
+ * 読み込んだソースは src_buf に置く。上限は約64KB。
+ * ================================================================ */
+
+static char src_buf[65536];
+
+/* path が ".c" で終わる名前かどうか */
+static int ends_with_c(char *path) {
+    int len = 0;
+    while (path[len] != '\0')
+        len++;
+    return len >= 2 && path[len - 2] == '.' && path[len - 1] == 'c';
+}
+
+/* ファイルを src_buf へ読み込む。
+ * 戻り値: 1 = 読めた、0 = ファイルとして開けなかった
+ * (引数そのものとして扱ってよい)、-1 = エラー
+ * (errmsg に理由。開けたのに読めなかった、大きすぎる等) */
+static int load_file(char *path) {
+    int fd = open(path, 0);
+    if (fd < 0)
+        return 0;
+    int used = 0;
+    for (;;) {
+        if (used >= 65535) {
+            close(fd);
+            errmsg = "ファイルが大きすぎます (約64KBまで)";
+            return -1;
+        }
+        long n = read(fd, src_buf + used, 65535 - used);
+        if (n < 0) {
+            close(fd);
+            /* ディレクトリなど、開けても読めないものは
+             * 「ファイルではなかった」として扱う */
+            return 0;
+        }
+        if (n == 0)
+            break;
+        used += (int)n;
+    }
+    close(fd);
+    src_buf[used] = '\0';
+    return 1;
+}
+
+/* ================================================================
  * main: 層を順に呼ぶだけ
  *   parse (失敗したら何も出さない) → gen (同) → write
  * ================================================================ */
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        print_str(2, "usage: iwac '<プログラム>'   例: iwac 'void f(char *s) { while (*s != 0) { putc(*s); s = s + 1; } } f(\"Hi\");'\n");
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n");
         return 1;
     }
 
-    if (!parse_program(argv[1])) {
+    /* 入力の決定: .c ファイルは必ずファイルとして読む。
+     * それ以外は、ファイルが開ければファイル、無ければ
+     * 引数そのものがプログラム */
+    char *src = argv[1];
+    int must_file = ends_with_c(argv[1]);
+    int loaded = load_file(argv[1]);
+    if (loaded < 0 || (must_file && loaded == 0)) {
+        print_str(2, "iwac: ");
+        if (loaded < 0)
+            print_str(2, errmsg);
+        else {
+            print_str(2, "ファイルが開けません: ");
+            print_str(2, argv[1]);
+        }
+        print_str(2, "\n");
+        return 1;
+    }
+    if (loaded == 1)
+        src = src_buf;
+
+    if (!parse_program(src)) {
         print_str(2, "iwac: ");
         print_str(2, errmsg);
         print_str(2, "\n");

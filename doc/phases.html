@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v9 まで</title>
+<title>IwaC の歩み — v0 から v10 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v9 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v10 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -329,7 +329,8 @@
   <a class="done" href="#v6">v6 putc本体</a><span class="arr">→</span>
   <a class="done" href="#v7">v7 優先順位</a><span class="arr">→</span>
   <a class="done" href="#v8">v8 if/else</a><span class="arr">→</span>
-  <a class="done" href="#v9">v9 配列</a>
+  <a class="done" href="#v9">v9 配列</a><span class="arr">→</span>
+  <a class="done" href="#v10">v10 ファイル入力</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -588,6 +589,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v7</span>　演算子の優先順位が C と同じ順に。かっこと掛け算・割り算も使える</li>
     <li><span class="ok">✓ v8</span>　<code class="inline">if</code> / <code class="inline">else</code> で、条件で道を選べる</li>
     <li><span class="ok">✓ v9</span>　配列で、データを並べて持てる</li>
+    <li><span class="ok">✓ v10</span>　<code class="inline">iwac hello.c</code> の形で、ファイルからコンパイルできる</li>
   </ul>
 </section>
 
@@ -895,10 +897,48 @@ uart_puts(buf);</pre>
   <p>小さく始めて、必要になった分だけ育っているのが、サイズにも表れています。</p>
 </section>
 
+<!-- ================= v10 ================= -->
+<section class="phase" id="v10">
+  <div class="head"><span class="badge b-v4">v10</span><h2>ファイル入力 — iwac hello.c の形に</h2></div>
+  <p class="goal-line">目標：<b>プログラムを「引数の文字列」から「.c ファイル」へ。</b></p>
+  <div class="flow">
+    <div class="box"><small>今まで</small><b>iwac '65+1'</b><br>プログラムをコマンドに直接書く</div>
+    <div class="arrow">→</div>
+    <div class="box"><small>v10 から</small><b>iwac hello.c</b><br>ファイルに書いて渡す</div>
+  </div>
+  <p>本物のコンパイラと同じ使い方になりました。ファイルに書けるようになると、
+  プログラムは行に分かれて読みやすくできて、コメントも残せます。
+  そこで字句の約束も少し育ちました：<b>改行も空白として飛ばす</b>ことと、
+  <code class="inline">//</code> から行末までの<b>行コメント</b>です
+  （割り算の <code class="inline">/</code> とは「2つ続いたらコメント」で見分けます。本物の C と同じ決め事）。</p>
+<pre class="code"><span class="c">// examples/hello.c（リポジトリ同梱の例題）</span>
+<span class="k">void</span> uart_putc(<span class="k">char</span> c) {  <span class="c">// 本物ポーリング版</span>
+    <span class="k">while</span> ((*0x10000005 &amp; 32) == 0) { }
+    *0x10000000 = c;
+}
+<span class="k">void</span> uart_puts(<span class="k">char</span> *s) { ... }
+uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
+  <div class="screen"><small>iwac hello.c でコンパイルして QEMU で実行すると…</small><span class="big">Hello, World!</span> ← ゴールの形が、ホスト＋QEMU で先に完成</div>
+  <p>iwac がホストに頼る関数は、出力の <code class="inline">write</code> に
+  <code class="inline">open</code> / <code class="inline">read</code> / <code class="inline">close</code> が加わって4つだけ。
+  いずれも宣言は自分で書く流儀のままです。将来 KosabaOS の上で iwac を動かすときは、
+  この4つを OS のシステムコールに差し替えればよい、という置き方になっています。</p>
+  <div class="chips">
+    <span class="chip">iwac hello.c</span><span class="chip">改行＝空白</span>
+    <span class="chip">// コメント</span><span class="chip">examples/hello.c</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  コンパイラの「言語」だけでなく「使い方」も設計のうちでした。
+  入力がファイルになると、プログラムは使い捨ての引数ではなく
+  「育てていくファイル」になります。Hello World がファイルの形で
+  完成したことで、残る仕事は言語の残り（main の形や #define）と、
+  舞台を KosabaOS へ移す合流の2つに整理されました。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v9 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v10 時点）</p>
 </footer>
 
 </div>
