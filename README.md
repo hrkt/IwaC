@@ -7,7 +7,8 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 実行できるようにすること。そのコンパイラが、この `iwac`。
 
 欲張らない方針で進める。プリプロセッサなどは対象外
-（詳しい範囲と計画は `doc/roadmap.md`、決めたことは `doc/notes.md`）。
+（計画は `doc/roadmap.md`、設計は `doc/design.md`、
+できたことは `doc/progress.md`、決めたことは `doc/notes.md`）。
 
 ## 現在地: v0
 
