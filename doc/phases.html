@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IwaC の歩み — v0 から v4 まで</title>
+<style>
+  :root {
+    --ink: #2b2620;
+    --paper: #faf6ef;
+    --card: #ffffff;
+    --line: #e3d9c8;
+    --accent: #d96f32;
+    --accent-soft: #fdeee2;
+    --green: #2e7d52;
+    --green-soft: #e6f4ec;
+    --blue: #2f5f9e;
+    --blue-soft: #e8f0fa;
+    --purple: #6b4fa1;
+    --purple-soft: #f0eaf9;
+    --gold: #a97b12;
+    --gold-soft: #faf1da;
+    --code-bg: #2b2620;
+    --code-ink: #f5eedd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Hiragino Kaku Gothic ProN", "Hiragino Sans",
+                 "Noto Sans JP", "Yu Gothic", sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    line-height: 1.75;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 24px 18px 64px; }
+
+  header.hero {
+    text-align: center;
+    padding: 34px 16px 10px;
+  }
+  header.hero .kicker {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: .12em;
+    padding: 4px 14px;
+    border-radius: 999px;
+  }
+  header.hero h1 { font-size: 34px; margin: 14px 0 6px; }
+  header.hero p.sub { color: #6d6353; margin: 0 auto; max-width: 640px; }
+
+  /* 全体像: コンパイラの仕事 */
+  .big-picture {
+    background: var(--card);
+    border: 2px solid var(--line);
+    border-radius: 16px;
+    padding: 20px 18px 8px;
+    margin: 26px 0 10px;
+  }
+  .big-picture h2 { margin: 0 0 4px; font-size: 20px; text-align: center; }
+  .big-picture p.lead { text-align: center; color: #6d6353; margin: 0 0 14px; font-size: 14px; }
+  .flow {
+    display: flex; align-items: stretch; gap: 8px;
+    flex-wrap: wrap; justify-content: center; margin-bottom: 14px;
+  }
+  .flow .box {
+    background: var(--accent-soft);
+    border: 2px solid var(--accent);
+    border-radius: 12px;
+    padding: 10px 14px;
+    text-align: center;
+    min-width: 150px;
+    flex: 1;
+  }
+  .flow .box small { display: block; color: #8a5a2e; font-weight: 700; font-size: 12px; }
+  .flow .box b { font-size: 17px; }
+  .flow .arrow { align-self: center; font-size: 22px; color: var(--accent); font-weight: 700; }
+  .note {
+    background: #fff8ec;
+    border-left: 5px solid var(--gold);
+    border-radius: 0 10px 10px 0;
+    padding: 10px 14px;
+    margin: 14px 0;
+    font-size: 15px;
+  }
+  .note b { color: var(--gold); }
+
+  /* タイムライン (目次) */
+  .timeline {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    justify-content: center; margin: 22px 0 6px;
+  }
+  .timeline a {
+    text-decoration: none; color: var(--ink);
+    background: var(--card);
+    border: 2px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-weight: 700; font-size: 14px;
+  }
+  .timeline a:hover { border-color: var(--accent); }
+  .timeline a.done { border-color: var(--green); background: var(--green-soft); }
+  .timeline a.next { border-style: dashed; color: #6d6353; }
+  .timeline .arr { align-self: center; color: #b6a888; font-weight: 700; }
+
+  /* フェーズのカード */
+  section.phase {
+    background: var(--card);
+    border: 2px solid var(--line);
+    border-radius: 16px;
+    padding: 22px 22px 10px;
+    margin: 28px 0;
+  }
+  section.phase .head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    border-bottom: 2px dashed var(--line);
+    padding-bottom: 10px; margin-bottom: 8px;
+  }
+  .badge {
+    color: #fff; font-weight: 800; font-size: 15px;
+    border-radius: 10px; padding: 4px 12px; white-space: nowrap;
+  }
+  .b-v0 { background: #8a6d3b; } .b-v1 { background: var(--accent); }
+  .b-mid { background: var(--purple); } .b-v2 { background: var(--blue); }
+  .b-v3 { background: #0f766e; } .b-v4 { background: var(--green); }
+  .b-extra { background: #96700a; } .b-next { background: #9a9186; }
+  section.phase h2 { margin: 0; font-size: 23px; }
+  .goal-line { font-size: 16px; }
+  .goal-line b { color: var(--accent); }
+  h3.mini { margin: 18px 0 6px; font-size: 16px; }
+
+  .chips { margin: 8px 0 2px; }
+  .chip {
+    display: inline-block; background: #f3ecdf; border-radius: 999px;
+    padding: 2px 12px; font-size: 13px; font-weight: 700; margin: 2px 3px 2px 0;
+    color: #6d5c33;
+  }
+
+  pre.code {
+    background: var(--code-bg); color: var(--code-ink);
+    border-radius: 12px; padding: 14px 16px;
+    overflow-x: auto; font-size: 14.5px; line-height: 1.6;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre.code .c { color: #b8a888; }        /* コメント */
+  pre.code .k { color: #ffb37a; }        /* キーワード */
+  pre.code .s { color: #a8d8a8; }        /* 文字列 */
+  code.inline {
+    background: #f3ecdf; border-radius: 6px; padding: 1px 7px;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .92em;
+  }
+
+  /* 命令の図 */
+  .inst-list { margin: 10px 0; }
+  .inst {
+    display: flex; gap: 10px; align-items: baseline;
+    background: #fdfaf4; border: 1.5px solid var(--line);
+    border-radius: 10px; padding: 7px 12px; margin: 6px 0;
+  }
+  .inst .mn {
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-weight: 700;
+    background: var(--accent-soft); border-radius: 7px; padding: 1px 10px;
+    min-width: 64px; text-align: center; color: #9a4d16;
+  }
+  .inst .desc { font-size: 14.5px; }
+
+  /* 結果表示 (画面のつもり) */
+  .screen {
+    background: #1d2b1d; color: #b9f2b9;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    border-radius: 12px; padding: 12px 16px; margin: 10px 0;
+    font-size: 16px;
+  }
+  .screen small { color: #7ca87c; display: block; font-size: 12px; }
+  .screen .big { font-size: 26px; font-weight: 700; color: #fff; }
+
+  /* AST の木 */
+  .tree { text-align: center; margin: 12px 0; }
+  .tree .node {
+    display: inline-block; border: 2.5px solid var(--purple);
+    background: var(--purple-soft); border-radius: 50%;
+    width: 52px; height: 52px; line-height: 48px;
+    font-weight: 800; font-size: 19px; color: var(--purple);
+  }
+  .tree .node.leaf {
+    border-radius: 12px; border-color: var(--blue); background: var(--blue-soft); color: var(--blue);
+  }
+  .tree .kids { display: flex; justify-content: center; gap: 90px; margin-top: 4px; }
+  .tree .branch { color: var(--purple); font-size: 20px; line-height: 1; }
+
+  /* レジスタの引き出し */
+  .regs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .reg {
+    flex: 1; min-width: 120px;
+    border: 2px solid var(--blue); border-radius: 12px;
+    background: var(--blue-soft); padding: 8px 12px; text-align: center;
+  }
+  .reg .name { font-family: "SF Mono", Menlo, monospace; font-weight: 800; color: var(--blue); font-size: 17px; }
+  .reg .val { font-size: 20px; font-weight: 800; }
+  .reg small { display: block; color: #5c7186; font-size: 12px; }
+
+  /* バイナリのレイアウトバー */
+  .layout { display: flex; border-radius: 12px; overflow: hidden; margin: 12px 0; border: 2px solid var(--ink); }
+  .layout .seg { padding: 10px 14px; color: #fff; font-weight: 700; text-align: center; }
+  .layout .seg small { display: block; font-weight: 400; font-size: 12.5px; opacity: .9; }
+  .seg-code { background: var(--accent); flex: 3; }
+  .seg-data { background: #0f766e; flex: 2; }
+
+  /* 文字列とポインタの図 */
+  .memrow { display: flex; gap: 4px; margin: 10px 0 2px; flex-wrap: wrap; }
+  .cell {
+    width: 52px; height: 52px; border: 2px solid #0f766e; border-radius: 10px;
+    background: #e6f4f1; text-align: center; line-height: 48px;
+    font-family: "SF Mono", Menlo, monospace; font-size: 20px; font-weight: 700;
+  }
+  .cell.zero { background: #f3ecdf; border-color: #c9bb9c; color: #8a7a52; }
+  .ptr { font-size: 15px; margin: 2px 0 8px; }
+  .ptr .here { color: #0f766e; font-weight: 800; }
+
+  /* ループの図 */
+  .loop-diagram { margin: 12px 0; }
+  .loop-step {
+    border: 2px solid var(--green); background: var(--green-soft);
+    border-radius: 12px; padding: 9px 14px; margin: 0 auto; max-width: 520px;
+  }
+  .loop-step.exit { border-color: #b3552e; background: #fdeee2; }
+  .loop-arrow { text-align: center; color: var(--green); font-weight: 800; font-size: 15px; margin: 3px 0; }
+  .loop-arrow.back { color: var(--accent); }
+
+  /* チェックリスト */
+  .checklist { list-style: none; padding: 0; margin: 10px 0; }
+  .checklist li {
+    border: 1.5px solid var(--line); border-radius: 10px;
+    padding: 8px 12px; margin: 6px 0; background: #fdfaf4;
+  }
+  .checklist .ok { color: var(--green); font-weight: 800; }
+  .checklist .todo { color: #9a9186; font-weight: 800; }
+
+  .learn {
+    background: var(--blue-soft); border-radius: 12px;
+    padding: 10px 16px 4px; margin: 14px 0;
+  }
+  .learn b.title { color: var(--blue); }
+  .warn {
+    background: #fdeee2; border-radius: 12px;
+    padding: 10px 16px 4px; margin: 14px 0;
+  }
+  .warn b.title { color: #b3552e; }
+
+  .sizebar { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 14px; }
+  .sizebar .bar { height: 16px; border-radius: 8px; background: var(--accent); }
+  .sizebar .lbl { min-width: 118px; font-weight: 700; }
+  .sizebar .num { color: #6d6353; }
+
+  footer { text-align: center; color: #8a7f6a; font-size: 13.5px; margin-top: 36px; }
+  footer code { font-family: "SF Mono", Menlo, monospace; }
+  @media (max-width: 640px) {
+    header.hero h1 { font-size: 26px; }
+    .tree .kids { gap: 40px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <span class="kicker">IwaC プロジェクト</span>
+  <h1>コンパイラの育て方 — v0 から v4 まで</h1>
+  <p class="sub">
+    <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
+    普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
+    このページでは、赤ちゃんだった v0 が、少しずつ言葉を覚えて
+    「文字列を1文字ずつ表示する print loop」をコンパイルできるようになるまでの歩みを、
+    フェーズごとに図で説明します。
+  </p>
+</header>
+
+<div class="big-picture">
+  <h2>まず全体像：コンパイラって何をするもの？</h2>
+  <p class="lead">人間の書いたプログラムを、コンピュータが直接実行できる「機械語」に翻訳する道具です。</p>
+  <div class="flow">
+    <div class="box"><small>入力</small><b>プログラム</b><br>人間が読める文字</div>
+    <div class="arrow">→</div>
+    <div class="box"><small>翻訳者</small><b>iwac</b><br>自作コンパイラ</div>
+    <div class="arrow">→</div>
+    <div class="box"><small>出力</small><b>生バイナリ</b><br>機械語のバイト列</div>
+    <div class="arrow">→</div>
+    <div class="box"><small>実行する場所</small><b>ベアメタル</b><br>OS無しのコンピュータ<br>（QEMUで再現）</div>
+  </div>
+  <div class="note">
+    <b>舞台の約束：</b>作られたバイナリは、QEMU という「コンピュータを真似るソフト」の中の
+    RISC-V という種類のCPUで動きます。置き場所はメモリの <code class="inline">0x80200000</code> 番地、
+    出力先は <b>UART</b>（文字を1バイトずつ外に送る窓口）。この舞台は自作OS「KosabaOS」と同じで、
+    最終目標は「KosabaOS の上で iwac が Hello World をコンパイルすること」です。
+  </div>
+</div>
+
+<nav class="timeline">
+  <a class="done" href="#v0">v0 一文字</a><span class="arr">→</span>
+  <a class="done" href="#v1">v1 式</a><span class="arr">→</span>
+  <a class="done" href="#mid">構造整理</a><span class="arr">→</span>
+  <a class="done" href="#v2">v2 変数</a><span class="arr">→</span>
+  <a class="done" href="#v3">v3 文字列</a><span class="arr">→</span>
+  <a class="done" href="#v4">v4 ループ</a><span class="arr">→</span>
+  <a class="next" href="#v5">v5 関数（次）</a>
+</nav>
+
+<!-- ================= v0 ================= -->
+<section class="phase" id="v0">
+  <div class="head"><span class="badge b-v0">v0</span><h2>まず「1文字」— 一番小さいバイナリ</h2></div>
+  <p class="goal-line">目標：<b>iwac が一番小さいバイナリを出して、それが実行できること。</b>
+  プログラムは「1文字」か「0〜255 の数字」だけ。たとえば <code class="inline">A</code> と書くと、
+  実行したときに画面（UART）に <b>A</b> と出るバイナリができます。</p>
+
+  <h3 class="mini">プログラム <code class="inline">A</code> から生まれる、たった4つの命令</h3>
+  <div class="inst-list">
+    <div class="inst"><span class="mn">lui</span><span class="desc">UART（文字の窓口）の住所 <code class="inline">0x10000000</code> を用意する</span></div>
+    <div class="inst"><span class="mn">addi</span><span class="desc">出したい文字 <code class="inline">A</code>（番号で言うと 65）を用意する</span></div>
+    <div class="inst"><span class="mn">sb</span><span class="desc">その1バイトを UART の住所に書き込む → <b>送信される！</b></span></div>
+    <div class="inst"><span class="mn">wfi</span><span class="desc">やることが無いので止まる（駐車）</span></div>
+  </div>
+  <p>命令は1つ4バイトなので、バイナリは <b>4命令 × 4バイト = 16バイト</b>。
+  コンピュータの言葉（機械語）は、この命令を数字の並びに直したものです。
+  iwac は最初から、この数字を自分で組み立てて書き出します。</p>
+
+  <div class="screen"><small>QEMU で実行すると…（前の表示は起動時の挨拶）</small><span class="big">A</span> ← この1文字が、作ったバイナリの仕事</div>
+
+  <div class="chips">
+    <span class="chip">生バイナリ</span><span class="chip">機械語を自作</span>
+    <span class="chip">UART 出力</span><span class="chip">16バイト</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「プログラムを実行する」とは、CPU が命令の数字を1つずつ読んで従うこと。
+  そして文字を表示するとは、決まった住所に1バイト書くことでした（これを MMIO と言います）。</p></div>
+</section>
+
+<!-- ================= v1 ================= -->
+<section class="phase" id="v1">
+  <div class="head"><span class="badge b-v1">v1</span><h2>「式」— 足し算・引き算を“実行時に”計算する</h2></div>
+  <p class="goal-line">目標：<b><code class="inline">65+1</code> のような式を書けるようにすること。</b>
+  ここで大事な決め事をしました：<b>コンパイラは答えを計算しない</b>。
+  65+1 の答え 66（=文字 <code class="inline">B</code>）を出すのは、実行される側のプログラムの中の
+  <code class="inline">add</code>（足し算）命令です。</p>
+
+<pre class="code"><span class="c"># プログラム</span>
+65+1
+
+<span class="c"># iwac が出す命令（実行時にこう動く）</span>
+t1 に 65 を入れる
+t2 に 1 を入れる
+t1 = t1 + t2      <span class="c"># ← 計算はこの add 命令が実行時にやる</span>
+t1 を UART に出す  <span class="c"># 66 = 'B'</span></pre>
+
+  <p>この「計算は実行時にやる」を守ると、将来、入力が変わっても同じバイナリが正しく計算できます
+  （コンパイラが先回りして答えを埋め込むのとは、決定的に違います）。</p>
+
+  <div class="screen"><small>実行結果</small>
+    <span class="big">B</span>（65+1）　<span class="big">A</span>（66-1）　<span class="big">A</span>（50+10+5）</div>
+
+  <h3 class="mini">この頃のもう1つの前進：「読む」と「作る」を分けた</h3>
+  <p>プログラムを<b>全部読み終わってから</b>バイナリを作り始めるようにしました。
+  おかげで、<code class="inline">65+</code> のような書き間違いでは、変なバイナリが一切出ません
+  （エラーで終了し、出力は空っぽ）。</p>
+
+  <div class="chips">
+    <span class="chip">add / sub 命令</span><span class="chip">項は 0〜2047</span>
+    <span class="chip">エラーでは何も出さない</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  項（数字）の上限が 2047 なのは、<code class="inline">addi</code> 命令に埋め込める数が
+  「符号付き12ビット」だから。命令の都合が、言語の仕様に顔を出す瞬間です。</p></div>
+</section>
+
+<!-- ================= 構造整理 ================= -->
+<section class="phase" id="mid">
+  <div class="head"><span class="badge b-mid">構造整理</span><h2>中身を3つの層に分ける（v1 の直後）</h2></div>
+  <p class="goal-line">直接バイナリを出す方針はそのままに、<b>コンパイラの中身を3つの層にはっきり分けました</b>。
+  言語の仕様は変えていないので、合言葉は「出力が前と1バイトも違わないこと」。</p>
+
+  <div class="flow">
+    <div class="box"><small>第1層 parse</small><b>ソース → AST</b><br>意味の木を作る</div>
+    <div class="arrow">→</div>
+    <div class="box"><small>第2層 gen</small><b>AST → 命令列</b><br>機械語の一歩手前</div>
+    <div class="arrow">→</div>
+    <div class="box"><small>第3層 encode</small><b>命令列 → 機械語</b><br>ビット列にして書く</div>
+  </div>
+
+  <h3 class="mini">AST（抽象構文木）とは？ — <code class="inline">65+1</code> の「意味の木」</h3>
+  <div class="tree">
+    <div><span class="node">+</span></div>
+    <div class="branch">／　＼</div>
+    <div class="kids"><span class="node leaf">65</span><span class="node leaf">1</span></div>
+  </div>
+  <p>プログラムの意味は「並び」ではなく「木」で考えるのが自然です。
+  この木があるから、後のフェーズで「繰り返しの中に文が入る」のような入れ子も扱えます。
+  なお AST の置き場所には、構造体やポインタではなく「番号で繋いだ配列」を使いました
+  （理由は下の番外編と同じです）。</p>
+
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  第2層の「命令列」は、アセンブリの<b>文字列ではなく、データ</b>として持ちます
+  （命令の種類・レジスタ番号・即値の組）。「どんな命令を出すか」と
+  「命令をどういうビット列にするか」を、別々の問題として考えられるようになりました。</p></div>
+</section>
+
+<!-- ================= 番外編 ================= -->
+<section class="phase" id="extra">
+  <div class="head"><span class="badge b-extra">番外編</span><h2>「まだ作っていないものを使わない」という約束</h2></div>
+  <p>ある日、iwac 自身のソースコードに <code class="inline">#include &lt;stdio.h&gt;</code> と
+  書いてあるのが見つかりました。でも iwac の言語には、まだプリプロセッサ（<code class="inline">#include</code> の仕組み）が
+  <b>ありません</b>。将来「iwac で iwac をコンパイルする（セルフホスト）」夢のためにも、
+  これは筋が通りません。</p>
+  <p>そこで、iwac 自身のソースからもプリプロセッサを全部無くしました。
+  外部の機能は <code class="inline">write</code> ひとつだけ、その「形の宣言」だけを自分で書く。
+  検証スクリプトには「<code class="inline">#</code> で始まる行があったら失敗」という見張りも入っています。</p>
+  <div class="note"><b>将来の小さな宿題：</b>
+  行の中の決まった文字列を置き換えるだけの単純な <code class="inline">#define</code> は、
+  いつか小さなステップとして作る予定です（<code class="inline">#include</code> や複雑なマクロは対象外のまま）。</div>
+</section>
+
+<!-- ================= 目標設定 ================= -->
+<section class="phase" id="goal">
+  <div class="head"><span class="badge b-v2">目標</span><h2>ここから「print loop をコンパイルする」が目標に</h2></div>
+  <p>v1 の後、次の目標が決まりました：<b>KosabaOS の print loop をコンパイルできるようになること</b>。
+  print loop とは、文字列を1文字ずつ送り出すループのことで、KosabaOS の
+  <code class="inline">uart_puts</code> という関数がそれです：</p>
+<pre class="code"><span class="k">void</span> uart_puts(<span class="k">const char</span> *s)
+{
+    <span class="k">while</span> (*s != <span class="s">'\0'</span>) {
+        uart_putc(*s);
+        s++;
+    }
+}</pre>
+  <p>短い関数ですが、この中には「変数」「文字列」「ポインタ」「繰り返し」「関数」と、
+  iwac にまだ無い部品が全部詰まっています。全部入りを一度にやらず、
+  v2 → v3 → v4 → v5 と1つずつ取りに行く計画にしました（式の掛け算・割り算など、
+  この目標に要らないものは後回しです）。</p>
+</section>
+
+<!-- ================= v2 ================= -->
+<section class="phase" id="v2">
+  <div class="head"><span class="badge b-v2">v2</span><h2>「変数と代入」— 値を“持ち回る”</h2></div>
+  <p class="goal-line">目標：<b>プログラムが「文の並び」になり、変数に値を覚えさせられること。</b></p>
+<pre class="code">x = 65;      <span class="c"># x に 65 を覚えさせる（文）</span>
+x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
+
+  <h3 class="mini">変数の実体は、CPU の中の引き出し（レジスタ）</h3>
+  <div class="regs">
+    <div class="reg"><span class="name">t3</span><span class="val">65</span><small>変数 x の置き場所</small></div>
+    <div class="reg"><span class="name">t4</span><span class="val">5</span><small>変数 y の置き場所</small></div>
+    <div class="reg"><span class="name">t5</span><span class="val">—</span><small>あき</small></div>
+    <div class="reg"><span class="name">t6</span><span class="val">—</span><small>あき（変数は最大4個）</small></div>
+  </div>
+  <p>代入は「右側を計算して、変数の引き出しへ写すこと」。
+  変数を使うのは「引き出しから写して来ること」です。
+  変数の名前と引き出し番号の対応表（記号表）は、コンパイラが管理します。
+  まだ代入していない変数を使うとエラーになります。</p>
+
+  <div class="screen"><small>実行結果</small>
+    <span class="big">B</span>（x=65; x+1）　<span class="big">A</span>（x=60; y=5; x+y）　<span class="big">B</span>（x=65; x=x+1; x ←再代入）</div>
+
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「変数」と大げさに言っても、中身は「値の置き場所に名前を付けたもの」。
+  この設計ではレジスタに住んでいるので、変数はまだメモリ上の住所を持ちません。</p></div>
+</section>
+
+<!-- ================= v3 ================= -->
+<section class="phase" id="v3">
+  <div class="head"><span class="badge b-v3">v3</span><h2>「ポインタと文字列」— 住所でメモリを読む</h2></div>
+  <p class="goal-line">目標：<b><code class="inline">s = "Hi"; *s</code> で <code class="inline">H</code> が出ること。</b></p>
+
+  <h3 class="mini">文字列は、バイナリの中でコードの後ろに置く</h3>
+  <div class="layout">
+    <div class="seg seg-code">コード（命令の並び）<small>実行される部分</small></div>
+    <div class="seg seg-data">文字列データ "Hi" + 0<small>コードの後ろに並べる</small></div>
+  </div>
+  <p>文字列の「値」は、その<b>先頭の住所</b>です。住所はコードの長さが決まるまで分からないので、
+  コンパイラは生成を<b>2回</b>やります（1回目で命令の数を数え、住所を確定して作り直す「2パス生成」）。
+  文字列の最後には 0 を付ける約束（C言語と同じ）で、これが print loop の「終わり」の目印になります。</p>
+
+  <h3 class="mini">ポインタ <code class="inline">s</code> と、<code class="inline">*s</code>（指した先を読む）</h3>
+  <div class="memrow">
+    <div class="cell">H</div><div class="cell">i</div><div class="cell zero">0</div>
+  </div>
+  <p class="ptr">↑ <span class="here">s はここを指している</span>（住所が入った変数）。
+  <code class="inline">*s</code> は「指した先の1バイトを読む」こと（命令は <code class="inline">lbu</code>）。
+  <code class="inline">s = s + 1</code> と書けば指す場所が次へ進み、<code class="inline">*s</code> は <code class="inline">i</code> になります。</p>
+
+  <div class="screen"><small>実行結果</small>
+    <span class="big">H</span>（s="Hi"; *s）　<span class="big">i</span>（s=s+1 してから *s）　<span class="big">B</span>（s="AB"; *s+1）</div>
+
+  <div class="warn"><p><b class="title">今回の大きかったつまずき：</b>
+  住所を <code class="inline">lui</code> という命令で作ったら、実行時に読み込み例外（load fault）になりました。
+  原因は、64ビットCPUの <code class="inline">lui</code> が結果を「符号拡張」してしまい、
+  <code class="inline">0x8020001c</code> のはずの住所が <code class="inline">0xffffffff8020001c</code> に化けたこと。
+  例外ログで犯人を特定し、「今いる場所からの距離」で住所を作る <code class="inline">auipc</code> に変えて解決しました。
+  KosabaOS のCプログラムが同じ方式（medany）で作られている理由にも、ここで腑が落ちました。</p></div>
+
+  <div class="chips">
+    <span class="chip">文字列リテラル</span><span class="chip">lbu 命令</span>
+    <span class="chip">2パス生成</span><span class="chip">auipc（PC相対）</span>
+  </div>
+</section>
+
+<!-- ================= v4 ================= -->
+<section class="phase" id="v4">
+  <div class="head"><span class="badge b-v4">v4</span><h2>「while と putc」— print loop の本体が動いた！</h2></div>
+  <p class="goal-line">目標：<b>繰り返しと、ループの中からの出力ができること。</b>
+  そして、これが目標の print loop の「本体そのもの」です：</p>
+<pre class="code">s = <span class="s">"hello\n"</span>;
+<span class="k">while</span> (*s) {          <span class="c"># 指した先が 0 でない間、くり返す</span>
+    putc(*s);         <span class="c"># 今の1文字を出す（組み込みの出力文）</span>
+    s = s + 1;        <span class="c"># 次の文字へ進む</span>
+}</pre>
+  <div class="screen"><small>QEMU で実行すると…</small><span class="big">hello</span>（＋改行） ← print loop が動いた！</div>
+
+  <h3 class="mini">while は、命令の世界では「飛ぶ」ことでできている</h3>
+  <div class="loop-diagram">
+    <div class="loop-step"><b>① 条件を確かめる</b>：<code class="inline">*s</code> を読んで値を見る</div>
+    <div class="loop-arrow">↓ 0 でなければ続ける ／ 0 なら <b>beq</b>（分岐）で ④ へ飛ぶ</div>
+    <div class="loop-step"><b>② 本体</b>：<code class="inline">putc(*s); s = s + 1;</code> を実行する</div>
+    <div class="loop-arrow back">↓ <b>jal</b>（ジャンプ）で ① へ戻る</div>
+    <div class="loop-step"><b>① に戻って、また条件を確かめる</b>（以下くり返し）</div>
+    <div class="loop-arrow">↓ <code class="inline">*s</code> が 0 （文字列の終わり）になったら</div>
+    <div class="loop-step exit"><b>④ ループを抜けて止まる</b></div>
+  </div>
+  <p>コンパイラの命令列の中では、飛び先は「命令の番号」で表します。
+  ビット列に変換する段で、RISC-V の分岐命令の流儀である「今の命令からの距離」に直します。
+  本体を全部出してからでないと「抜けた先」の番号が分からないので、
+  分岐の飛び先は後から書き直して確定させます（アセンブラのラベルと同じ発想です）。</p>
+
+  <div class="screen"><small>他の実行結果</small>
+    <span class="big">Hi</span>（putc を2回）　<span class="big">AAA</span>（3回数えるループ）　<span class="big">BBBB</span>（ループの入れ子）</div>
+
+  <div class="chips">
+    <span class="chip">beq（B形式）</span><span class="chip">jal（J形式）</span>
+    <span class="chip">文も AST の仲間に</span><span class="chip">入れ子のループ</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「繰り返し」という高級な概念も、CPU の世界では「条件を見て、飛ぶか飛ばないか」だけ。
+  プログラムカウンタ（次に実行する命令の住所）を前後に動かすことが、制御の流れの正体でした。</p></div>
+</section>
+
+<!-- ================= 到達点チェック ================= -->
+<section class="phase" id="status">
+  <div class="head"><span class="badge b-v4">到達点</span><h2>目標の uart_puts と、部品の対応表</h2></div>
+<pre class="code"><span class="k">void</span> uart_puts(<span class="k">const char</span> *s)      <span class="c"># ← 関数の形は v5</span>
+{
+    <span class="k">while</span> (*s != <span class="s">'\0'</span>) {        <span class="c"># ← while は v4、比較 != は v5</span>
+        uart_putc(*s);          <span class="c"># ← *s は v3、出力は v4 の putc</span>
+        s++;                    <span class="c"># ← ポインタを進めるのは v3</span>
+    }
+}</pre>
+  <ul class="checklist">
+    <li><span class="ok">✓ v0</span>　機械語を出して、1バイト送れる</li>
+    <li><span class="ok">✓ v1</span>　式を、実行時に計算できる</li>
+    <li><span class="ok">✓ v2</span>　変数 <code class="inline">s</code> のように、値を持ち回れる</li>
+    <li><span class="ok">✓ v3</span>　文字列と、その住所を持てる。<code class="inline">*s</code> で先を読める</li>
+    <li><span class="ok">✓ v4</span>　<code class="inline">while</code> でくり返し、途中で <code class="inline">putc</code> で出せる → <b>print loop の本体は達成</b></li>
+    <li><span class="todo">… v5（次）</span>　関数定義・引数・呼び出しで、本物の <code class="inline">uart_puts</code> の形にする。<code class="inline">!=</code> の比較と、<code class="inline">uart_putc</code> 本体（送信待ちのポーリング）もここで</li>
+  </ul>
+</section>
+
+<!-- ================= v5 ================= -->
+<section class="phase" id="v5">
+  <div class="head"><span class="badge b-next">v5 次</span><h2>関数の形へ — 本物の uart_puts を</h2></div>
+  <p>最後に残っているのは「関数」です。関数になると、新しい問題が出てきます：
+  引数をどのレジスタで渡すか、呼び出した側へどう戻るか（戻り先の住所の保存）、
+  関数の中で別の関数を呼ぶときの約束事、など。
+  ここまで来れば、KosabaOS の <code class="inline">uart_puts</code> と同じ形のプログラムが
+  iwac でコンパイルできるようになります。</p>
+  <p>その先には、OSの側の成長（ユーザーモード、ファイル、シェル）と合流して、
+  <b>「KosabaOS のシェルから iwac で Hello World をコンパイルして実行する」</b>
+  という最終目標が待っています。</p>
+
+  <h3 class="mini">おまけ：バイナリの大きさの育ち方</h3>
+  <div class="sizebar"><span class="lbl">v0 の「A」</span><div class="bar" style="width:64px"></div><span class="num">16 バイト（4命令）</span></div>
+  <div class="sizebar"><span class="lbl">v1 の「65+1」</span><div class="bar" style="width:96px"></div><span class="num">24 バイト</span></div>
+  <div class="sizebar"><span class="lbl">v2 の「x=65; x+1」</span><div class="bar" style="width:128px"></div><span class="num">32 バイト</span></div>
+  <div class="sizebar"><span class="lbl">v4 の print loop</span><div class="bar" style="width:252px"></div><span class="num">63 バイト（コード＋文字列）</span></div>
+  <p>小さく始めて、必要になった分だけ育っているのが、サイズにも表れています。</p>
+</section>
+
+<footer>
+  <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
+  設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v4 時点）</p>
+</footer>
+
+</div>
+</body>
+</html>

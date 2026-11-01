@@ -10,6 +10,10 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 （計画は `doc/roadmap.md`、設計は `doc/design.md`、
 できたことは `doc/progress.md`、決めたことは `doc/notes.md`）。
 
+ここまでの歩み（v0〜v4）を図で説明したページもある:
+[`doc/phases.html`](doc/phases.html)（単体で開ける HTML、
+初心者向けに各フェーズで何をやったかを解説）。
+
 ## 現在地: v4
 
 現在の言語には `while` と出力文があり、目標の print loop の
