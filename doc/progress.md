@@ -1,5 +1,45 @@
 # IwaC 進捗（できていること）
 
+## 2026-11-02: v15（iwac 本体の OS 移植）— OS 上でコンパイルが回った
+
+- 実装したこと（すべて `kosaba/` の追加。iwac.c は無変更）:
+  - kosaba_crt.S: 入口 _start。OS には argv の仕組みが
+    無いので argv = { "iwac", "--kosaba", "hello.c" } を
+    合成して main を呼ぶ。終了時は出力の書き切り
+    (kosaba_flush) の後に exit システムコール
+  - kosaba_lib.c: iwac が頼る4関数を KosabaOS の
+    システムコールで再実装。open(4)/read(5)/close(6) は
+    そのまま対応。write は fd=2 なら putc(1) のコンソール、
+    fd=1 なら create(9)/write(10) で hello.elf という
+    ファイルへ（8KB バッファでまとめて書く。最初の
+    1バイトが来るまで create しないので、コンパイル
+    失敗時に半端なファイルは残らない）。memcpy 等も用意
+  - kosaba.ld（OS の user.ld と同じ配置）と
+    build-kosaba.sh（ツール選択は OS の build.sh と同じ順）
+  - iwac.elf は約35KB（BSS 込みの memsz 約290KB で、
+    2MB のコード領域に収まる）
+- 検証:
+  - OS のスクラッチコピー（コード領域のみ下記の通り
+    変更）に iwac.elf と hello.c を初期ファイルとして
+    埋め込み、シェルで `run iwac.elf` → ls に hello.elf
+    が出現 → `run hello.elf` → 「Hello, World!」→
+    プロンプトへ復帰、までを確認。**ゴールの形が
+    OS の上で成立した**
+  - test.sh に v15 のビルド確認（RISC-V gcc がある場合）
+    を追加して PASS
+- 発見と相談事項（OS 側へ連携済み）:
+  - 現行 OS のユーザー・コード領域は 読み+実行 のみ
+    (vm.c の apply_user_region、W^X)。一方 user.ld は
+    .data/.bss をその領域に置く約束で、書き込み可能な
+    静的変数を持つプログラムは store page fault で
+    終了する（iwac の main 序盤で再現）。シェル等は
+    書き込みを全部スタックで済ませているため無事だった
+  - 今回はスクラッチ側でコード領域に W を足して検証。
+    本線は OS 側の判断待ち（書けるようにするか、
+    データ専用領域＋ローダ対応か）。iwac 側は
+    kosaba.ld の調整でどちらにも追随できる
+
+
 ## 2026-11-02: v14（KosabaOS ターゲット）— 合流の第一歩が成立
 
 - 実装したこと:

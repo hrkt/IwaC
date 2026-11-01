@@ -32,6 +32,7 @@
 #   v12: main の形 (入口は main、混ぜ書きは禁止)
 #   v13: 単純な #define (単語単位の置き換え、文字列・コメントは対象外)
 #   v14: KosabaOS ターゲット (--kosaba: ELF/0x40000000/syscall)
+#   v15: iwac 本体の KosabaOS 版 (kosaba/ の crt+shim でビルド)
 set -e
 cd "$(dirname "$0")"
 
@@ -368,5 +369,25 @@ grep -q 'Machine:.*RISC-V' "$TMP/k.hdr" || fail "v14: RISC-V でない"
 grep -q 'Entry point address:.*0x40000000' "$TMP/k.hdr" || fail "v14: 入口が 0x40000000 でない"
 readelf -l "$TMP/k.elf" | grep 'LOAD' | grep -q '0x0000000040000000' || fail "v14: PT_LOAD の vaddr が違う"
 echo "ok: v14: --kosaba の ELF (ELF64/EXEC/RISC-V/入口 0x40000000)"
+
+# --- v15: iwac 本体の KosabaOS 版ビルド ---
+# RISC-V 用 gcc が見つかるときだけ、kosaba 版 iwac.elf が
+# 作れることを確かめる (OS 上での実行確認は統合検証として
+# 別途実施。doc/progress.md)。見つからなければ飛ばす
+RISCV_CC=""
+if [ -n "${RISCV_CC_ENV:-}" ]; then
+    RISCV_CC="$RISCV_CC_ENV"
+elif [ -x ../../kosaba-os/tools/riscv-gcc/bin/riscv-none-elf-gcc ]; then
+    RISCV_CC=$(cd ../../kosaba-os/tools/riscv-gcc/bin && pwd)/riscv-none-elf-gcc
+elif command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
+    RISCV_CC=riscv64-linux-gnu-gcc
+fi
+if [ -n "$RISCV_CC" ]; then
+    (cd kosaba && CC="$RISCV_CC" ./build-kosaba.sh >/dev/null 2>&1) || fail "v15: kosaba 版のビルドに失敗"
+    readelf -h kosaba/iwac.elf | grep -q 'Entry point address:.*0x40000000' || fail "v15: iwac.elf の入口が違う"
+    echo "ok: v15: kosaba 版 iwac.elf がビルドできた (入口 0x40000000)"
+else
+    echo "skip: v15 (RISC-V 用 gcc が無いため)"
+fi
 
 echo "PASS"

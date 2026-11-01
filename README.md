@@ -14,7 +14,26 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/phases.html`](doc/phases.html)（単体で開ける HTML、
 初心者向けに各フェーズで何をやったかを解説）。
 
-## 現在地: v14
+## 現在地: v15
+
+iwac 本体が KosabaOS のユーザープログラムとして動く
+ようになった（`kosaba/build-kosaba.sh` で `iwac.elf` を
+ビルド）。iwac.c は無変更で、入口（crt）と4つの外部関数の
+実装（OS のシステムコール）を横に置いて差し替えた。
+OS のシェルで:
+
+```
+kosaba> run iwac.elf     (hello.c → hello.elf が作られる)
+kosaba> run hello.elf
+Hello, World!
+```
+
+までを統合検証で確認済み。ただし現行 OS ではコード領域が
+読み+実行のみのため、検証は OS のスクラッチコピーで
+コード領域を書き込み可にして実施（OS 側と相談中。
+詳細は doc/progress.md）。
+
+その下の土台（v14）:
 
 出力ターゲットに KosabaOS が増えた:
 

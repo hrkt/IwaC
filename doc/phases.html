@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v14 まで</title>
+<title>IwaC の歩み — v0 から v15 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v14 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v15 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -334,7 +334,8 @@
   <a class="done" href="#v11">v11 関係演算子</a><span class="arr">→</span>
   <a class="done" href="#v12">v12 main</a><span class="arr">→</span>
   <a class="done" href="#v13">v13 #define</a><span class="arr">→</span>
-  <a class="done" href="#v14">v14 KosabaOS</a>
+  <a class="done" href="#v14">v14 KosabaOS</a><span class="arr">→</span>
+  <a class="done" href="#v15">v15 OS で動く iwac</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -598,6 +599,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v12</span>　<code class="inline">int main()</code> の形で、プログラムに「入口」ができた</li>
     <li><span class="ok">✓ v13</span>　単純な <code class="inline">#define</code> で、定数に名前が付けられる</li>
     <li><span class="ok">✓ v14</span>　KosabaOS 向けの ELF を出せるようになり、OS の上で Hello World が動いた</li>
+    <li><span class="ok">✓ v15</span>　iwac 自身が OS の上で動き、OS の中でコンパイルして実行するところまで来た</li>
   </ul>
 </section>
 
@@ -1059,10 +1061,41 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   v3 の決断が、ここで効いています。</p></div>
 </section>
 
+<!-- ================= v15 ================= -->
+<section class="phase" id="v15">
+  <div class="head"><span class="badge b-v4">v15</span><h2>iwac 本体が OS の上で動く — ゴールの形が成立</h2></div>
+  <p class="goal-line">目標：<b>KosabaOS のシェルからコンパイラを実行して Hello World をコンパイルし、実行すること。</b></p>
+  <div class="screen"><small>OS のシェルで…</small>
+    <span class="big">kosaba&gt; run iwac.elf</span> ← コンパイラ自身が OS の上で動く<br>
+    <span class="big">kosaba&gt; run hello.elf</span><br>
+    <span class="big">Hello, World!</span> ← OS の中でコンパイルされたプログラム</div>
+  <p>面白いのは、<b>iwac のソース (iwac.c) には1文字も手を入れていない</b>ことです。
+  iwac が外の世界に頼るのは「ファイルを読み書きする4つの関数」だけ、という
+  設計だったので、移植の仕事はその4つの「相手」を差し替えることに収まりました：</p>
+  <div class="regs">
+    <div class="reg"><span class="rname">入口 (crt)</span><small>OS には引数の仕組みがまだ無いので、決め打ちの argv「iwac --kosaba hello.c」を合成して main を呼ぶ</small></div>
+    <div class="reg"><span class="rname">読み書き (shim)</span><small>open/read/close は OS のシステムコールへ。出力は create/write で hello.elf というファイルへ</small></div>
+  </div>
+  <p>途中、ひとつ発見がありました。現行の OS ではプログラムの置き場所が
+  「読み+実行のみ（書けない）」で、書き込みできるメモリはスタックだけ。
+  手書きの小さなプログラムはそれで済みますが、大きな作業机（静的変数）が
+  要るコンパイラは置けませんでした。この検証では OS のコピー側で
+  コード領域を書き込み可にして確認し、本線の扱いは OS 側と相談中です。</p>
+  <div class="chips">
+    <span class="chip">移植 = 差し替え</span><span class="chip">iwac.c 無変更</span>
+    <span class="chip">OS 上でコンパイル</span><span class="chip">発見: 書けない机</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「外への依存を小さな境目に閉じ込める」設計の値打ちです。ホストの機能への
+  依存を4関数だけに絞ってあったおかげで、プログラム全体の移植が
+  「境目の向こう側を作り直す」作業だけで済みました。境目は、
+  最初に設計するときにこそ効きます。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v14 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v15 時点）</p>
 </footer>
 
 </div>

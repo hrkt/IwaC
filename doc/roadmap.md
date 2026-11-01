@@ -279,3 +279,29 @@ void uart_puts(const char *s)
   ビルドする（4つの外注関数を OS の open/read/close/
   write 相当の syscall へ。write はファイル書き込みが
   要る点が要相談: 現行 syscall に write は無い）
+  → その後 OS 側で create(9)/write(10) が実装され解消
+
+### v15: iwac 本体の OS 移植（済み、2026-11-02）
+
+- iwac.c は無変更。`kosaba/` に3点を追加してリンクを
+  差し替える形にした:
+  - kosaba_crt.S: 入口 _start。OS に argv の仕組みが
+    無いので argv = { "iwac", "--kosaba", "hello.c" } を
+    合成して main を呼び、終了時に exit syscall
+  - kosaba_lib.c: write/open/read/close を syscall で
+    再実装。fd=1 → create/write で hello.elf へ
+    (バッファ付き)、fd=2 → putc のコンソール
+  - kosaba.ld / build-kosaba.sh: 配置とビルド手順
+- 統合検証でゴールの形が成立: OS のシェルで
+  `run iwac.elf` → hello.elf が生成 → `run hello.elf`
+  → Hello, World! → シェルへ復帰
+- 残る前提（OS 側と相談中）: 現行 OS のコード領域は
+  読み+実行のみで、書き込み可能な静的変数を持つ
+  プログラムが動けない（user.ld は .data/.bss をコード
+  領域に置く約束と矛盾）。検証はスクラッチコピーで
+  コード領域を書き込み可にして実施。OS 側で
+  「コード領域を書けるようにするか、データ専用領域＋
+  ローダ対応にするか」が決まれば、iwac 側は kosaba.ld
+  の調整だけで追随できる
+- 将来: OS に argv の仕組みができたら crt の合成を
+  本物の引数に替える（替える場所は crt だけ）

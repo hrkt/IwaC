@@ -3,3 +3,4 @@
 *.bin
 *.o
 serial*.log
+iwac.elf
