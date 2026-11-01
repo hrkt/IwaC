@@ -30,6 +30,7 @@
 #   v10: ファイル入力 (iwac hello.c の形、改行・// コメント)
 #   v11: 関係演算子 < > <= >= (優先順位は C の段)
 #   v12: main の形 (入口は main、混ぜ書きは禁止)
+#   v13: 単純な #define (単語単位の置き換え、文字列・コメントは対象外)
 set -e
 cd "$(dirname "$0")"
 
@@ -334,5 +335,25 @@ check_tail "$TMP/v11b.bin" 'ABC' "v11: > <= >="
 
 "$IWAC" 'putc(48 + (1 < 2 == 1));' > "$TMP/v11c.bin"
 check_run "$TMP/v11c.bin" 1 "v11: 優先順位 (1 < 2 == 1 は (1<2)==1)"
+
+# --- v13: 単純な #define ---
+cat > "$TMP/def.c" <<'EOF'
+#define UART_LSR 0x10000005
+#define THRE 32
+void uart_putc(char c) { while ((*UART_LSR & THRE) == 0) { } *0x10000000 = c; }
+uart_putc(66);
+EOF
+"$IWAC" "$TMP/def.c" > "$TMP/v13a.bin"
+check_run "$TMP/v13a.bin" B "v13: #define で定数に名前"
+
+"$IWAC" '#define ABC 90
+putc(ABC + 1);' > "$TMP/v13b.bin"
+check_run "$TMP/v13b.bin" '[' "v13: 式の中での展開"
+
+check_error '#define A 65
+#define A 66
+putc(A);' "#define の再定義"
+check_error '#include "x.h"
+putc(65);' "#include は対象外"
 
 echo "PASS"

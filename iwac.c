@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v12)
+/* iwac -- Cコンパイラのサブセット (v13)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v12 の言語 (文法) ===
+ * === v13 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -181,6 +181,15 @@
  * main が無ければ従来の形のままで、出力も変わらない。
  * 戻り値 (int main の int) は今までどおり読み捨てで、
  * 終了コードのような仕組みはまだ無い。
+ *
+ * v13 では単純な #define を入れた (前処理)。行頭の
+ * "#define 名前 置き換え" を読み、以降の行の名前を
+ * 単語単位で置き換えてから parse する。文字列と
+ * コメントの中は置き換えず、置き換えた結果は再走査
+ * しない (入れ子は展開しない)。再定義はエラー。
+ * #include や引数付きマクロは対象外のまま。なお
+ * iwac 自身のソースは今もプリプロセッサ無しで書く
+ * (これはコンパイルされる側のプログラムの機能)。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -2350,6 +2359,201 @@ static int load_file(char *path) {
 }
 
 /* ================================================================
+ * 前処理 (v13): 単純な #define だけ
+ *
+ * 行頭 (空白の後ろでもよい) の「#define 名前 置き換え」の行を
+ * 読み取り、以降の文に出てくる「名前」を単語単位で置き換えた
+ * 新しいソースを作る。parse は展開後のソースだけを見る。
+ * 決め事 (計画で「実装するときに決める」と置いた点):
+ *   - 置き換えは単語 (識別子) 単位。文字列の中と // コメントの
+ *     中は置き換えない (C と同じ)
+ *   - 置き換えた結果はもう一度走査しない (入れ子は展開しない)
+ *   - 再定義はエラー。define は最大16個、置き換えは127文字まで
+ *   - # で始まる行は #define 以外エラー (#include 等は対象外)
+ * なお iwac 自身のソースは今もプリプロセッサ無しのままで、
+ * これは「コンパイルされる側のプログラム」のための機能。
+ * ================================================================ */
+
+static char def_names[16][32];
+static int def_name_len[16];
+static char def_text[16][128];
+static int def_text_len[16];
+static int ndef;
+
+static char exp_buf[131072];
+static int exp_len;
+static int exp_failed;
+
+/* 名前 (場所と長さで渡す) の define があればその番号、無ければ -1 */
+static int find_define(char *name, int len) {
+    for (int i = 0; i < ndef; i++) {
+        if (def_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && def_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
+
+/* 展開先へ1文字書く (あふれたら印だけ付ける) */
+static void exp_ch(char c) {
+    if (exp_len >= 131071) {
+        exp_failed = 1;
+        return;
+    }
+    exp_buf[exp_len++] = c;
+}
+
+static void exp_str(char *s, int len) {
+    for (int i = 0; i < len; i++)
+        exp_ch(s[i]);
+}
+
+/* #define を展開し、結果を exp_buf に置く。成功したら 1 */
+static int expand_defines(char *src) {
+    ndef = 0;
+    exp_len = 0;
+    exp_failed = 0;
+    int i = 0;
+    int sol = 1;  /* 行頭 (その行にまだ空白しか無い) か */
+    while (src[i] != '\0') {
+        if (sol) {
+            /* 行頭の空白の先が # なら指令行として処理する */
+            int j = i;
+            while (src[j] == ' ' || src[j] == '\t')
+                j++;
+            if (src[j] == '#') {
+                j++;
+                while (src[j] == ' ' || src[j] == '\t')
+                    j++;
+                char *kw = "define";
+                int ok = 1;
+                for (int k = 0; k < 6; k++)
+                    if (src[j + k] != kw[k])
+                        ok = 0;
+                if (ok && is_ident_char(src[j + 6]))
+                    ok = 0;
+                if (!ok) {
+                    errmsg = "# で始まる行は #define だけが使えます";
+                    return 0;
+                }
+                j += 6;
+                while (src[j] == ' ' || src[j] == '\t')
+                    j++;
+                if (!is_ident_start(src[j])) {
+                    errmsg = "#define には名前が必要です";
+                    return 0;
+                }
+                int ns = j;
+                while (is_ident_char(src[j]))
+                    j++;
+                int nlen = j - ns;
+                if (nlen > 31) {
+                    errmsg = "#define の名前が長すぎます";
+                    return 0;
+                }
+                if (find_define(src + ns, nlen) >= 0) {
+                    errmsg = "#define の名前が重なっています";
+                    return 0;
+                }
+                if (ndef >= 16) {
+                    errmsg = "#define は16個までです";
+                    return 0;
+                }
+                while (src[j] == ' ' || src[j] == '\t')
+                    j++;
+                int ts = j;
+                while (src[j] != '\0' && src[j] != '\n')
+                    j++;
+                int te = j;
+                while (te > ts && (src[te - 1] == ' ' ||
+                                   src[te - 1] == '\t' ||
+                                   src[te - 1] == '\r'))
+                    te--;
+                int tlen = te - ts;
+                if (tlen > 127) {
+                    errmsg = "#define の置き換えが長すぎます";
+                    return 0;
+                }
+                int d = ndef++;
+                for (int k = 0; k < nlen; k++)
+                    def_names[d][k] = src[ns + k];
+                def_name_len[d] = nlen;
+                for (int k = 0; k < tlen; k++)
+                    def_text[d][k] = src[ts + k];
+                def_text_len[d] = tlen;
+                i = j;  /* 行末 (改行か終端) の位置へ */
+                if (src[i] == '\n') {
+                    exp_ch('\n');
+                    i++;
+                }
+                sol = 1;
+                continue;
+            }
+        }
+        /* 通常の文字: 文字列とコメントを守りながら写す */
+        char c = src[i];
+        if (c == '"') {
+            /* 文字列の中は置き換えない */
+            exp_ch(c);
+            i++;
+            while (src[i] != '\0' && src[i] != '"') {
+                if (src[i] == '\\' && src[i + 1] != '\0') {
+                    exp_ch(src[i]);
+                    i++;
+                }
+                exp_ch(src[i]);
+                i++;
+            }
+            if (src[i] == '"') {
+                exp_ch('"');
+                i++;
+            }
+            sol = 0;
+            continue;
+        }
+        if (c == '/' && src[i + 1] == '/') {
+            /* コメントの中も置き換えない */
+            while (src[i] != '\0' && src[i] != '\n') {
+                exp_ch(src[i]);
+                i++;
+            }
+            sol = 0;
+            continue;
+        }
+        if (is_ident_start(c)) {
+            /* 単語: define 済みなら置き換える */
+            int s = i;
+            while (is_ident_char(src[i]))
+                i++;
+            int len = i - s;
+            int d = find_define(src + s, len);
+            if (d >= 0)
+                exp_str(def_text[d], def_text_len[d]);
+            else
+                exp_str(src + s, len);
+            sol = 0;
+            continue;
+        }
+        exp_ch(c);
+        i++;
+        if (c == '\n')
+            sol = 1;
+        else if (c != ' ' && c != '\t' && c != '\r')
+            sol = 0;
+    }
+    if (exp_failed) {
+        errmsg = "展開後のソースが大きすぎます";
+        return 0;
+    }
+    exp_buf[exp_len] = '\0';
+    return 1;
+}
+
+/* ================================================================
  * main: 層を順に呼ぶだけ
  *   parse (失敗したら何も出さない) → gen (同) → write
  * ================================================================ */
@@ -2379,6 +2583,15 @@ int main(int argc, char **argv) {
     }
     if (loaded == 1)
         src = src_buf;
+
+    /* 前処理: #define を展開してから parse に渡す (v13) */
+    if (!expand_defines(src)) {
+        print_str(2, "iwac: ");
+        print_str(2, errmsg);
+        print_str(2, "\n");
+        return 1;
+    }
+    src = exp_buf;
 
     if (!parse_program(src)) {
         print_str(2, "iwac: ");

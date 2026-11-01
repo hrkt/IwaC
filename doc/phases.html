@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v12 まで</title>
+<title>IwaC の歩み — v0 から v13 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v12 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v13 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -332,7 +332,8 @@
   <a class="done" href="#v9">v9 配列</a><span class="arr">→</span>
   <a class="done" href="#v10">v10 ファイル入力</a><span class="arr">→</span>
   <a class="done" href="#v11">v11 関係演算子</a><span class="arr">→</span>
-  <a class="done" href="#v12">v12 main</a>
+  <a class="done" href="#v12">v12 main</a><span class="arr">→</span>
+  <a class="done" href="#v13">v13 #define</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -594,6 +595,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v10</span>　<code class="inline">iwac hello.c</code> の形で、ファイルからコンパイルできる</li>
     <li><span class="ok">✓ v11</span>　<code class="inline">&lt;</code> <code class="inline">&gt;</code> などの関係演算子で、条件が自然に書ける</li>
     <li><span class="ok">✓ v12</span>　<code class="inline">int main()</code> の形で、プログラムに「入口」ができた</li>
+    <li><span class="ok">✓ v13</span>　単純な <code class="inline">#define</code> で、定数に名前が付けられる</li>
   </ul>
 </section>
 
@@ -993,10 +995,40 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   新しい機能がこうして小さな組み合わせで実現できるようになります。</p></div>
 </section>
 
+<!-- ================= v13 ================= -->
+<section class="phase" id="v13">
+  <div class="head"><span class="badge b-v4">v13</span><h2>#define — 定数に名前を付ける</h2></div>
+  <p class="goal-line">目標：<b><code class="inline">0x10000005</code> のような数字の羅列を、名前で書けること。</b></p>
+<pre class="code"><span class="c">#define UART_LSR 0x10000005</span>
+<span class="c">#define THRE 32</span>
+<span class="k">void</span> uart_putc(<span class="k">char</span> c) {
+    <span class="k">while</span> ((*UART_LSR &amp; THRE) == 0) { }
+    *0x10000000 = c;
+}</pre>
+  <p>コンパイルの前に「前処理」という小さな係が走って、
+  <code class="inline">UART_LSR</code> という単語を <code class="inline">0x10000005</code> に書き換えてから、
+  本体のコンパイラへ渡します。書き換えは<b>単語単位</b>で、
+  文字列の中とコメントの中は書き換えません（本物の C と同じ約束）。</p>
+  <p>欲張らなかった点も大事です：<b>やるのはこの単純な置き換えだけ</b>。
+  <code class="inline">#include</code>（他のファイルの取り込み）や引数付きマクロは対象外のまま。
+  置き換えた結果をもう一度書き換えに行く「入れ子」もしない、と同じ名前の再定義はエラー、
+  という決め事にしました。なお iwac のコンパイラ自身のソースは、
+  この機能を使わず今までどおりプリプロセッサ無しで書いています
+  （これは「コンパイルされる側のプログラム」のための機能、という整理です）。</p>
+  <div class="chips">
+    <span class="chip">#define 名前 置き換え</span><span class="chip">単語単位</span><span class="chip">文字列・コメントは対象外</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  プリプロセッサは「コンパイラの前の、小さな別のプログラム」でした。
+  本体の3層（parse → gen → encode）の手前に「0層目」が1つ増えた形で、
+  本体には一切手を入れずに済んでいます。層を分けておく設計は、
+  こういう場所でも効きます。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v12 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v13 時点）</p>
 </footer>
 
 </div>
