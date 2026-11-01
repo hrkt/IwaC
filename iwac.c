@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v8)
+/* iwac -- Cコンパイラのサブセット (v9)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v8 の言語 (文法) ===
+ * === v9 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -49,6 +49,8 @@
  *              として扱い、型による区別はまだしない)
  *   param   = type ident          (引数は今は1つまで)
  *   stmt    = ident "=" expr ";"               (代入文)
+ *           | type ident "[" number "]" ";"    (配列の宣言)
+ *           | ident "[" expr "]" "=" expr ";"  (配列の要素へ書く)
  *           | "*" (ident | number) "=" expr ";" (メモリへ書く文)
  *           | "putc" "(" expr ")" ";"          (出力文。組み込み)
  *           | "while" "(" expr ")" "{" { stmt } "}"  (繰り返し)
@@ -60,6 +62,7 @@
  *   add     = term { ("+" | "-") term }   == !=、& の段を
  *   term    = primary { ("*" | "/") primary }  重ねてある)
  *   primary = number | ident        (数、または変数)
+ *           | ident "[" expr "]"    (配列の要素を読む)
  *           | string                (文字列。値はその住所)
  *           | "*" primary           (ポインタの先を読む。
  *                                  相手が数なら絶対アドレス読み)
@@ -139,6 +142,17 @@
  * if 文1つ。生成は while と同じ道具立て: 条件が 0 なら
  * beq で else (または末尾) へ飛び、else がある場合は
  * 本体の末尾に jal を置いて else を飛び越える。
+ *
+ * v9 では配列を入れた。宣言は char buf[16]; の形で、
+ * 要素は1バイト (型の単語は読み捨てるので、どの型で
+ * 書いても1バイト要素の配列になる)。置き場所は変数の
+ * レジスタではなくメモリで、バイナリの「コード＋文字列
+ * の後ろ」の静的な領域にまとめて確保し、住所は文字列と
+ * 同じ2パス生成で確定させる。配列の名前そのものの値は
+ * 先頭アドレスなので、関数へ渡したりポインタ変数に
+ * 入れたりできる。要素の読み書きは「先頭＋添字」の
+ * 住所計算で、読みは lbu、書きは sb。配列はプログラム
+ * 全体で共有の1つだけ (スコープも関数の局所配列も無い)。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -257,6 +271,17 @@ static int NODE_CALL = 9;   /* 呼び出し文。node_val = 関数番号、
 static int NODE_EQ = 10;    /* 比較 (==)。結果は 1 か 0 */
 static int NODE_NE = 11;    /* 比較 (!=)。結果は 1 か 0 */
 static int NODE_AND = 12;   /* ビット演算 (&) */
+static int NODE_ARRAY = 17; /* 配列の名前そのもの (葉)。
+                             * 「値」は配列の先頭アドレス。
+                             * node_val = 配列番号 */
+static int NODE_INDEX = 18; /* 配列の要素読み。node_val = 配列番号、
+                             * node_rhs = 添字の式 (葉扱いしない) */
+static int NODE_DECL = 19;  /* 配列の宣言文。node_val = 配列番号。
+                             * 実行時のコードは出ない (置き場所の
+                             * 予約だけが意味) */
+static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
+                             * node_val = 配列番号、node_lhs = 添字の式、
+                             * node_rhs = 書く値の式 */
 static int NODE_IF = 16;    /* 条件分岐文。node_lhs = 条件の式、
                              * node_rhs = 成り立つときの文の並び、
                              * node_val = else の文の並び (無ければ -1。
@@ -299,9 +324,18 @@ static int find_var(char *name, int len) {
     return -1;
 }
 
+/* 配列の名簿は下の方にある (名前の重なりを確かめるため
+ * 先に宣言だけ置く) */
+static int find_array(char *name, int len);
+
 /* 名前を名簿に登録し、番号を返す。既にある名前なら同じ番号を
- * 返す (再代入は同じ変数への代入になる)。失敗したら -1 */
+ * 返す (再代入は同じ変数への代入になる)。配列と同じ名前は
+ * 使えない。失敗したら -1 */
 static int define_var(char *name, int len) {
+    if (find_array(name, len) >= 0) {
+        errmsg = "その名前は配列に使われています";
+        return -1;
+    }
     int found = find_var(name, len);
     if (found >= 0)
         return found;
@@ -343,6 +377,62 @@ static int func_param_var[16];
 static int func_body[16];
 static int func_entry[16];
 static int nfunc;
+
+/* --- 配列の名簿 ---
+ * 配列は変数 (レジスタ) と違い、メモリに置き場所が要る。
+ * 置き場所はバイナリの「コード＋文字列の後ろ」にまとめて
+ * 確保し (静的な領域)、住所は文字列と同じく2パス生成で
+ * 確定させる。配列 i 番について:
+ *   arr_size[i] : 要素数 (= バイト数。要は1バイト配列)
+ *   arr_off[i]  : 配列領域の中での位置
+ *   arr_addr[i] : 確定した先頭アドレス (第2層が決める)
+ * 配列は最大8個、合計 4096 バイトまで */
+static char arr_names[8][32];
+static int arr_name_len[8];
+static int arr_size[8];
+static int arr_off[8];
+static unsigned int arr_addr[8];
+static int narr;      /* 登録された配列の数 */
+static int arr_used;  /* 配列領域の使用済みバイト数 */
+
+/* 名前 (場所と長さで渡す) の配列があればその番号、無ければ -1 */
+static int find_array(char *name, int len) {
+    for (int i = 0; i < narr; i++) {
+        if (arr_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && arr_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
+
+/* 配列を名簿に登録し、番号を返す。名前は変数とも配列とも
+ * 重なってはいけない。失敗したら -1 */
+static int define_array(char *name, int len, int size) {
+    if (find_array(name, len) >= 0 || find_var(name, len) >= 0) {
+        errmsg = "その名前は既に使われています";
+        return -1;
+    }
+    if (narr >= 8) {
+        errmsg = "配列は8個までです";
+        return -1;
+    }
+    if (arr_used + size > 4096) {
+        errmsg = "配列の合計が大きすぎます (4096バイトまで)";
+        return -1;
+    }
+    int i = narr++;
+    for (int j = 0; j < len; j++)
+        arr_names[i][j] = name[j];
+    arr_name_len[i] = len;
+    arr_size[i] = size;
+    arr_off[i] = arr_used;
+    arr_used += size;
+    return i;
+}
 
 /* 名前 (場所と長さで渡す) の関数があればその番号、無ければ -1 */
 static int find_func(char *name, int len) {
@@ -603,6 +693,24 @@ static int parse_primary_node(void) {
     if (is_ident_start(*cur)) {
         if (!parse_ident())
             return -1;
+        /* 配列の名前なら、要素読みか「先頭アドレス」か */
+        int arr = find_array(ident_buf, ident_len);
+        if (arr >= 0) {
+            skip_spaces();
+            if (*cur == '[') {
+                /* 要素読み: 名前 [ 添字の式 ] */
+                cur++;
+                int idx = parse_expr();
+                if (idx < 0)
+                    return -1;
+                if (!expect_char(']', "添字の後には ] が必要です"))
+                    return -1;
+                return new_node(NODE_INDEX, arr, 0, idx);
+            }
+            /* 添字が無ければ、配列の先頭アドレスが値になる
+             * (関数に渡したり、ポインタ変数に入れたり) */
+            return new_node(NODE_ARRAY, arr, 0, 0);
+        }
         int var = find_var(ident_buf, ident_len);
         if (var < 0) {
             errmsg = "代入されていない変数が使われました";
@@ -932,13 +1040,35 @@ static int parse_stmt_list(int in_brace) {
             int is_type = ident_is("void") || ident_is("char") ||
                           ident_is("int") || ident_is("const");
             if (is_type) {
-                /* 型で始まるのは関数定義。置けるのは
-                 * プログラムの頭だけ (関数の中には書けない) */
+                /* 型で始まるのは、関数定義か配列の宣言。
+                 * 名前の後ろが '[' なら配列の宣言で、こちらは
+                 * 文としてどこにでも置ける。'(' なら関数定義で、
+                 * 置けるのはプログラムの頭だけ */
+                cur = save;
+                int is_array_decl = 0;
+                if (parse_type()) {
+                    skip_spaces();
+                    if (parse_ident()) {
+                        skip_spaces();
+                        is_array_decl = (*cur == '[');
+                    }
+                }
+                cur = save;
+                if (is_array_decl) {
+                    int stmt = parse_stmt();
+                    if (stmt < 0)
+                        return -2;
+                    if (head < 0)
+                        head = stmt;
+                    else
+                        node_next[tail] = stmt;
+                    tail = stmt;
+                    continue;
+                }
                 if (in_brace) {
                     errmsg = "関数定義はプログラムの頭にだけ書けます";
                     return -2;
                 }
-                cur = save;
                 if (!parse_funcdef())
                     return -2;
                 continue;
@@ -946,7 +1076,31 @@ static int parse_stmt_list(int in_brace) {
             skip_spaces();
             int is_assign = (*cur == '=' && cur[1] != '=');
             int is_call = (*cur == '(');
-            if (is_keyword || is_assign || is_call) {
+            int is_index_store = 0;
+            if (*cur == '[') {
+                /* 名前 [ ... ] の後ろに '=' があれば、配列の
+                 * 要素への書き込み文 (式の要素読みと見分ける)。
+                 * ']' までを数えて先読みするだけ */
+                int depth = 0;
+                char *p = cur;
+                while (*p != '\0') {
+                    if (*p == '[')
+                        depth++;
+                    else if (*p == ']') {
+                        depth--;
+                        if (depth == 0) {
+                            p++;
+                            break;
+                        }
+                    }
+                    p++;
+                }
+                while (*p == ' ' || *p == '\t')
+                    p++;
+                is_index_store = (depth == 0 && *p == '=' &&
+                                  p[1] != '=');
+            }
+            if (is_keyword || is_assign || is_call || is_index_store) {
                 cur = save;  /* parse_stmt に頭から読ませる */
                 int stmt = parse_stmt();
                 if (stmt < 0)
@@ -979,10 +1133,60 @@ static int parse_stmt_list(int in_brace) {
     }
 }
 
+/* 配列の宣言を読む: 型 名前 [ 大きさ ] ;
+ * 要素は1バイト (char の配列と同じ扱い。型の単語自体は
+ * 今までどおり読み捨てる)。置き場所は名簿に予約するだけで、
+ * 実行時のコードは出ない。成功したらノード番号、失敗は -1 */
+static int parse_array_decl(void) {
+    if (!parse_type()) {
+        errmsg = "配列の宣言は 型 名前 [ 大きさ ] ; の形です";
+        return -1;
+    }
+    skip_spaces();
+    if (!parse_ident()) {
+        errmsg = "配列の名前が必要です";
+        return -1;
+    }
+    char name_buf[32];
+    int name_len = ident_len;
+    for (int i = 0; i < name_len; i++)
+        name_buf[i] = ident_buf[i];
+    if (!expect_char('[', "配列は 名前 [ 大きさ ] の形で書きます"))
+        return -1;
+    skip_spaces();
+    int size = parse_number_value();
+    if (size < 0)
+        return -1;
+    if (size < 1 || size > 1024) {
+        errmsg = "配列の大きさは 1 から 1024 までです";
+        return -1;
+    }
+    if (!expect_char(']', "配列の大きさの後には ] が必要です"))
+        return -1;
+    if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
+        return -1;
+    int a = define_array(name_buf, name_len, size);
+    if (a < 0)
+        return -1;
+    return new_node(NODE_DECL, a, 0, 0);
+}
+
 /* 文を1つ読み、その AST ノードを返す。失敗したら -1。
  * 呼び出し時点でカーソルは文の頭にあること */
 static int parse_stmt(void) {
     skip_spaces();
+    if (is_ident_start(*cur)) {
+        /* 型で始まる文は配列の宣言 (関数定義は頭専用で、
+         * parse_stmt_list がそちらへ振り分ける) */
+        char *tsave = cur;
+        if (parse_ident() &&
+            (ident_is("void") || ident_is("char") ||
+             ident_is("int") || ident_is("const"))) {
+            cur = tsave;
+            return parse_array_decl();
+        }
+        cur = tsave;
+    }
     if (*cur == '*') {
         /* メモリ書き込み文: * 先 = 式 ;
          * 先は変数 (ポインタ) か数 (絶対アドレス)。
@@ -1090,10 +1294,34 @@ static int parse_stmt(void) {
     for (int i = 0; i < name_len; i++)
         name_buf[i] = ident_buf[i];
 
+    /* 名前の次が '[' なら、配列の要素への書き込み文:
+     * 名前 [ 添字の式 ] = 式 ; */
+    skip_spaces();
+    if (*cur == '[') {
+        int a = find_array(name_buf, name_len);
+        if (a < 0) {
+            errmsg = "添字 [ ] を付けられるのは配列だけです";
+            return -1;
+        }
+        cur++;
+        int idx = parse_expr();
+        if (idx < 0)
+            return -1;
+        if (!expect_char(']', "添字の後には ] が必要です"))
+            return -1;
+        if (!expect_char('=', "配列への書き込みは 名前[添字] = 式 ; の形です"))
+            return -1;
+        int val = parse_expr();
+        if (val < 0)
+            return -1;
+        if (!expect_char(';', "書き込み文の終わりには ; が必要です"))
+            return -1;
+        return new_node(NODE_INDEX_STORE, a, idx, val);
+    }
+
     /* 名前の次が '(' なら、関数の呼び出し文:
      * 名前 ( [式] ) ; 。関数は定義済みのものだけ呼べる
      * (「使う前に定義」の約束は関数も同じ) */
-    skip_spaces();
     if (*cur == '(') {
         int f = find_func(name_buf, name_len);
         if (f < 0) {
@@ -1145,6 +1373,8 @@ static int parse_program(char *program) {
     nstr = 0;
     str_used = 0;
     nfunc = 0;
+    narr = 0;
+    arr_used = 0;
     prog_stmts = -1;
     prog_final = -1;
     prog_has_final = 0;
@@ -1254,11 +1484,13 @@ static int var_reg(int var) {
  * 使うので、葉としては扱えない (gen_expr で別に処理する) */
 static int is_leaf(int node) {
     int k = node_kind[node];
-    if (k == NODE_NUM || k == NODE_VAR || k == NODE_STR)
+    if (k == NODE_NUM || k == NODE_VAR || k == NODE_STR ||
+        k == NODE_ARRAY)
         return 1;
     if (k == NODE_DEREF) {
         int ok = node_kind[node_lhs[node]];
-        return ok == NODE_NUM || ok == NODE_VAR || ok == NODE_STR;
+        return ok == NODE_NUM || ok == NODE_VAR || ok == NODE_STR ||
+               ok == NODE_ARRAY;
     }
     return 0;
 }
@@ -1310,6 +1542,9 @@ static void gen_load_leaf(int reg, int leaf) {
         asm_push(OP_ADDI, reg, var_reg(node_val[leaf]), 0, 0);
     else if (k == NODE_STR)
         gen_load_addr(reg, str_addr[node_val[leaf]]);
+    else if (k == NODE_ARRAY)
+        /* 配列の名前の「値」は先頭アドレス */
+        gen_load_addr(reg, arr_addr[node_val[leaf]]);
     else { /* NODE_DEREF: lhs が住所を表すノード */
         int operand = node_lhs[leaf];
         if (node_kind[operand] == NODE_VAR) {
@@ -1321,6 +1556,8 @@ static void gen_load_leaf(int reg, int leaf) {
              * ようなデバイスの住所でも壊れない */
             if (node_kind[operand] == NODE_NUM)
                 gen_load_addr(reg, (unsigned int)node_val[operand]);
+            else if (node_kind[operand] == NODE_ARRAY)
+                gen_load_addr(reg, arr_addr[node_val[operand]]);
             else /* NODE_STR: 文字列の住所から読む */
                 gen_load_addr(reg, str_addr[node_val[operand]]);
             asm_push(OP_LBU, reg, reg, 0, 0);
@@ -1349,6 +1586,17 @@ static int gen_expr(int node) {
          * その住所から1バイト読む */
         if (!gen_expr(node_lhs[node]))
             return 0;
+        asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
+        return 1;
+    }
+    if (node_kind[node] == NODE_INDEX) {
+        /* 配列の要素読み: 添字を t1 で計算し、先頭アドレス
+         * (t2) と足して、その場所から1バイト読む。
+         * 要素は1バイトなので、足し算はそのまま使える */
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        gen_load_addr(REG_T2, arr_addr[node_val[node]]);
+        asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
         asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
         return 1;
     }
@@ -1408,6 +1656,36 @@ static int gen_expr(int node) {
  * 使うのと同じことを、番号と書換えでやっている */
 static int gen_stmt(int node) {
     int kind = node_kind[node];
+    if (kind == NODE_DECL) {
+        /* 配列の宣言: 置き場所はコンパイラが静的に確保する
+         * だけなので、実行時のコードは何も出ない */
+        return 1;
+    }
+    if (kind == NODE_INDEX_STORE) {
+        /* 配列の要素への書き込み: 先頭アドレス + 添字 の
+         * 場所へ、値の下1バイトを書く (sb)。
+         * 書く値が葉なら「住所を t2 → 値を t1 → sb」。
+         * 値も式なら、住所をスタックへ退避してから値を
+         * 計算する (値の計算が t2 を使うため) */
+        int a = node_val[node];
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        gen_load_addr(REG_T2, arr_addr[a]);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        if (is_leaf(node_rhs[node])) {
+            gen_load_leaf(REG_T1, node_rhs[node]);
+            asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+            return 1;
+        }
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+        return 1;
+    }
     if (kind == NODE_ASSIGN) {
         if (!gen_expr(node_lhs[node]))
             return 0;
@@ -1562,6 +1840,8 @@ static int expr_needs_stack(int node) {
     }
     if (k == NODE_DEREF)
         return expr_needs_stack(node_lhs[node]);
+    if (k == NODE_INDEX)
+        return expr_needs_stack(node_rhs[node]);
     return 0;
 }
 
@@ -1584,6 +1864,11 @@ static int stmt_needs_stack(int node) {
                expr_needs_stack(node_lhs[node]);
     if (k == NODE_STORE)
         return expr_needs_stack(node_rhs[node]);
+    if (k == NODE_INDEX_STORE)
+        /* 値が葉でない書き込みは、住所の退避にスタックを使う */
+        return expr_needs_stack(node_lhs[node]) ||
+               !is_leaf(node_rhs[node]) ||
+               expr_needs_stack(node_rhs[node]);
     return 0;
 }
 
@@ -1652,16 +1937,25 @@ static int gen_program(void) {
     for (int f = 0; f < nfunc && !stack_needed; f++)
         stack_needed = list_needs_stack(func_body[f]);
     stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */
+    for (int i = 0; i < narr; i++)
+        arr_addr[i] = LOAD_BASE;  /* 同上 (配列の住所も仮置き) */
     if (!gen_all())
         return 0;
     code_insts = nasm;
     for (int i = 0; i < nstr; i++)
         str_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
                       (unsigned int)str_off[i];
-    /* スタックは「コード + 文字列」の後ろ 4KB 先から下へ
-     * 伸ばす。16 バイト単位に切り上げておく (置き場所の約束) */
+    /* 配列の領域は文字列の後ろに置く */
+    for (int i = 0; i < narr; i++)
+        arr_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
+                      (unsigned int)str_used +
+                      (unsigned int)arr_off[i];
+    /* スタックは「コード + 文字列 + 配列」の後ろ 4KB 先から
+     * 下へ伸ばす。16 バイト単位に切り上げておく
+     * (置き場所の約束) */
     stack_top_addr = LOAD_BASE + (unsigned int)nasm * 4u +
-                     (unsigned int)str_used + 4096u;
+                     (unsigned int)str_used +
+                     (unsigned int)arr_used + 4096u;
     stack_top_addr = (stack_top_addr + 15u) & ~15u;
     if (!gen_all())
         return 0;

@@ -26,6 +26,7 @@
 #   v7: 優先順位を C に合わせる (乗除が先、== が & より先)、
 #       かっこ、両側が式になる計算 (スタック評価)
 #   v8: if / else / else if (while の中や関数の中でも)
+#   v9: 配列 (宣言・要素の読み書き・先頭アドレス・関数へ渡す)
 set -e
 cd "$(dirname "$0")"
 
@@ -252,5 +253,25 @@ check_tail "$TMP/v8e.bin" 'ab' "v8: 関数の中の if"
 
 check_error 'if (1) putc(65);' "if の本体に { } が無い"
 check_error 'if (1) { putc(65);' "if の本体が閉じていない"
+
+# --- v9: 配列 ---
+"$IWAC" 'char b[4]; b[0] = 65; b[1] = 66; putc(b[0]); putc(b[1]);' > "$TMP/v9a.bin"
+check_tail "$TMP/v9a.bin" 'AB' "v9: 配列の要素の読み書き"
+
+"$IWAC" 'char b[4]; i = 1; b[i] = 67; b[i + 1] = 68; putc(b[1]); putc(b[2]);' > "$TMP/v9b.bin"
+check_tail "$TMP/v9b.bin" 'CD' "v9: 計算した添字"
+
+"$IWAC" 'char b[4]; b[0] = 40 + 25; putc(b[0]);' > "$TMP/v9c.bin"
+check_tail "$TMP/v9c.bin" 'A' "v9: 書く値が式の書き込み"
+
+"$IWAC" 'char b[4]; p = b; *p = 69; putc(b[0]);' > "$TMP/v9d.bin"
+check_tail "$TMP/v9d.bin" 'E' "v9: 配列の先頭アドレスをポインタへ"
+
+"$IWAC" 'void uart_puts(char *s) { while (*s != 0) { putc(*s); s = s + 1; } } char buf[8]; buf[0] = 72; buf[1] = 105; buf[2] = 0; uart_puts(buf);' > "$TMP/v9e.bin"
+check_tail "$TMP/v9e.bin" 'Hi' "v9: 配列を関数へ渡す"
+
+check_error 'char b[0];' "配列の大きさ 0"
+check_error 'char b[2]; char b[3];' "配列の二重宣言"
+check_error 'c[0] = 65;' "宣言していない配列への書き込み"
 
 echo "PASS"

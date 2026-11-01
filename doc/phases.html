@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v8 まで</title>
+<title>IwaC の歩み — v0 から v9 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -277,7 +277,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v8 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v9 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -317,7 +317,8 @@
   <a class="done" href="#v5">v5 関数</a><span class="arr">→</span>
   <a class="done" href="#v6">v6 putc本体</a><span class="arr">→</span>
   <a class="done" href="#v7">v7 優先順位</a><span class="arr">→</span>
-  <a class="done" href="#v8">v8 if/else</a>
+  <a class="done" href="#v8">v8 if/else</a><span class="arr">→</span>
+  <a class="done" href="#v9">v9 配列</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -575,6 +576,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v6</span>　<code class="inline">uart_putc</code> の本体（送信待ちのポーリング）まで本物のコードで書ける → <b>print loop は端から端まで自前のコードに</b></li>
     <li><span class="ok">✓ v7</span>　演算子の優先順位が C と同じ順に。かっこと掛け算・割り算も使える</li>
     <li><span class="ok">✓ v8</span>　<code class="inline">if</code> / <code class="inline">else</code> で、条件で道を選べる</li>
+    <li><span class="ok">✓ v9</span>　配列で、データを並べて持てる</li>
   </ul>
 </section>
 
@@ -786,6 +788,38 @@ uart_puts(msg);</pre>
   while が「戻る分かれ道」なら、if は「行きの分かれ道」です。
   道具が揃うと、新しい文は既存の部品の組み合わせで作れるようになります。</p></div>
 
+</section>
+
+<!-- ================= v9 ================= -->
+<section class="phase" id="v9">
+  <div class="head"><span class="badge b-v4">v9</span><h2>配列 — データを並べて持つ</h2></div>
+  <p class="goal-line">目標：<b>値を1つずつでなく、並べて持てるようにすること。</b></p>
+<pre class="code"><span class="k">char</span> buf[8];
+buf[0] = 72;  buf[1] = 105;  buf[2] = 0;
+uart_puts(buf);</pre>
+  <div class="screen"><small>QEMU で実行すると…</small><span class="big">Hi</span> ← 配列に組んだ文字列を、関数へ渡して表示！</div>
+
+  <h3 class="mini">変数と配列の住みかの違い</h3>
+  <div class="regs">
+    <div class="reg var"><span class="rname">変数</span><small>レジスタの中（最大4個、速いけれど少しだけ）</small></div>
+    <div class="reg" style="border-color:#6b4fa1; background:#efeaf7;"><span class="rname">配列</span><small>メモリの中（バイナリの後ろの静かな領域。たくさん置ける）</small></div>
+  </div>
+  <p>要素の読み書きは「先頭の住所 ＋ 添字」の計算です（要素は1バイトなので、そのまま足せます）。
+  そして C と同じく、<b>配列の名前そのものの値は「先頭の住所」</b>。
+  だから文字列リテラルと同じように、関数へ渡したりポインタ変数に入れたりできます。</p>
+  <div class="screen"><small>他の実行結果</small>
+    <span class="big">CD</span>（計算した添字 <code class="inline">b[i + 1]</code>）　
+    <span class="big">E</span>（<code class="inline">p = b; *p = 69;</code> とポインタ経由で書く）</div>
+
+  <div class="chips">
+    <span class="chip">宣言 char buf[16];</span><span class="chip">要素は1バイト</span>
+    <span class="chip">名前 = 先頭アドレス</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  配列とは「住所の算数」でできたデータ構造です。文字列も、実は
+  終わりの印（0）付きの文字の配列でした。v3 の文字列と v9 の配列は、
+  同じ仕組みの表と裏だったのです。</p></div>
+
   <h3 class="mini">おまけ：バイナリの大きさの育ち方</h3>
   <div class="sizebar"><span class="lbl">v0 の「A」</span><div class="bar" style="width:64px"></div><span class="num">16 バイト（4命令）</span></div>
   <div class="sizebar"><span class="lbl">v1 の「65+1」</span><div class="bar" style="width:96px"></div><span class="num">24 バイト</span></div>
@@ -795,13 +829,14 @@ uart_puts(msg);</pre>
   <div class="sizebar"><span class="lbl">v6 の putc+puts</span><div class="bar" style="width:560px"></div><span class="num">203 バイト（ポーリング付き本体＋関数2つ＋文字列）</span></div>
   <div class="sizebar"><span class="lbl">v7 の式 (50+10)*(1+1)</span><div class="bar" style="width:272px"></div><span class="num">68 バイト（スタック評価つき）</span></div>
   <div class="sizebar"><span class="lbl">v8 の if/else</span><div class="bar" style="width:224px"></div><span class="num">56 バイト（x=4 の場合分け）</span></div>
+  <div class="sizebar"><span class="lbl">v9 の配列</span><div class="bar" style="width:416px"></div><span class="num">104 バイト（宣言＋読み書き。配列の実体は実行時にメモリ側）</span></div>
   <p>小さく始めて、必要になった分だけ育っているのが、サイズにも表れています。</p>
 </section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v8 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v9 時点）</p>
 </footer>
 
 </div>
