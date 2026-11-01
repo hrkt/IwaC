@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v6)
+/* iwac -- Cコンパイラのサブセット (v7)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v6 の言語 (文法) ===
+ * === v7 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -53,15 +53,15 @@
  *           | "putc" "(" expr ")" ";"          (出力文。組み込み)
  *           | "while" "(" expr ")" "{" { stmt } "}"  (繰り返し)
  *           | ident "(" [ expr ] ")" ";"       (関数の呼び出し)
- *   expr    = and { ("==" | "!=") and }        (比較は一番外側)
- *   and     = add { "&" add }     (& は比較より固く結ぶ。
- *                                  C とは違うが、かっこ無しで
- *                                  ポーリングの形を書くため)
- *   add     = primary { ("+" | "-" ) primary }
+ *   expr    = eq { "&" eq }         (優先順位は C と同じ順。
+ *   eq      = add { ("==" | "!=") add }   固い順に * / 、+ -、
+ *   add     = term { ("+" | "-") term }   == !=、& の段を
+ *   term    = primary { ("*" | "/") primary }  重ねてある)
  *   primary = number | ident        (数、または変数)
  *           | string                (文字列。値はその住所)
  *           | "*" primary           (ポインタの先を読む。
  *                                  相手が数なら絶対アドレス読み)
+ *           | "(" expr ")"          (かっこ)
  *   number  = 10進数 (0..2047。理由は addi の項で)
  *           | "0x" 16進数 (アドレス用。32ビットまで)
  *   ident   = 英字か _ で始まる名前 (while / putc と型の単語は予約語)
@@ -74,12 +74,11 @@
  *                              → hello と出る (v5。目標の
  *                                KosabaOS の uart_puts その形)
  *       "void uart_putc(char c) {"
- *       "  while (*0x10000005 & 32 == 0) { }"
+ *       "  while ((*0x10000005 & 32) == 0) { }"
  *       "  *0x10000000 = c; }"
- *                              → 本物の uart_putc 本体 (v6)。
- *                                C では (REG(5) & 0x20) == 0 と
- *                                かっこで囲むところを、iwac は
- *                                & の結び方で表す (下記)
+ *                              → 本物の uart_putc 本体 (v6 で
+ *                                部品が揃い、v7 で C と同じ
+ *                                かっこ付きの形になった)
  *
  * v5 で育ったのは「関数」。呼び出しの約束 (呼び出し規約) は:
  *   - 引数は a0 レジスタで渡す。関数は入ってすぐ、それを
@@ -117,6 +116,20 @@
  * ない。iwac のプログラムは毎回メモリを読む (コンパイラが
  * 読みを消すことはない) ので、C の volatile に相当する
  * 指定は今のところ要らない。
+ *
+ * v7 では演算子の優先順位を C に合わせ直した。v6 では
+ * かっこが無い代わりに & を比較より固くしていたが、
+ * かっこ (式) が入ったので、C の順 (固い順に: * 読みと
+ * かっこ、掛け算・割り算、足し引き、比較、&) に戻し、
+ * 掛け算 * と割り算 / も入れた (M 拡張。ターゲットの
+ * RV64G 前提を使う)。ポーリングの形は C と同じく
+ * ((*0x10000005 & 32) == 0) とかっこで書く。
+ * あわせて式の評価も一般化した: 右の子が葉でない式
+ * ( (50+10)*(1+1) のような形) は、左の結果をスタックに
+ * 退避してから右を計算する。スタックは、関数がある
+ * プログラムと同じ仕組みでコンパイラが用意する
+ * (要るプログラムのときだけ出すので、昔のプログラムの
+ * 出力は変わらない)。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -235,6 +248,9 @@ static int NODE_CALL = 9;   /* 呼び出し文。node_val = 関数番号、
 static int NODE_EQ = 10;    /* 比較 (==)。結果は 1 か 0 */
 static int NODE_NE = 11;    /* 比較 (!=)。結果は 1 か 0 */
 static int NODE_AND = 12;   /* ビット演算 (&) */
+static int NODE_MUL = 14;   /* 掛け算 */
+static int NODE_DIV = 15;   /* 割り算 (符号付き。除数が 0 なら
+                             * RISC-V の決まりで結果は -1) */
 static int NODE_STORE = 13; /* メモリ書き込み文。
                              * node_lhs = 書き込み先を表すノード
                              * (変数 = ポインタ、数 = 絶対アドレス)、
@@ -523,8 +539,14 @@ static int parse_string_node(void) {
     return new_node(NODE_STR, idx, 0, 0);
 }
 
+/* 式全体を読む関数は、この下で定義する (かっこの中身が
+ * 式全体なので、互いに呼び合う)。先に宣言だけ置く。
+ * expect_char も下で定義する道具の先行宣言 */
+static int parse_expr(void);
+static int expect_char(char c, char *msg);
+
 /* 式の材料 (primary) を1つ読む: 数、変数、文字列、
- * または *変数 (ポインタの先の1バイト)。
+ * かっこで囲んだ式、または *材料 (ポインタの先の1バイト)。
  * 変数は名簿にあるものだけが使える。代入されていない変数を
  * 使うのはエラー (「いつか入るはず」の値で計算しないため。
  * この小さい言語では、使う前に必ず代入文が先にある書き方)。
@@ -535,21 +557,32 @@ static int parse_primary_node(void) {
         return parse_number_node();
     if (*cur == '"')
         return parse_string_node();
+    if (*cur == '(') {
+        /* かっこ: 中身は式全体。かっこ自体は木を作らず、
+         * 中身の木をそのまま返す (優先順位の指定だけが役目) */
+        cur++;
+        int inner = parse_expr();
+        if (inner < 0)
+            return -1;
+        if (!expect_char(')', "かっこの閉じ ) が必要です"))
+            return -1;
+        return inner;
+    }
     if (*cur == '*') {
         /* ポインタ読み: * の次は「住所を表すもの」。
          * 変数なら、その変数が持つ住所 (ポインタ)。
          * 数なら、その数そのものが住所になる (絶対アドレス
          * 読み)。デバイスのレジスタは決まった住所にあるので、
-         * *0x10000005 と書けば LSR が読める (MMIO) */
+         * *0x10000005 と書けば LSR が読める (MMIO)。
+         * かっこで囲んだ式 (住所の計算結果) も相手にできる。
+         * * を重ねる (**) 形はまだ扱わない */
         cur++;
         skip_spaces();
         int operand = parse_primary_node();
         if (operand < 0)
             return -1;
-        int okind = node_kind[operand];
-        if (okind != NODE_VAR && okind != NODE_NUM &&
-            okind != NODE_STR) {
-            errmsg = "* の相手は変数かアドレス (数) です";
+        if (node_kind[operand] == NODE_DEREF) {
+            errmsg = "* を重ねる形 (**) はまだ扱えません";
             return -1;
         }
         return new_node(NODE_DEREF, 0, operand, 0);
@@ -568,38 +601,40 @@ static int parse_primary_node(void) {
     return -1;
 }
 
-/* 足し引きの式 (add) を読み、AST の根を返す。失敗したら -1。
+/* --- 式の優先順位 (v7 で C に合わせた) ---
  *
- * 読み方 (左結合): まず項を読む。演算子が来たら、次の項を
- * 読んで「今の木全体を左の子、新しい項を右の子とする新しい
- * 根」を作る。"50+10+5" は ((50+10)+5) という木になる。
- * 左から順に計算する v1 の意味は、この木の形そのものである */
-static int parse_add_expr(void) {
+ * 演算子の結びの固さは C と同じ順にした。固い順に:
+ *   * (ポインタ読み) と かっこ   … parse_primary_node
+ *   * / (掛け算・割り算)        … parse_term_expr
+ *   + -                         … parse_add_expr
+ *   == !=                       … parse_eq_expr
+ *   &                           … parse_expr (一番外側)
+ * 「固い」ほど先に (深く) 計算される。読み方は各段とも
+ * 左結合: 演算子が来たら「今の木全体を左の子、新しい材料を
+ * 右の子とする新しい根」を作る。"50+10+5" は ((50+10)+5)。
+ * 段を分けることで、"60+2*3" は +(60, *(2,3)) = 66 に、
+ * "a & b == c" は &(a, ==(b, c)) になる (C と同じ)。
+ * ポーリングの形は C と同じくかっこで書く:
+ *   (*0x10000005 & 32) == 0
+ * (v6 では、かっこが無い代わりに & を固くしていた。
+ *  かっこが入ったので C の順に戻した) */
+
+/* 掛け算・割り算の段 (term) を読む。相手は材料 (primary)。
+ * 演算子の * は、材料の頭に来る * (ポインタ読み) とは
+ * 場所で見分ける: 材料を読んだ直後の * は掛け算 */
+static int parse_term_expr(void) {
     int lhs = parse_primary_node();
     if (lhs < 0)
         return -1;
     for (;;) {
         skip_spaces();
-        if (*cur == '\0' || *cur == ';' || *cur == ')')
-            return lhs;  /* 式の終わり (文の区切り、全体の終わり、
-                          * または while / putc の閉じかっこ) */
-        if ((*cur == '=' && cur[1] == '=') ||
-            (*cur == '!' && cur[1] == '='))
-            return lhs;  /* 比較が続く。parse_expr の仕事 */
-        if (*cur == '&')
-            return lhs;  /* & が続く。parse_and_expr の仕事 */
         int kind;
-        if (*cur == '+')
-            kind = NODE_ADD;
-        else if (*cur == '-')
-            kind = NODE_SUB;
-        else if (is_ident_start(*cur)) {
-            errmsg = "式の途中に名前があります (文の区切り ; の不足かもしれません)";
-            return -1;
-        } else {
-            errmsg = "演算子は + か - だけです (他の記号はまだ未対応)";
-            return -1;
-        }
+        if (*cur == '*')
+            kind = NODE_MUL;
+        else if (*cur == '/')
+            kind = NODE_DIV;
+        else
+            return lhs;
         cur++;
         skip_spaces();
         int rhs = parse_primary_node();
@@ -611,42 +646,35 @@ static int parse_add_expr(void) {
     }
 }
 
-/* ビット演算 & の式を読む。& は足し引きよりゆるく、
- * 比較より固く結ぶ (C では & は比較よりゆるいが、iwac には
- * かっこがまだ無いので、ポーリングの形
- *   (*0x10000005 & 32) == 0
- * をかっこ無しで書けるよう、こちらを固くした)。
- * 例: "*p & 32 == 0" は ==(&(*p, 32), 0) という木になる */
-static int parse_and_expr(void) {
-    int lhs = parse_add_expr();
+/* 足し引きの段 (add) を読む。相手は term の段 */
+static int parse_add_expr(void) {
+    int lhs = parse_term_expr();
     if (lhs < 0)
         return -1;
     for (;;) {
         skip_spaces();
-        if (*cur != '&')
+        int kind;
+        if (*cur == '+')
+            kind = NODE_ADD;
+        else if (*cur == '-')
+            kind = NODE_SUB;
+        else
             return lhs;
-        if (cur[1] == '&') {
-            errmsg = "&& はまだありません (& は1つで書きます)";
-            return -1;
-        }
         cur++;
         skip_spaces();
-        int rhs = parse_add_expr();
+        int rhs = parse_term_expr();
         if (rhs < 0)
             return -1;
-        lhs = new_node(NODE_AND, 0, lhs, rhs);
+        lhs = new_node(kind, 0, lhs, rhs);
         if (lhs < 0)
             return -1;
     }
 }
 
-/* 式を読む。式は「& の式」で、さらにその外側に
- * 比較 (== / !=) が最大で連なる形。比較は一番ゆるく
- * 結ぶので、木の根の側に来る。
- * 例: "*s != 0" は !=(*s, 0) という木になる。
+/* 比較の段 (eq) を読む。相手は add の段。
  * 結果は「成り立てば 1、だめなら 0」の数になる */
-static int parse_expr(void) {
-    int lhs = parse_and_expr();
+static int parse_eq_expr(void) {
+    int lhs = parse_add_expr();
     if (lhs < 0)
         return -1;
     for (;;) {
@@ -660,10 +688,37 @@ static int parse_expr(void) {
             return lhs;
         cur += 2;
         skip_spaces();
-        int rhs = parse_and_expr();
+        int rhs = parse_add_expr();
         if (rhs < 0)
             return -1;
         lhs = new_node(kind, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* 式全体を読む。一番外側はビット演算 & の段 (C の
+ * 優先順位で、iwac にある演算子の中では一番ゆるい)。
+ * 例: "*s != 0" は !=(*s, 0)、"*p & 32 == 0" は
+ * &(*p, ==(32, 0)) という木になる (C と同じ読み) */
+static int parse_expr(void) {
+    int lhs = parse_eq_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        if (*cur != '&')
+            return lhs;
+        if (cur[1] == '&') {
+            errmsg = "&& はまだありません (& は1つで書きます)";
+            return -1;
+        }
+        cur++;
+        skip_spaces();
+        int rhs = parse_eq_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(NODE_AND, 0, lhs, rhs);
         if (lhs < 0)
             return -1;
     }
@@ -1109,6 +1164,8 @@ static int OP_SLTU = 13; /* 符号なし比較: rs1 < rs2 なら 1
 static int OP_SLTIU = 14;/* 即値との符号なし比較
                           * (1 と比べれば「0 かどうか」になる) */
 static int OP_AND = 15;  /* ビットごとの AND (両方 1 の桁だけ 1) */
+static int OP_MUL = 16;  /* 掛け算 (M 拡張。RV64G 前提) */
+static int OP_DIV = 17;  /* 割り算 (符号付き、M 拡張) */
 
 static int asm_op[2048];
 static int asm_rd[2048];
@@ -1133,11 +1190,19 @@ static int var_reg(int var) {
 }
 
 /* 葉かどうか: 式の中で「そのまま値として使える材料」は
- * 数・変数・文字列 (住所)・ポインタ読みの4種 */
+ * 数・変数・文字列 (住所)・ポインタ読みの4種。ただし
+ * ポインタ読みは、相手 (住所) が材料そのもののときだけ
+ * 葉扱いする。相手が計算式の場合は、住所の計算に t1 を
+ * 使うので、葉としては扱えない (gen_expr で別に処理する) */
 static int is_leaf(int node) {
     int k = node_kind[node];
-    return k == NODE_NUM || k == NODE_VAR || k == NODE_STR ||
-           k == NODE_DEREF;
+    if (k == NODE_NUM || k == NODE_VAR || k == NODE_STR)
+        return 1;
+    if (k == NODE_DEREF) {
+        int ok = node_kind[node_lhs[node]];
+        return ok == NODE_NUM || ok == NODE_VAR || ok == NODE_STR;
+    }
+    return 0;
 }
 
 /* 文字列の住所をレジスタに作る命令 (2つ) を積む。
@@ -1208,11 +1273,12 @@ static void gen_load_leaf(int reg, int leaf) {
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
  * 失敗したら 0 を返す (理由は errmsg)。
  *
- * 作り方: 左の子を先に生成する (結果は t1)。右の子は葉
- * (数か変数) なので、t2 に入れて演算する。
- * 「右の子も式になる」一般形 (かっこや優先順位) では
- * t1 を退避する仕組み (スタック) が必要になる。それは
- * 後回しリストの題材で、ここでは文法の範囲だけを相手にする */
+ * 作り方: 左の子を先に生成する (結果は t1)。右の子が葉
+ * なら t2 に入れて演算する。右の子も式 (木) の場合は、
+ * 左の結果をスタックに退避してから右を計算し、t2 へ
+ * 写して左を戻す (v7 で入れた一般形の評価)。
+ * スタックが要るプログラムでは、gen_all が先に sp を
+ * 用意する (関数のあるプログラムと同じ仕組み) */
 static int gen_expr(int node) {
     if (is_leaf(node)) {
         /* 葉: t1 にその値 (変数なら今の値、文字列なら住所、
@@ -1220,22 +1286,42 @@ static int gen_expr(int node) {
         gen_load_leaf(REG_T1, node);
         return 1;
     }
-    /* 演算: まず左を t1 に */
+    if (node_kind[node] == NODE_DEREF) {
+        /* 相手が計算式のポインタ読み: 住所を t1 で計算し、
+         * その住所から1バイト読む */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
+        return 1;
+    }
+    /* 二項演算: まず左を t1 に */
     if (!gen_expr(node_lhs[node]))
         return 0;
     int rhs = node_rhs[node];
-    if (!is_leaf(rhs)) {
-        errmsg = "内部エラー: 右の子が葉でない式はまだ扱えません";
-        return 0;
+    if (is_leaf(rhs)) {
+        /* 右が葉: そのまま t2 に入れる */
+        gen_load_leaf(REG_T2, rhs);
+    } else {
+        /* 右も式: 左の結果 (t1) をスタックへ退避し、右を
+         * 計算して t2 へ写し、左を t1 へ戻す */
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+        if (!gen_expr(rhs))
+            return 0;
+        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        asm_push(OP_LD, REG_T1, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
     }
-    /* 次の項を t2 に入れて、t1 と演算する */
-    gen_load_leaf(REG_T2, rhs);
     if (node_kind[node] == NODE_ADD)
         asm_push(OP_ADD, REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_SUB)
         asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_AND)
         asm_push(OP_AND, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_MUL)
+        asm_push(OP_MUL, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_DIV)
+        asm_push(OP_DIV, REG_T1, REG_T1, REG_T2, 0);
     else {
         /* 比較 (== / !=): まず引き算して「差」にする。
          * 差が 0 なら等しい。あとは差を見て 1 か 0 を作る:
@@ -1362,6 +1448,53 @@ static int gen_func(int f) {
     return 1;
 }
 
+/* スタックが要るかどうかを、AST を歩いて先に調べる。
+ * 要るのは「関数がある」か「右の子が葉でない二項演算が
+ * ある (評価に退避が要る)」場合。その場合だけ gen_all が
+ * sp の用意を出すので、要らないプログラムの出力は
+ * 従来と1バイトも変わらない */
+static int stack_needed;
+
+static int expr_needs_stack(int node) {
+    int k = node_kind[node];
+    if (k == NODE_ADD || k == NODE_SUB || k == NODE_AND ||
+        k == NODE_EQ || k == NODE_NE || k == NODE_MUL ||
+        k == NODE_DIV) {
+        if (!is_leaf(node_rhs[node]))
+            return 1;
+        return expr_needs_stack(node_lhs[node]) ||
+               expr_needs_stack(node_rhs[node]);
+    }
+    if (k == NODE_DEREF)
+        return expr_needs_stack(node_lhs[node]);
+    return 0;
+}
+
+static int list_needs_stack(int head);  /* 相互に使うので先行宣言 */
+
+static int stmt_needs_stack(int node) {
+    int k = node_kind[node];
+    if (k == NODE_ASSIGN || k == NODE_PUTC)
+        return expr_needs_stack(node_lhs[node]);
+    if (k == NODE_WHILE)
+        return expr_needs_stack(node_lhs[node]) ||
+               list_needs_stack(node_rhs[node]);
+    if (k == NODE_CALL)
+        return node_lhs[node] >= 0 &&
+               expr_needs_stack(node_lhs[node]);
+    if (k == NODE_STORE)
+        return expr_needs_stack(node_rhs[node]);
+    return 0;
+}
+
+static int list_needs_stack(int head) {
+    for (int s = head; s != -1; s = node_next[s]) {
+        if (stmt_needs_stack(s))
+            return 1;
+    }
+    return 0;
+}
+
 /* 命令列を全部作る (1回分): 土台 (UART の住所) → (関数が
  * あれば) スタックの用意 → 文の並び → 最後の式 (あれば) →
  * UART へ書く → 止まる → その後に関数の本体を並べる。
@@ -1373,9 +1506,9 @@ static int gen_all(void) {
     nasm = 0;
     /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る */
     asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
-    if (nfunc > 0) {
+    if (stack_needed) {
         /* スタックの用意: 天井の住所を sp に作る
-         * (関数が無いプログラムでは出さない。昔のプログラムの
+         * (要らないプログラムでは出さない。昔のプログラムの
          * 出力が変わらないようにするため) */
         gen_load_addr(REG_SP, stack_top_addr);
     }
@@ -1413,6 +1546,11 @@ static int gen_all(void) {
  *   2回目: 確定した住所で作り直す。これが最終成果になる */
 static int gen_program(void) {
     code_insts = 0;
+    /* スタックが要るかは生成の前に AST から決める */
+    stack_needed = nfunc > 0 || list_needs_stack(prog_stmts) ||
+                   (prog_has_final && expr_needs_stack(prog_final));
+    for (int f = 0; f < nfunc && !stack_needed; f++)
+        stack_needed = list_needs_stack(func_body[f]);
     stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */
     if (!gen_all())
         return 0;
@@ -1512,6 +1650,21 @@ static unsigned int encode_inst(int i) {
          * rd=0, rs1=ra, imm=0 で「呼び出し側へ戻る」になる */
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                ((unsigned int)rd << 7) | 0x67u;
+    }
+    if (op == OP_MUL) {
+        /* mul rd, rs1, rs2 -- R 形式。M 拡張の命令は
+         * funct7 が 1。funct3 は 0 */
+        return (1u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_DIV) {
+        /* div rd, rs1, rs2 -- R 形式、funct7 が 1 で
+         * funct3 が 4。除数が 0 のときの結果は -1
+         * (RISC-V の決まり。例外にはならない) */
+        return (1u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (4u << 12) |
+               ((unsigned int)rd << 7) | 0x33u;
     }
     if (op == OP_AND) {
         /* and rd, rs1, rs2 -- R 形式。add との違いは funct3 が 7 */

@@ -12,7 +12,7 @@
 #   v0: iwac A と iwac 65 が同じ16バイトを出し、実行すると A が出る
 #   v1: 式 65+1 → B、66-1 → A、50+10+5 → A が実行時に計算されて出る
 #       空白ありの式が空白なしと同じバイナリになる
-#       文法エラー (65+ / 65*2 / 2048) では失敗し、出力が空になる
+#       文法エラー (65+ / 2048 など) では失敗し、出力が空になる
 #   v2: 変数と代入 (x=65; x+1 → B、2変数の加算、再代入、長い変数名)、
 #       未代入の変数や変数5個では失敗し、出力が空になる
 #   v3: 文字列とポインタ (s="Hi"; *s → H、s=s+1 で次を読む、
@@ -23,6 +23,8 @@
 #       本物の uart_puts の形、比較 == / != のループ
 #   v6: 本物の uart_putc 本体 (LSR のポーリング)、絶対アドレス
 #       への書き込み、ビット演算 &、16進数、ポインタ経由の書き込み
+#   v7: 優先順位を C に合わせる (乗除が先、== が & より先)、
+#       かっこ、両側が式になる計算 (スタック評価)
 set -e
 cd "$(dirname "$0")"
 
@@ -102,7 +104,7 @@ check_error() {
     echo "ok: $label はエラーになり、出力は空だった"
 }
 check_error '65+' "'65+'"
-check_error '65*2' "'65*2' (v1 では * は未対応)"
+# '65*2' は v7 で掛け算として意味を持つようになった (下の v7 で確認)
 check_error '2048' "'2048' (addi 即値の上限超え)"
 check_error '' "空文字列"
 
@@ -195,7 +197,7 @@ check_error 'foo(65);' "定義されていない関数の呼び出し"
 check_error 'void f() { } f(65);' "引数の数が合わない呼び出し"
 
 # --- v6: デバイスに触る部品 (絶対アドレス・& ・メモリ書き込み) ---
-"$IWAC" 'void uart_putc(char c) { while (*0x10000005 & 32 == 0) { } *0x10000000 = c; } void uart_puts(char *s) { while (*s != 0) { uart_putc(*s); s = s + 1; } } msg = "hello"; uart_puts(msg);' > "$TMP/v6a.bin"
+"$IWAC" 'void uart_putc(char c) { while ((*0x10000005 & 32) == 0) { } *0x10000000 = c; } void uart_puts(char *s) { while (*s != 0) { uart_putc(*s); s = s + 1; } } msg = "hello"; uart_puts(msg);' > "$TMP/v6a.bin"
 check_tail "$TMP/v6a.bin" 'hello' "v6: 本物の uart_putc 本体 (ポーリング付き)"
 
 "$IWAC" '*0x10000000 = 65; *0x10000000 = 66;' > "$TMP/v6b.bin"
@@ -212,5 +214,23 @@ check_tail "$TMP/v6e.bin" 'X' "v6: ポインタ変数経由の書き込み"
 
 check_error 'x = 5 && 3;' "&& は未対応"
 check_error '*0x = 65;' "0x の後ろに数字が無い"
+
+# --- v7: 優先順位を C に合わせる (かっこ・乗除・スタック評価) ---
+"$IWAC" '60+2*3' > "$TMP/v7a.bin"
+check_tail "$TMP/v7a.bin" 'B' "v7: 掛け算が先 (60+2*3 = 66)"
+
+"$IWAC" '2*(30+3)' > "$TMP/v7b.bin"
+check_tail "$TMP/v7b.bin" 'B' "v7: かっこで順序を変える"
+
+"$IWAC" '(50 + 10) * (1 + 1)' > "$TMP/v7c.bin"
+check_tail "$TMP/v7c.bin" 'x' "v7: 両側が式の計算 (スタック評価)"
+
+"$IWAC" '100/4+40' > "$TMP/v7d.bin"
+check_tail "$TMP/v7d.bin" 'A' "v7: 割り算 (100/4+40 = 65)"
+
+"$IWAC" 'x = 1 & 2 == 2; putc(64 + x);' > "$TMP/v7e.bin"
+check_tail "$TMP/v7e.bin" 'A' "v7: C の順では == が & より先 (1 & (2==2) = 1)"
+
+check_error '(65' "かっこが閉じていない"
 
 echo "PASS"

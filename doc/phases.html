@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v6 まで</title>
+<title>IwaC の歩み — v0 から v7 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -277,7 +277,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v6 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v7 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -315,7 +315,8 @@
   <a class="done" href="#v3">v3 文字列</a><span class="arr">→</span>
   <a class="done" href="#v4">v4 ループ</a><span class="arr">→</span>
   <a class="done" href="#v5">v5 関数</a><span class="arr">→</span>
-  <a class="done" href="#v6">v6 putc本体</a>
+  <a class="done" href="#v6">v6 putc本体</a><span class="arr">→</span>
+  <a class="done" href="#v7">v7 優先順位</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -571,6 +572,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v4</span>　<code class="inline">while</code> でくり返し、途中で <code class="inline">putc</code> で出せる → <b>print loop の本体は達成</b></li>
     <li><span class="ok">✓ v5</span>　関数定義・引数・呼び出しと <code class="inline">!=</code> の比較で、本物の <code class="inline">uart_puts</code> の形が完成 → <b>print loop 目標は達成</b></li>
     <li><span class="ok">✓ v6</span>　<code class="inline">uart_putc</code> の本体（送信待ちのポーリング）まで本物のコードで書ける → <b>print loop は端から端まで自前のコードに</b></li>
+    <li><span class="ok">✓ v7</span>　演算子の優先順位が C と同じ順に。かっこと掛け算・割り算も使える</li>
   </ul>
 </section>
 
@@ -688,9 +690,10 @@ uart_puts(msg);</pre>
     <div class="loop-arrow back">↑ くり返し読み直す（合図が立つまで）</div>
     <div class="loop-step exit">32 が立ったら抜けて、THR（0x10000000）へ文字を書く → 送信！</div>
   </div>
-  <p>小さな決め事も1つ：iwac にはまだ式のかっこが無いので、
-  <code class="inline">&amp;</code> は比較（<code class="inline">==</code>）より先に計算することにしました（本物の C とは逆）。
-  おかげで <code class="inline">*0x10000005 &amp; 32 == 0</code> と、かっこ無しでポーリングの形が書けます。
+  <p>当時の小さな決め事：この時点では式のかっこが無かったので、
+  <code class="inline">&amp;</code> は比較（<code class="inline">==</code>）より先に計算することにしていました（本物の C とは逆）。
+  おかげで <code class="inline">*0x10000005 &amp; 32 == 0</code> と、かっこ無しでポーリングの形が書けました。
+  —— この暫定ルールは、次の v7 で C の順に戻しました。
   なお QEMU の送信は一瞬で終わるので、「待つ」ところが本当に効くのは実機です。</p>
 
   <div class="chips">
@@ -705,6 +708,48 @@ uart_puts(msg);</pre>
   <p>その先には、OSの側の成長（ユーザーモード、ファイル、シェル）と合流して、
   <b>「KosabaOS のシェルから iwac で Hello World をコンパイルして実行する」</b>
   という最終目標が待っています。</p>
+</section>
+
+<!-- ================= v7 ================= -->
+<section class="phase" id="v7">
+  <div class="head"><span class="badge b-v4">v7</span><h2>演算子の優先順位を、C と同じに</h2></div>
+  <p class="goal-line">目標：<b>「どの演算子から計算するか」の順番を C と同じにして、C の読み方で式が読めるようにすること。</b></p>
+  <p>v6 では、かっこが無い代わりに <code class="inline">&amp;</code> と比較の順を C と逆にしていました。
+  でも優先順位は、プログラムの意味そのものを決める大事な決まりです。
+  そこで先に進む前に、かっこと掛け算・割り算ごと、C の順に揃え直しました。</p>
+
+  <h3 class="mini">優先順位の階段（上が先に計算される）</h3>
+  <div class="inst-list">
+    <div class="inst"><span class="mn">* 読み・( )</span><span class="desc">ポインタ読みとかっこ。一番固い</span></div>
+    <div class="inst"><span class="mn">* /</span><span class="desc">掛け算・割り算</span></div>
+    <div class="inst"><span class="mn">+ -</span><span class="desc">足し算・引き算</span></div>
+    <div class="inst"><span class="mn">== !=</span><span class="desc">比較</span></div>
+    <div class="inst"><span class="mn">&amp;</span><span class="desc">ビット演算。一番ゆるい（C と同じ）</span></div>
+  </div>
+  <div class="screen"><small>読み方の例</small>
+    <code class="inline">60 + 2 * 3</code> → 掛け算が先で <span class="big">66（B）</span>　
+    <code class="inline">2 * (30 + 3)</code> → かっこが先で <span class="big">66（B）</span>　
+    ポーリングは <code class="inline">(*0x10000005 &amp; 32) == 0</code> と C と同じ書き方に</div>
+
+  <h3 class="mini">ついでに必要になった「スタック評価」</h3>
+  <p>かっこが入ると、<code class="inline">(50 + 10) * (1 + 1)</code> のように
+  「計算の途中結果」と「次の計算」がぶつかる式が書けるようになります。
+  そこで、左の結果をスタックに退避してから右を計算する、一般的な評価の仕方を入れました。
+  退避が要る式があるときだけ、コンパイラがスタックを用意します
+  （要らないプログラムの出力は今までと1バイトも変わりません）。</p>
+  <div class="screen"><small>実行結果</small>
+    <span class="big">x</span>（<code class="inline">(50 + 10) * (1 + 1)</code> = 120）　
+    <span class="big">A</span>（<code class="inline">100 / 4 + 40</code> = 65）　
+    <span class="big">A</span>（<code class="inline">(200 - 60) / (1 + 1) - 5</code> = 65）</div>
+
+  <div class="chips">
+    <span class="chip">優先順位は C と同じ</span><span class="chip">かっこ</span>
+    <span class="chip">掛け算・割り算</span><span class="chip">スタック評価</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  優先順位は「式の読み方の標準仕様」。C と揃えることで、C のコードを
+  そのままの読みで iwac に持って来られるようになりました。
+  構文解析は「段」を重ねる形になり、段を1つ足せば新しい演算子の置き場が増えます。</p></div>
 
   <h3 class="mini">おまけ：バイナリの大きさの育ち方</h3>
   <div class="sizebar"><span class="lbl">v0 の「A」</span><div class="bar" style="width:64px"></div><span class="num">16 バイト（4命令）</span></div>
@@ -713,13 +758,14 @@ uart_puts(msg);</pre>
   <div class="sizebar"><span class="lbl">v4 の print loop</span><div class="bar" style="width:252px"></div><span class="num">63 バイト（コード＋文字列）</span></div>
   <div class="sizebar"><span class="lbl">v5 の uart_puts</span><div class="bar" style="width:460px"></div><span class="num">115 バイト（関数＋呼び出し側＋文字列）</span></div>
   <div class="sizebar"><span class="lbl">v6 の putc+puts</span><div class="bar" style="width:560px"></div><span class="num">203 バイト（ポーリング付き本体＋関数2つ＋文字列）</span></div>
+  <div class="sizebar"><span class="lbl">v7 の式 (50+10)*(1+1)</span><div class="bar" style="width:272px"></div><span class="num">68 バイト（スタック評価つき）</span></div>
   <p>小さく始めて、必要になった分だけ育っているのが、サイズにも表れています。</p>
 </section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v6 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v7 時点）</p>
 </footer>
 
 </div>
