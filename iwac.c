@@ -62,25 +62,69 @@
  * === 混同しやすい「2つの出力」 (v0 から引き続き) ===
  *
  *   - iwac 自身の出力先は「ホストの標準出力」。このファイルの
- *     putchar は命令のバイト列を標準出力に書いているだけ。
+ *     out_byte 関数が、命令のバイト列を標準出力に書いている。
  *   - 作られたバイナリの出力先は「ベアメタル機の UART」。
  *     バイナリの中の sb 命令が UART のレジスタに書く。
+ *
+ * === なぜこのファイルに #include が無いのか ===
+ *
+ * iwac の言語にはプリプロセッサが無いと決めた。なのに iwac
+ * 自身のソースが #include <stdio.h> を使っていたら、「まだ
+ * 作っていないもの」を使って作っていることになってしまう。
+ * 将来のセルフホストの妨げにもなる。そこでこのファイルは
+ * プリプロセッサ (#include も #define も) を一切使わない。
+ *
+ * では標準ライブラリの関数はどうするか。使うのは write だけ
+ * とし、その「宣言」だけを自分で書く:
+ *
+ *   long write(int fd, char *buf, long len);
+ *
+ * 宣言はプリプロセッサではなく、「こういう形の関数が外に
+ * ある」というコンパイラへの伝言。本体はホストのライブラリ
+ * にあり、リンクのときに繋がる。将来 iwac でプログラムを
+ * 書くときも、#include の代わりに使う関数の宣言を自分で
+ * 書く想定でいる (Hello World の書き方もこの流儀になる)。
+ * エラー表示も write で標準エラー出力 (fd = 2) に書く。
  */
 
-#include <stdio.h>
-#include <stdlib.h>
+/* 外部関数の宣言 (ヘッダの代わりに自分で書く。上の説明参照)
+ * write: fd へ buf の先頭 len バイトを書くホストの関数。
+ * 戻り値は実際に書けたバイト数だが、このプログラムでは使わない。 */
+long write(int fd, char *buf, long len);
+
+/* ----------------------------------------------------------------
+ * ホストへの入出力 (iwac 自身が使う側)
+ * ---------------------------------------------------------------- */
+
+/* 文字列を fd に書く (長さは自分で数える。ライブラリ関数の
+ * strlen も使わない方針) */
+static void print_str(int fd, char *s) {
+    long len = 0;
+    while (s[len] != '\0')
+        len++;
+    write(fd, s, len);
+}
+
+/* 1バイトを標準出力 (fd = 1) に書く。emit32 から呼ばれる。
+ * ここが「iwac の出力」と「作られるバイナリの出力」の境目:
+ * 書かれたバイトは、シェルのリダイレクトで .bin ファイルになる。 */
+static void out_byte(int byte) {
+    char b = (char)byte;
+    write(1, &b, 1);
+}
 
 /* ----------------------------------------------------------------
  * エラー処理
+ *
+ * 方針: エラーが起きた関数は「失敗」を戻り値で伝え、理由を
+ * errmsg に置く。main が最後にまとめて表示して終わる。
+ * exit() のようなライブラリ関数に頼らずに済ませるためと、
+ * 「どこで失敗したか」を main に集約するため。
+ * 解析の途中で失敗しても、機械語はまだ何も出力されていない
+ * ので、「変なバイナリが黙って出来てしまう」ことがない。
  * ---------------------------------------------------------------- */
 
-/* エラーを表示して iwac 自身を終わる。
- * 解析の途中なら、機械語はまだ何も出力されていないので、
- * 「変なバイナリが黙って出来てしまう」ことがない。 */
-static void die(char *msg) {
-    fprintf(stderr, "iwac: %s\n", msg);
-    exit(1);
-}
+static char *errmsg;  /* 失敗の理由。成功している間は使わない */
 
 /* ----------------------------------------------------------------
  * 字句・構文解析 (parse)
@@ -89,11 +133,12 @@ static void die(char *msg) {
  * 項と演算子を取り出して配列に溜めるのがこの段の仕事。
  * ---------------------------------------------------------------- */
 
-static char *cur;            /* 入力の「今読んでいる場所」 */
-#define MAX_TERMS 256        /* 項の数の上限 (当面は十分な大きさ) */
-static int terms[MAX_TERMS]; /* 項 (数字) の配列 */
-static char ops[MAX_TERMS];  /* ops[i] = terms[i] と terms[i+1] の間の演算子 */
-static int nterms;           /* 溜まった項の数 */
+static char *cur;         /* 入力の「今読んでいる場所」 */
+/* 項の数の上限は 256 (#define のようなプリプロセッサは
+ * 使わない方針なので、数は配列とチェックに直接書く) */
+static int terms[256];    /* 項 (数字) の配列 */
+static char ops[256];     /* ops[i] = terms[i] と terms[i+1] の間の演算子 */
+static int nterms;        /* 溜まった項の数 */
 
 static int is_digit(char c) {
     return c >= '0' && c <= '9';
@@ -107,22 +152,29 @@ static void skip_spaces(void) {
 
 /* カーソルの位置から数字を1つ読み、値を返す。読み終えたら
  * カーソルは数字の直後まで進む。これが「数トークン」を
- * 取り出す処理にあたる (v0 の手読みを関数に独立させた)。 */
+ * 取り出す処理にあたる (v0 の手読みを関数に独立させた)。
+ * 失敗したら -1 を返し、理由を errmsg に置く (数字は必ず
+ * 0 以上なので、-1 を「失敗の合図」に使える)。 */
 static int parse_number(void) {
-    if (!is_digit(*cur))
-        die("数字が必要です");
+    if (!is_digit(*cur)) {
+        errmsg = "数字が必要です";
+        return -1;
+    }
     int value = 0;
     while (is_digit(*cur)) {
         value = value * 10 + (*cur - '0');
-        if (value > 2047)
-            die("項が大きすぎます (v1 では 2047 まで。addi の即値が12ビットのため)");
+        if (value > 2047) {
+            errmsg = "項が大きすぎます (v1 では 2047 まで。addi の即値が12ビットのため)";
+            return -1;
+        }
         cur++;
     }
     return value;
 }
 
-/* プログラム全体を解析して terms[] / ops[] に溜める */
-static void parse(char *program) {
+/* プログラム全体を解析して terms[] / ops[] に溜める。
+ * 成功したら 1、失敗したら 0 を返す (理由は errmsg)。 */
+static int parse(char *program) {
     cur = program;
     nterms = 0;
 
@@ -133,26 +185,37 @@ static void parse(char *program) {
     if (cur[0] != '\0' && cur[1] == '\0' && !is_digit(cur[0])) {
         terms[0] = (unsigned char)cur[0];
         nterms = 1;
-        return;
+        return 1;
     }
 
     /* 式: 最初の項は必須 */
-    terms[nterms++] = parse_number();
+    int first = parse_number();
+    if (first < 0)
+        return 0;
+    terms[nterms++] = first;
 
     /* その後は (演算子 項) の繰り返し */
     for (;;) {
         skip_spaces();
         if (*cur == '\0')
             break;  /* 式の終わり。正常終了 */
-        if (*cur != '+' && *cur != '-')
-            die("演算子は + か - だけです (他の記号はまだ未対応)");
-        if (nterms >= MAX_TERMS)
-            die("項が多すぎます");
+        if (*cur != '+' && *cur != '-') {
+            errmsg = "演算子は + か - だけです (他の記号はまだ未対応)";
+            return 0;
+        }
+        if (nterms >= 256) {
+            errmsg = "項が多すぎます";
+            return 0;
+        }
         ops[nterms - 1] = *cur;
         cur++;
         skip_spaces();
-        terms[nterms++] = parse_number();
+        int next = parse_number();
+        if (next < 0)
+            return 0;
+        terms[nterms++] = next;
     }
+    return 1;
 }
 
 /* ----------------------------------------------------------------
@@ -162,10 +225,10 @@ static void parse(char *program) {
 /* 32ビットの命令を、バイナリとしてリトルエンディアンで出す。
  * (小さい方のバイトから順に書くのがリトルエンディアン) */
 static void emit32(unsigned int inst) {
-    putchar(inst & 0xff);
-    putchar((inst >> 8) & 0xff);
-    putchar((inst >> 16) & 0xff);
-    putchar((inst >> 24) & 0xff);
+    out_byte(inst & 0xff);
+    out_byte((inst >> 8) & 0xff);
+    out_byte((inst >> 16) & 0xff);
+    out_byte((inst >> 24) & 0xff);
 }
 
 /* addi rd, zero, imm -- 「レジスタ rd に小さい数 imm を入れる」
@@ -224,11 +287,19 @@ static void codegen(void) {
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        fprintf(stderr, "usage: iwac '<式>'   例: iwac '65+1'\n");
+        print_str(2, "usage: iwac '<式>'   例: iwac '65+1'\n");
         return 1;
     }
 
-    parse(argv[1]);   /* 全部読み終わるまで何も出力しない */
+    /* 全部読み終わるまで何も出力しない。失敗したら理由を
+     * 標準エラー出力 (fd = 2) に出して、1 で終わる
+     * (バイナリ側の標準出力には何も出ていない) */
+    if (!parse(argv[1])) {
+        print_str(2, "iwac: ");
+        print_str(2, errmsg);
+        print_str(2, "\n");
+        return 1;
+    }
     codegen();        /* 読めたものだけを機械語にする */
     return 0;
 }

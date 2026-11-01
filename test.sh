@@ -26,6 +26,15 @@ echo "build: CC=$CC"
 "$CC" -std=c11 -Wall -Wextra -O2 -o "$TMP/iwac" iwac.c
 IWAC="$TMP/iwac"
 
+# 約束の確認: iwac.c にプリプロセッサ行 (#include や #define
+# など、行頭の #) が無いこと。「まだ作っていないものを
+# 使って作らない」という決まり (doc/design.md 6章)
+if grep -q '^[[:space:]]*#' iwac.c; then
+    echo "FAIL: iwac.c にプリプロセッサ行がある" >&2
+    exit 1
+fi
+echo "ok: iwac.c にプリプロセッサ行が無い"
+
 fail() {
     echo "FAIL: $1" >&2
     exit 1
