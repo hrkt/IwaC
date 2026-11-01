@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v10 まで</title>
+<title>IwaC の歩み — v0 から v11 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v10 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v11 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -330,7 +330,8 @@
   <a class="done" href="#v7">v7 優先順位</a><span class="arr">→</span>
   <a class="done" href="#v8">v8 if/else</a><span class="arr">→</span>
   <a class="done" href="#v9">v9 配列</a><span class="arr">→</span>
-  <a class="done" href="#v10">v10 ファイル入力</a>
+  <a class="done" href="#v10">v10 ファイル入力</a><span class="arr">→</span>
+  <a class="done" href="#v11">v11 関係演算子</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -590,6 +591,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v8</span>　<code class="inline">if</code> / <code class="inline">else</code> で、条件で道を選べる</li>
     <li><span class="ok">✓ v9</span>　配列で、データを並べて持てる</li>
     <li><span class="ok">✓ v10</span>　<code class="inline">iwac hello.c</code> の形で、ファイルからコンパイルできる</li>
+    <li><span class="ok">✓ v11</span>　<code class="inline">&lt;</code> <code class="inline">&gt;</code> などの関係演算子で、条件が自然に書ける</li>
   </ul>
 </section>
 
@@ -935,10 +937,38 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   舞台を KosabaOS へ移す合流の2つに整理されました。</p></div>
 </section>
 
+<!-- ================= v11 ================= -->
+<section class="phase" id="v11">
+  <div class="head"><span class="badge b-v4">v11</span><h2>関係演算子 — 条件が自然に書ける</h2></div>
+  <p class="goal-line">目標：<b><code class="inline">while (i &lt; 10)</code> と、思った通りに書けること。</b></p>
+<pre class="code">i = 0;
+<span class="k">while</span> (i &lt; 3) { putc(65); i = i + 1; }  <span class="c">// AAA と出る</span></pre>
+  <p>今までは「<code class="inline">i != 3</code> の間」のように遠回りしていたループの条件が、そのまま書けるようになりました。
+  入れたのは <code class="inline">&lt;</code> <code class="inline">&gt;</code> <code class="inline">&lt;=</code> <code class="inline">&gt;=</code> の4つ。
+  優先順位の階段にも C と同じ段（足し算よりゆるく、<code class="inline">==</code> より固い場所）へきちんと差し込んだので、
+  <code class="inline">1 &lt; 2 == 1</code> は「(1&lt;2) がまず成り立ち、それが 1 と等しい」と C と同じ読みになります。</p>
+  <h3 class="mini">機械語の側は「比べる命令」1つが中心</h3>
+  <p>CPU には <b>slt</b>（左が右より小さければ 1、そうでなければ 0）という命令があります。
+  残りの3つは、その応用で作りました：</p>
+  <div class="regs">
+    <div class="reg"><span class="rname">a &gt; b</span><small>slt で「b &lt; a」を比べる（両辺の入替え）</small></div>
+    <div class="reg"><span class="rname">a &lt;= b</span><small>「a &gt; b」を作ってから、答えを反転（1 と XOR）</small></div>
+    <div class="reg"><span class="rname">a &gt;= b</span><small>「a &lt; b」を作ってから反転</small></div>
+  </div>
+  <div class="chips">
+    <span class="chip">&lt; &gt; &lt;= &gt;=</span><span class="chip">slt 命令</span><span class="chip">優先順位の段を追加</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  演算子を増やす作業は「段を1つ差し込む」ことに尽きました。
+  v7 で優先順位を段の形に組み替えておいたおかげで、新しい段は
+  隣の段の相手を変えるだけで入ります。設計の良し悪しは、
+  こういう「後から足すとき」に効いてきます。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v10 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v11 時点）</p>
 </footer>
 
 </div>

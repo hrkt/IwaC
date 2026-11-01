@@ -28,6 +28,7 @@
 #   v8: if / else / else if (while の中や関数の中でも)
 #   v9: 配列 (宣言・要素の読み書き・先頭アドレス・関数へ渡す)
 #   v10: ファイル入力 (iwac hello.c の形、改行・// コメント)
+#   v11: 関係演算子 < > <= >= (優先順位は C の段)
 set -e
 cd "$(dirname "$0")"
 
@@ -312,5 +313,15 @@ check_error_file() {
     echo "ok: $2 はエラーになり、出力は空だった"
 }
 check_error_file "$TMP/no-such-file.c" "存在しない .c ファイル"
+
+# --- v11: 関係演算子 ---
+"$IWAC" 'i = 0; while (i < 3) { putc(65); i = i + 1; }' > "$TMP/v11a.bin"
+check_tail "$TMP/v11a.bin" 'AAA' "v11: while (i < 3) のループ"
+
+"$IWAC" 'if (5 > 3) { putc(65); } if (5 <= 5) { putc(66); } if (4 >= 5) { putc(88); } else { putc(67); }' > "$TMP/v11b.bin"
+check_tail "$TMP/v11b.bin" 'ABC' "v11: > <= >="
+
+"$IWAC" 'putc(48 + (1 < 2 == 1));' > "$TMP/v11c.bin"
+check_run "$TMP/v11c.bin" 1 "v11: 優先順位 (1 < 2 == 1 は (1<2)==1)"
 
 echo "PASS"

@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v10)
+/* iwac -- Cコンパイラのサブセット (v11)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v10 の言語 (文法) ===
+ * === v11 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -58,7 +58,8 @@
  *             [ "else" ( "{" { stmt } "}" | if文 ) ]  (条件分岐)
  *           | ident "(" [ expr ] ")" ";"       (関数の呼び出し)
  *   expr    = eq { "&" eq }         (優先順位は C と同じ順。
- *   eq      = add { ("==" | "!=") add }   固い順に * / 、+ -、
+ *   eq      = rel { ("==" | "!=") rel }   固い順に * / 、+ -、
+ *   rel     = add { ("<" | ">" | "<=" | ">=") add }   < >、
  *   add     = term { ("+" | "-") term }   == !=、& の段を
  *   term    = primary { ("*" | "/") primary }  重ねてある)
  *   primary = number | ident        (数、または変数)
@@ -163,6 +164,13 @@
  * // (行末まで) も入れた。ホストに頼る外部関数は
  * write に open/read/close が加わって4つになった。
  * ここが将来 KosabaOS 上で動かすときの差し替え場所。
+ *
+ * v11 では関係演算子 < > <= >= を入れた。優先順位の段を
+ * C の順に1つ差し込み (add と eq の間)、結果は == と
+ * 同じく「成り立てば 1、だめなら 0」。機械語は slt
+ * (符号付き比較) が中心で、> は両辺を入れ替えた <、
+ * <= と >= は反対の比較を xori 1 で反転して作る。これで
+ * ループの条件が while (i < 10) と自然に書ける。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -296,6 +304,10 @@ static int NODE_INDEX = 18; /* 配列の要素読み。node_val = 配列番号�
 static int NODE_DECL = 19;  /* 配列の宣言文。node_val = 配列番号。
                              * 実行時のコードは出ない (置き場所の
                              * 予約だけが意味) */
+static int NODE_LT = 21;    /* 関係演算子 (左 < 右)。結果は 1 か 0 */
+static int NODE_GT = 22;    /* 関係演算子 (左 > 右)。結果は 1 か 0 */
+static int NODE_LE = 23;    /* 関係演算子 (左 <= 右)。結果は 1 か 0 */
+static int NODE_GE = 24;    /* 関係演算子 (左 >= 右)。結果は 1 か 0 */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
                              * node_val = 配列番号、node_lhs = 添字の式、
                              * node_rhs = 書く値の式 */
@@ -679,6 +691,7 @@ static int parse_string_node(void) {
  * 式全体なので、互いに呼び合う)。先に宣言だけ置く。
  * expect_char も下で定義する道具の先行宣言 */
 static int parse_expr(void);
+static int parse_rel_expr(void);  /* eq の段から呼ばれる (v11) */
 static int expect_char(char c, char *msg);
 
 /* 式の材料 (primary) を1つ読む: 数、変数、文字列、
@@ -761,6 +774,7 @@ static int parse_primary_node(void) {
  *   * (ポインタ読み) と かっこ   … parse_primary_node
  *   * / (掛け算・割り算)        … parse_term_expr
  *   + -                         … parse_add_expr
+ *   < > <= >=                   … parse_rel_expr (v11)
  *   == !=                       … parse_eq_expr
  *   &                           … parse_expr (一番外側)
  * 「固い」ほど先に (深く) 計算される。読み方は各段とも
@@ -825,10 +839,10 @@ static int parse_add_expr(void) {
     }
 }
 
-/* 比較の段 (eq) を読む。相手は add の段。
+/* 比較の段 (eq) を読む。相手は rel の段 (v11 から)。
  * 結果は「成り立てば 1、だめなら 0」の数になる */
 static int parse_eq_expr(void) {
-    int lhs = parse_add_expr();
+    int lhs = parse_rel_expr();
     if (lhs < 0)
         return -1;
     for (;;) {
@@ -841,6 +855,45 @@ static int parse_eq_expr(void) {
         else
             return lhs;
         cur += 2;
+        skip_spaces();
+        int rhs = parse_rel_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(kind, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* 関係演算子の段 (v11): < > <= >= を読む。
+ * C の優先順位では、足し算よりゆるく、== != より固い。
+ * 例: "i + 1 < 10" は <(+(i, 1), 10)、"a < b == c" は
+ * ==(<(a, b), c) という木になる (C と同じ読み)。
+ * <= と >= は2文字で読む (< の次が = でも、代入や
+ * == と取り違えないよう、ここでまとめて処理する) */
+static int parse_rel_expr(void) {
+    int lhs = parse_add_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        int kind;
+        int len;
+        if (cur[0] == '<' && cur[1] == '=') {
+            kind = NODE_LE;
+            len = 2;
+        } else if (cur[0] == '>' && cur[1] == '=') {
+            kind = NODE_GE;
+            len = 2;
+        } else if (cur[0] == '<') {
+            kind = NODE_LT;
+            len = 1;
+        } else if (cur[0] == '>') {
+            kind = NODE_GT;
+            len = 1;
+        } else
+            return lhs;
+        cur += len;
         skip_spaces();
         int rhs = parse_add_expr();
         if (rhs < 0)
@@ -1487,6 +1540,10 @@ static int OP_SLTIU = 14;/* 即値との符号なし比較
 static int OP_AND = 15;  /* ビットごとの AND (両方 1 の桁だけ 1) */
 static int OP_MUL = 16;  /* 掛け算 (M 拡張。RV64G 前提) */
 static int OP_DIV = 17;  /* 割り算 (符号付き、M 拡張) */
+static int OP_SLT = 18;  /* 符号付き比較: rs1 < rs2 なら 1
+                          * (関係演算子用。SLTU と funct3 だけ違う) */
+static int OP_XORI = 19; /* 即値との XOR。1 との XOR は
+                          * 「1か0の反転」に使える */
 
 static int asm_op[2048];
 static int asm_rd[2048];
@@ -1661,6 +1718,23 @@ static int gen_expr(int node) {
         asm_push(OP_MUL, REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_DIV)
         asm_push(OP_DIV, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_LT)
+        /* slt: 左 (t1) < 右 (t2) なら 1 (符号付き比較) */
+        asm_push(OP_SLT, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_GT)
+        /* > は両辺を入れ替えた < 。slt の両辺を逆に置く */
+        asm_push(OP_SLT, REG_T1, REG_T2, REG_T1, 0);
+    else if (node_kind[node] == NODE_LE ||
+             node_kind[node] == NODE_GE) {
+        /* <= は「> でない」、>= は「< でない」。
+         * 反対の比較をしてから 1 と XOR して反転する
+         * (値は 1 か 0 なので、XOR 1 がちょうど反転になる) */
+        if (node_kind[node] == NODE_LE)
+            asm_push(OP_SLT, REG_T1, REG_T2, REG_T1, 0);
+        else
+            asm_push(OP_SLT, REG_T1, REG_T1, REG_T2, 0);
+        asm_push(OP_XORI, REG_T1, REG_T1, 0, 1);
+    }
     else {
         /* 比較 (== / !=): まず引き算して「差」にする。
          * 差が 0 なら等しい。あとは差を見て 1 か 0 を作る:
@@ -1865,7 +1939,8 @@ static int expr_needs_stack(int node) {
     int k = node_kind[node];
     if (k == NODE_ADD || k == NODE_SUB || k == NODE_AND ||
         k == NODE_EQ || k == NODE_NE || k == NODE_MUL ||
-        k == NODE_DIV) {
+        k == NODE_DIV || k == NODE_LT || k == NODE_GT ||
+        k == NODE_LE || k == NODE_GE) {
         if (!is_leaf(node_rhs[node]))
             return 1;
         return expr_needs_stack(node_lhs[node]) ||
@@ -2097,6 +2172,17 @@ static unsigned int encode_inst(int i) {
         /* and rd, rs1, rs2 -- R 形式。add との違いは funct3 が 7 */
         return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
                (7u << 12) | ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_SLT) {
+        /* slt rd, rs1, rs2 -- R 形式。sltu との違いは
+         * funct3 が 2 (符号付きで比べる) */
+        return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (2u << 12) | ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_XORI) {
+        /* xori rd, rs1, imm -- I 形式。addi との違いは funct3 が 4 */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (4u << 12) | ((unsigned int)rd << 7) | 0x13u;
     }
     if (op == OP_SLTU) {
         /* sltu rd, rs1, rs2 -- R 形式。add との違いは funct3 が 3 */
