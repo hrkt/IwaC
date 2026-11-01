@@ -33,6 +33,7 @@
 #   v13: 単純な #define (単語単位の置き換え、文字列・コメントは対象外)
 #   v14: KosabaOS ターゲット (--kosaba: ELF/0x40000000/syscall)
 #   v15: iwac 本体の KosabaOS 版 (kosaba/ の crt+shim でビルド)
+#   v16: 字句の完成 (ブロックコメント/文字リテラル/型の語彙)
 set -e
 cd "$(dirname "$0")"
 
@@ -389,5 +390,21 @@ if [ -n "$RISCV_CC" ]; then
 else
     echo "skip: v15 (RISC-V 用 gcc が無いため)"
 fi
+
+# --- v16: 字句の完成 ---
+"$IWAC" '/* 注 */ putc(65); /* 複数
+行 */' > "$TMP/v16a.bin"
+check_run "$TMP/v16a.bin" A "v16: ブロックコメント"
+"$IWAC" "putc('B');" > "$TMP/v16b.bin"
+check_run "$TMP/v16b.bin" B "v16: 文字リテラル"
+"$IWAC" "putc('\n' - 10 + 67);" > "$TMP/v16c.bin"
+check_run "$TMP/v16c.bin" C "v16: エスケープ文字リテラル"
+"$IWAC" 'long f(int a) { putc(68); } f(1);' > "$TMP/v16d.bin"
+check_run "$TMP/v16d.bin" D "v16: long の型"
+"$IWAC" 'unsigned char buf[2]; buf[0] = 69; putc(buf[0]);' > "$TMP/v16e.bin"
+check_run "$TMP/v16e.bin" E "v16: unsigned char の配列"
+check_error "putc('');" "空の文字リテラル"
+check_error '/* 終わらない' "閉じないブロックコメント"
+check_error "putc('AB');" "2文字の文字リテラル"
 
 echo "PASS"

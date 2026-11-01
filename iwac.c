@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v14)
+/* iwac -- Cコンパイラのサブセット (v16)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v14 の言語 (文法) ===
+ * === v16 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -204,6 +204,17 @@
  *     直接触れない。OS の syscalls.md の番号 1)
  *   終わり: wfi → exit システムコール (番号 3)
  *   スタック: 自前で用意 → OS が用意する (出さない)
+ * v15 では iwac 本体が KosabaOS のユーザープログラムに
+ * なった (kosaba/ の crt と shim。iwac.c は無変更)。
+ *
+ * v16 はセルフホストへの階段の1段目: 字句の完成。
+ *   C 形式のブロックコメント (skip_spaces で読み飛ばす。
+ *     閉じ忘れは lex_failed の印で parse を失敗させる)
+ *   文字リテラル 'a' '\n' '\0' 等 (値は文字コードの数)
+ *   型の語彙に long / unsigned / signed / short を追加
+ *     (unsigned long のような並びも受ける。型は従来
+ *     どおり読み捨てる)
+ *
  * KosabaOS 向けのプログラムでは、UART 直書きの
  * uart_putc のような MMIO アクセスは使えない (保護違反で
  * 終了させられる)。出力は組み込み putc で行うこと。
@@ -280,6 +291,11 @@ static void out_byte(int byte) {
  * 解析や生成の段階では何も出力されていないので、失敗しても
  * 半端なバイナリが残ることはない */
 static char *errmsg;
+
+/* 字句レベルの失敗の印 (v16)。skip_spaces は戻り値で失敗を
+ * 伝えられないので、ブロックコメントの閉じ忘れはこちらに
+ * 印を置き、parse_program が最後に確認する */
+static int lex_failed;
 
 /* レジスタ番号の約束 (設計書にも記載。ABI 名と x 番号)
  * レジスタは番号で扱う: zero = 0、t0 = 5、t1 = 6、t2 = 7 */
@@ -608,6 +624,23 @@ static void skip_spaces(void) {
                 cur++;
             continue;
         }
+        if (cur[0] == '/' && cur[1] == '*') {
+            /* ブロックコメント (v16): 閉じの印まで飛ばす。
+             * 閉じが無ければ黙って終わりにせず字句の
+             * エラーにする。この関数は戻り値で失敗を
+             * 伝えられないので、印 (lex_failed) で伝える */
+            cur += 2;
+            while (*cur != '\0' &&
+                   !(cur[0] == '*' && cur[1] == '/'))
+                cur++;
+            if (*cur == '\0') {
+                errmsg = "コメントが閉じていません (*/ が必要です)";
+                lex_failed = 1;
+                return;
+            }
+            cur += 2;
+            continue;
+        }
         return;
     }
 }
@@ -743,12 +776,56 @@ static int expect_char(char c, char *msg);
  * 使うのはエラー (「いつか入るはず」の値で計算しないため。
  * この小さい言語では、使う前に必ず代入文が先にある書き方)。
  * 成功したらノード番号、失敗したら -1 を返す */
+/* 文字リテラルを読む (v16): 'a' の形。中身は1文字か
+ * エスケープ1つ。値はその文字コードで、数のノードになる。
+ * エスケープは文字列の4つ (\n \t \\ \") に \' と \0 を
+ * 加えた6つ。空 ('')、2文字以上、閉じ忘れはエラー。
+ * 成功したらノード番号、失敗したら -1 を返す */
+static int parse_char_node(void) {
+    cur++;  /* 開きの ' を飛ばす */
+    int value;
+    if (*cur == '\\') {
+        cur++;
+        if (*cur == 'n')
+            value = '\n';
+        else if (*cur == 't')
+            value = '\t';
+        else if (*cur == '0')
+            value = 0;
+        else if (*cur == '\\')
+            value = '\\';
+        else if (*cur == '\'')
+            value = '\'';
+        else if (*cur == '"')
+            value = '"';
+        else {
+            errmsg = "使えるエスケープは \\n \\t \\0 \\\\ \\' \\\" だけです";
+            return -1;
+        }
+        cur++;
+    } else if (*cur == '\'' || *cur == '\0') {
+        errmsg = "文字リテラルが空か、閉じていません";
+        return -1;
+    } else {
+        value = (unsigned char)*cur;
+        cur++;
+    }
+    if (*cur != '\'') {
+        errmsg = "文字リテラルは1文字だけです (閉じの ' が必要です)";
+        return -1;
+    }
+    cur++;
+    return new_node(NODE_NUM, value, 0, 0);
+}
+
 static int parse_primary_node(void) {
     skip_spaces();
     if (is_digit(*cur))
         return parse_number_node();
     if (*cur == '"')
         return parse_string_node();
+    if (*cur == '\'')
+        return parse_char_node();
     if (*cur == '(') {
         /* かっこ: 中身は式全体。かっこ自体は木を作らず、
          * 中身の木をそのまま返す (優先順位の指定だけが役目) */
@@ -1002,9 +1079,19 @@ static int expect_char(char c, char *msg) {
 static int parse_stmt(void);
 static int parse_stmt_list(int in_brace);
 
-/* 型を1つ読む: [ const ] (void|char|int) { * }
+/* 型を1つ読む: [ const ] 型の言葉 { 型の言葉 } { * }
  * 型は今は読み捨てるので、形だけ確かめて進む。
  * 単語が型でなければ 0 を返す */
+/* 型を表す言葉かどうか (v16 で語彙を増やした: long /
+ * unsigned / signed / short。型そのものは従来どおり
+ * 読み捨てるが、宣言の形として受け付ける) */
+static int is_type_word(void) {
+    return ident_is("void") || ident_is("char") ||
+           ident_is("int") || ident_is("long") ||
+           ident_is("short") || ident_is("unsigned") ||
+           ident_is("signed");
+}
+
 static int parse_type(void) {
     if (!is_ident_start(*cur))
         return 0;
@@ -1015,8 +1102,24 @@ static int parse_type(void) {
         if (!parse_ident())
             return 0;
     }
-    if (!ident_is("void") && !ident_is("char") && !ident_is("int"))
+    if (!is_type_word())
         return 0;
+    /* 型の言葉が続く間は読み進める (unsigned long や
+     * long long のような組み合わせを受けるため) */
+    for (;;) {
+        skip_spaces();
+        if (!is_ident_start(*cur))
+            break;
+        /* 次の言葉を取ってみて、型の言葉でなければ
+         * カーソルを戻す (それは変数名や関数名のはず) */
+        char *save = cur;
+        if (!parse_ident())
+            return 0;
+        if (!is_type_word()) {
+            cur = save;
+            break;
+        }
+    }
     skip_spaces();
     while (*cur == '*') {  /* ポインタの印は読み飛ばす */
         cur++;
@@ -1177,8 +1280,7 @@ static int parse_stmt_list(int in_brace) {
                 return -2;
             int is_keyword = ident_is("while") || ident_is("putc") ||
                              ident_is("if");
-            int is_type = ident_is("void") || ident_is("char") ||
-                          ident_is("int") || ident_is("const");
+            int is_type = is_type_word() || ident_is("const");
             if (is_type) {
                 /* 型で始まるのは、関数定義か配列の宣言。
                  * 名前の後ろが '[' なら配列の宣言で、こちらは
@@ -1320,8 +1422,7 @@ static int parse_stmt(void) {
          * parse_stmt_list がそちらへ振り分ける) */
         char *tsave = cur;
         if (parse_ident() &&
-            (ident_is("void") || ident_is("char") ||
-             ident_is("int") || ident_is("const"))) {
+            (is_type_word() || ident_is("const"))) {
             cur = tsave;
             return parse_array_decl();
         }
@@ -1519,6 +1620,7 @@ static int parse_program(char *program) {
     prog_final = -1;
     prog_has_final = 0;
     prog_main = -1;
+    lex_failed = 0;
     skip_spaces();
 
     /* v0 互換: プログラムが丸ごと1文字 (数字以外) なら、
@@ -1536,6 +1638,8 @@ static int parse_program(char *program) {
     int head = parse_stmt_list(0);
     if (head == -2)
         return 0;
+    if (lex_failed)
+        return 0;  /* 字句の失敗 (コメントの閉じ忘れ等) */
     if (head == -1 && !prog_has_final && nfunc == 0) {
         /* 文も式も無い = 空のプログラム。文だけのプログラムは
          * よいが、空は書き間違いとしてエラーにしておく */

@@ -14,7 +14,15 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/phases.html`](doc/phases.html)（単体で開ける HTML、
 初心者向けに各フェーズで何をやったかを解説）。
 
-## 現在地: v15
+## 現在地: v16（セルフホストへの階段の1段目）
+
+iwac が iwac 自身をコンパイルできるようにする階段
+（v16〜v24、計画は doc/roadmap.md）を登り始めた。
+1段目は字句の完成: C 形式のブロックコメント、文字
+リテラル（`'A'`、`'\n'`、`'\0'`）、型の語彙の拡張
+（long / unsigned / signed / short）。
+
+その下の土台（v15）:
 
 iwac 本体が KosabaOS のユーザープログラムとして動く
 ようになった（`kosaba/build-kosaba.sh` で `iwac.elf` を

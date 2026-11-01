@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v15 まで</title>
+<title>IwaC の歩み — v0 から v16 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v15 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v16 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -335,7 +335,8 @@
   <a class="done" href="#v12">v12 main</a><span class="arr">→</span>
   <a class="done" href="#v13">v13 #define</a><span class="arr">→</span>
   <a class="done" href="#v14">v14 KosabaOS</a><span class="arr">→</span>
-  <a class="done" href="#v15">v15 OS で動く iwac</a>
+  <a class="done" href="#v15">v15 OS で動く iwac</a><span class="arr">→</span>
+  <a class="done" href="#v16">v16 字句の完成</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -600,6 +601,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v13</span>　単純な <code class="inline">#define</code> で、定数に名前が付けられる</li>
     <li><span class="ok">✓ v14</span>　KosabaOS 向けの ELF を出せるようになり、OS の上で Hello World が動いた</li>
     <li><span class="ok">✓ v15</span>　iwac 自身が OS の上で動き、OS の中でコンパイルして実行するところまで来た</li>
+    <li><span class="ok">✓ v16</span>　セルフホストへの階段の1段目：ブロックコメント・文字リテラル・型の語彙が入った</li>
   </ul>
 </section>
 
@@ -1094,10 +1096,30 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   最初に設計するときにこそ効きます。</p></div>
 </section>
 
+<!-- ================= v16 ================= -->
+<section class="phase" id="v16">
+  <div class="head"><span class="badge b-v4">v16</span><h2>字句の完成 — セルフホストへの階段の1段目</h2></div>
+  <p class="goal-line">目標：<b>「iwac が iwac 自身をコンパイルできる」への第一歩として、本物の C ソースの字句を全部読めるようにすること。</b></p>
+  <p>新しい目標はセルフホスト（自分自身をコンパイルできるコンパイラ）です。
+  iwac 本体のソース（約116KB）を実測して「何が足りないか」を洗い出し、
+  v16 から v24 までの階段を計画しました。構造体や switch のように
+  iwac 本体が使っていないものは、階段に入れていません。</p>
+<pre class="code">/* コメント */ putc('A');   ← ブロックコメントと文字リテラル
+long f(unsigned long x) { … }  ← 型の語彙の拡張</pre>
+  <div class="chips">
+    <span class="chip">ブロックコメント</span><span class="chip">文字リテラル</span>
+    <span class="chip">long / unsigned</span><span class="chip">階段は v24 まで</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  ゴールの測り方です。「自分をコンパイルできる」は遠い目標ですが、
+  本体のソースを実測すれば「足りないものの目録」に変わり、
+  一段ずつ登れる階段になります。次の段は演算子の完成です。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v15 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v16 時点）</p>
 </footer>
 
 </div>
