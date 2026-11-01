@@ -1,13 +1,18 @@
 #!/bin/sh
-# test.sh -- iwac v0 の検証をまとめて行う。
+# test.sh -- iwac の検証をまとめて行う。
 # (ツールのインストールはしない。それは doc/environment.md の範囲)
 #
+# 検証の考え方 (設計書 doc/design.md の「検証の方針」):
+#   ベアメタル実行の確認は QEMU のシリアル出力をファイルに落とし、
+#   「プログラムの結果の1バイトがログの最後に出るか」で見る。
+#   OpenSBI の起動表示が前に混ざるが、結果のバイトは最後に
+#   追加されるので、最後の1バイトを見れば判定できる。
+#
 # 検証内容:
-#   1. gcc で iwac がビルドできる
-#   2. iwac A と iwac 65 が同じ16バイトのバイナリを出す
-#   3. QEMU virt (ベアメタル) で実行すると、UART (シリアル) の
-#      最後の1バイトが A / B になる (A用とB用でログがその1バイト
-#      だけ違うことも確認する)
+#   v0: iwac A と iwac 65 が同じ16バイトを出し、実行すると A が出る
+#   v1: 式 65+1 → B、66-1 → A、50+10+5 → A が実行時に計算されて出る
+#       空白ありの式が空白なしと同じバイナリになる
+#       文法エラー (65+ / 65*2 / 2048) では失敗し、出力が空になる
 set -e
 cd "$(dirname "$0")"
 
@@ -19,39 +24,67 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "build: CC=$CC"
 "$CC" -std=c11 -Wall -Wextra -O2 -o "$TMP/iwac" iwac.c
+IWAC="$TMP/iwac"
 
-"$TMP/iwac" A > "$TMP/a.bin"
-"$TMP/iwac" 65 > "$TMP/a65.bin"
-"$TMP/iwac" B > "$TMP/b.bin"
-
-size=$(wc -c < "$TMP/a.bin")
-if [ "$size" -ne 16 ]; then
-    echo "FAIL: a.bin は ${size} バイト (16のはず)" >&2
+fail() {
+    echo "FAIL: $1" >&2
     exit 1
-fi
+}
+
+# --- バイナリを指定して QEMU で実行し、シリアルの最後の1バイトを
+#     期待値と比べる ---
+check_run() {
+    bin=$1; expect=$2; label=$3
+    timeout 3 "$QEMU" -machine virt -bios default -kernel "$bin" \
+        -m 128M -display none -monitor none -serial "file:$TMP/serial.log" \
+        >/dev/null 2>&1 || true
+    last=$(tail -c 1 "$TMP/serial.log")
+    if [ "$last" != "$expect" ]; then
+        fail "$label: 最後の1バイトが '$last' (期待は '$expect')"
+    fi
+    echo "ok: $label → '$expect' が出た"
+}
+
+# --- v0 の確認 ---
+"$IWAC" A > "$TMP/a.bin"
+"$IWAC" 65 > "$TMP/a65.bin"
+size=$(wc -c < "$TMP/a.bin")
+[ "$size" -eq 16 ] || fail "a.bin は ${size} バイト (16のはず)"
 cmp "$TMP/a.bin" "$TMP/a65.bin"
 echo "ok: 'A' と '65' が同じ16バイトを出した"
+check_run "$TMP/a.bin" A "v0: 'A'"
 
-run_one() {
-    timeout 3 "$QEMU" -machine virt -bios default -kernel "$1" \
-        -m 128M -display none -monitor none -serial "file:$2" \
-        >/dev/null 2>&1 || true
+# --- v1: 式の確認 ---
+"$IWAC" '65+1' > "$TMP/expr.bin"
+size=$(wc -c < "$TMP/expr.bin")
+[ "$size" -eq 24 ] || fail "65+1 のバイナリは ${size} バイト (24のはず)"
+check_run "$TMP/expr.bin" B "v1: '65+1'"
+
+"$IWAC" '66-1' > "$TMP/expr2.bin"
+check_run "$TMP/expr2.bin" A "v1: '66-1'"
+
+"$IWAC" '50+10+5' > "$TMP/expr3.bin"
+check_run "$TMP/expr3.bin" A "v1: '50+10+5'"
+
+# 空白を挟んでも同じバイナリになること
+"$IWAC" '65 + 1' > "$TMP/expr-sp.bin"
+cmp "$TMP/expr.bin" "$TMP/expr-sp.bin"
+echo "ok: 空白あり/なしで同じバイナリになった"
+
+# --- v1: エラーの確認 ---
+# 文法エラーのときは iwac が失敗し、標準出力 (バイナリ) が
+# 空のままになること。「解析が全部済んでから生成する」設計の確認。
+check_error() {
+    prog=$1; label=$2
+    if "$IWAC" "$prog" > "$TMP/err.bin" 2>/dev/null; then
+        fail "$label: エラーになるはずが成功してしまった"
+    fi
+    [ ! -s "$TMP/err.bin" ] || fail "$label: エラーなのにバイナリが出力された"
+    echo "ok: $label はエラーになり、出力は空だった"
 }
-run_one "$TMP/a.bin" "$TMP/serial-a.log"
-run_one "$TMP/b.bin" "$TMP/serial-b.log"
+check_error '65+' "'65+'"
+check_error '65*2' "'65*2' (v1 では * は未対応)"
+check_error '2048' "'2048' (addi 即値の上限超え)"
+check_error '' "空文字列"
 
-if [ "$(tail -c 1 "$TMP/serial-a.log")" != "A" ]; then
-    echo "FAIL: シリアルの最後の1バイトが A でない" >&2
-    exit 1
-fi
-if [ "$(tail -c 1 "$TMP/serial-b.log")" != "B" ]; then
-    echo "FAIL: シリアルの最後の1バイトが B でない" >&2
-    exit 1
-fi
-# ログ同士は最後の1バイトだけが違うはず (OpenSBIの表示は同一)
-if cmp -s "$TMP/serial-a.log" "$TMP/serial-b.log"; then
-    echo "FAIL: A用とB用のシリアルログが同一" >&2
-    exit 1
-fi
-echo "ok: QEMUで実行して UART に A / B が出た"
 echo "PASS"
