@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v4)
+/* iwac -- Cコンパイラのサブセット (v5)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,30 +39,48 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v4 の言語 (文法) ===
+ * === v5 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
- *           | { stmt } [ expr ]     (文の並び + 最後の式は任意)
+ *           | { funcdef | stmt } [ expr ]
+ *   funcdef = type ident "(" [ param ] ")" "{" { stmt } "}"
+ *   type    = [ "const" ] ("void" | "char" | "int") { "*" }
+ *             (型は今は読み捨てる。値は全部「64ビットの数」
+ *              として扱い、型による区別はまだしない)
+ *   param   = type ident          (引数は今は1つまで)
  *   stmt    = ident "=" expr ";"               (代入文)
  *           | "putc" "(" expr ")" ";"          (出力文)
  *           | "while" "(" expr ")" "{" { stmt } "}"  (繰り返し)
- *   expr    = primary { ("+" | "-" ) primary }
+ *           | ident "(" [ expr ] ")" ";"       (関数の呼び出し)
+ *   expr    = add { ("==" | "!=") add }        (比較は一番外側)
+ *   add     = primary { ("+" | "-" ) primary }
  *   primary = number | ident        (数、または変数)
  *           | string                (文字列。値はその住所)
  *           | "*" ident             (ポインタの先を読む)
  *   number  = 数字の並び (10進数、0..2047。理由は addi の項で)
- *   ident   = 英字か _ で始まる名前 (変数名。while と putc は予約語)
+ *   ident   = 英字か _ で始まる名前 (while / putc と型の単語は予約語)
  *   string  = '"' 文字の並び '"'    (エスケープは \n \t \\ \" )
  *
  *   例: "x = 65; x + 1"        → 66 になり 'B' が出る (v2)
  *       "s = \"Hi\"; *s"       → 'H' が出る (v3)
- *       "s = \"hello\n\"; while (*s) { putc(*s); s = s + 1; }"
- *                              → hello と出る (v4。これが目標の
- *                                KosabaOS の print loop の本体)
+ *       "void uart_puts(char *s) { while (*s != 0) { putc(*s); s = s + 1; } }"
+ *       "msg = \"hello\n\"; uart_puts(msg);"
+ *                              → hello と出る (v5。目標の
+ *                                KosabaOS の uart_puts その形)
  *
- * v4 で育ったのは「while と出力文」。目標である KosabaOS の
- * print loop (uart_puts) の本体が、この言語で書けるように
- * なった (関数の形にするのは v5)。
+ * v5 で育ったのは「関数」。呼び出しの約束 (呼び出し規約) は:
+ *   - 引数は a0 レジスタで渡す。関数は入ってすぐ、それを
+ *     引数の変数のレジスタへ写す
+ *   - 呼び出しは jal ra (戻り先を ra に残して飛ぶ)、
+ *     戻りは jalr (ra の指す場所へ飛ぶ)
+ *   - 関数は入るときに戻り先 ra をスタックへ退避し、
+ *     出るときに戻す。これで「関数が関数を呼ぶ」入れ子の
+ *     呼び出しでも、戻り先が上書きされずに済む
+ *   - スタックは、バイナリの後ろの空き地にコンパイラが
+ *     自分で用意する (起動直後は sp が保証されないため)
+ * 関数も変数と同じく「使う前に定義」が今の約束。スコープは
+ * まだ無く、引数も含め変数はプログラム全体で名前が一意。
+ * 戻り値のある関数 (return) はまだ無い (void のみ)。
  * (計画は doc/roadmap.md の「print loop」目標の節)
  *
  * 制御の流れは、分岐 (beq: 条件が 0 なら飛ぶ) とジャンプ
@@ -146,6 +164,9 @@ static int REG_ZERO = 0;
 static int REG_T0 = 5;  /* UART ベースアドレス専用 */
 static int REG_T1 = 6;  /* 今の値 */
 static int REG_T2 = 7;  /* 次の項 */
+static int REG_RA = 1;  /* 戻り先の住所 (関数の呼び出し用) */
+static int REG_SP = 2;  /* スタックポインタ (コンパイラが用意) */
+static int REG_A0 = 10; /* 引数を渡すレジスタ (呼び出し規約) */
 /* 変数は宣言された順に t3 (x28) から割り当てる。変数 i 番の
  * レジスタ番号は REG_VAR_BASE + i (最大4個なので t3〜t6) */
 static int REG_VAR_BASE = 28;
@@ -181,6 +202,10 @@ static int NODE_ASSIGN = 6; /* 代入文。node_val = 変数番号、
 static int NODE_PUTC = 7;   /* 出力文。node_lhs = 出す式 */
 static int NODE_WHILE = 8;  /* 繰り返し文。node_lhs = 条件の式、
                              * node_rhs = 本体の文の並びの先頭 */
+static int NODE_CALL = 9;   /* 呼び出し文。node_val = 関数番号、
+                             * node_lhs = 引数の式 (無ければ -1) */
+static int NODE_EQ = 10;    /* 比較 (==)。結果は 1 か 0 */
+static int NODE_NE = 11;    /* 比較 (!=)。結果は 1 か 0 */
 
 static int node_kind[512];
 static int node_val[512];
@@ -239,6 +264,37 @@ static int define_var(char *name, int len) {
 static int prog_stmts;
 static int prog_final;
 static int prog_has_final;
+
+/* --- 関数の名簿 ---
+ * 関数も変数と同じく名簿で管理する。関数 i 番について:
+ *   func_names[i]     : 名前
+ *   func_has_param[i] : 引数があるか
+ *   func_param_var[i] : 引数の変数番号 (引数があれば)
+ *   func_body[i]      : 本体の文の並びの先頭ノード
+ *   func_entry[i]     : 命令列の中での入口の命令番号
+ *                       (第2層が生成のたびに決める)
+ * 関数は最大16個まで */
+static char func_names[16][32];
+static int func_name_len[16];
+static int func_has_param[16];
+static int func_param_var[16];
+static int func_body[16];
+static int func_entry[16];
+static int nfunc;
+
+/* 名前 (場所と長さで渡す) の関数があればその番号、無ければ -1 */
+static int find_func(char *name, int len) {
+    for (int i = 0; i < nfunc; i++) {
+        if (func_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && func_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
 
 /* --- 文字列の置き場 (文字列テーブル) ---
  * プログラム中に出てきた文字列リテラルを全部溜める。
@@ -440,13 +496,13 @@ static int parse_primary_node(void) {
     return -1;
 }
 
-/* 式を読み、AST の根のノード番号を返す。失敗したら -1。
+/* 足し引きの式 (add) を読み、AST の根を返す。失敗したら -1。
  *
  * 読み方 (左結合): まず項を読む。演算子が来たら、次の項を
  * 読んで「今の木全体を左の子、新しい項を右の子とする新しい
  * 根」を作る。"50+10+5" は ((50+10)+5) という木になる。
  * 左から順に計算する v1 の意味は、この木の形そのものである */
-static int parse_expr(void) {
+static int parse_add_expr(void) {
     int lhs = parse_primary_node();
     if (lhs < 0)
         return -1;
@@ -455,6 +511,9 @@ static int parse_expr(void) {
         if (*cur == '\0' || *cur == ';' || *cur == ')')
             return lhs;  /* 式の終わり (文の区切り、全体の終わり、
                           * または while / putc の閉じかっこ) */
+        if ((*cur == '=' && cur[1] == '=') ||
+            (*cur == '!' && cur[1] == '='))
+            return lhs;  /* 比較が続く。parse_expr の仕事 */
         int kind;
         if (*cur == '+')
             kind = NODE_ADD;
@@ -470,6 +529,35 @@ static int parse_expr(void) {
         cur++;
         skip_spaces();
         int rhs = parse_primary_node();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(kind, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* 式を読む。式は「足し引きの式」で、さらにその外側に
+ * 比較 (== / !=) が最大で連なる形。比較は足し引きより
+ * ゆるく結ぶ (C と同じ優先順位) ので、木の根の側に来る。
+ * 例: "*s != 0" は !=(*s, 0) という木になる。
+ * 結果は「成り立てば 1、だめなら 0」の数になる */
+static int parse_expr(void) {
+    int lhs = parse_add_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        int kind;
+        if (cur[0] == '=' && cur[1] == '=')
+            kind = NODE_EQ;
+        else if (cur[0] == '!' && cur[1] == '=')
+            kind = NODE_NE;
+        else
+            return lhs;
+        cur += 2;
+        skip_spaces();
+        int rhs = parse_add_expr();
         if (rhs < 0)
             return -1;
         lhs = new_node(kind, 0, lhs, rhs);
@@ -506,6 +594,105 @@ static int expect_char(char c, char *msg) {
 static int parse_stmt(void);
 static int parse_stmt_list(int in_brace);
 
+/* 型を1つ読む: [ const ] (void|char|int) { * }
+ * 型は今は読み捨てるので、形だけ確かめて進む。
+ * 単語が型でなければ 0 を返す */
+static int parse_type(void) {
+    if (!is_ident_start(*cur))
+        return 0;
+    if (!parse_ident())
+        return 0;
+    if (ident_is("const")) {
+        skip_spaces();
+        if (!parse_ident())
+            return 0;
+    }
+    if (!ident_is("void") && !ident_is("char") && !ident_is("int"))
+        return 0;
+    skip_spaces();
+    while (*cur == '*') {  /* ポインタの印は読み飛ばす */
+        cur++;
+        skip_spaces();
+    }
+    return 1;
+}
+
+/* 関数定義を読む: 型 名前 ( [引数] ) { 文の並び }
+ * 成功したら 1、失敗したら 0。関数は本体を読む前に名簿へ
+ * 載せるので、自分自身を呼ぶ (再帰の) 形も読める。
+ * 引数は今は1つまで。引数の名前は変数として名簿に載る */
+static int parse_funcdef(void) {
+    if (!parse_type()) {
+        errmsg = "関数は 型 名前 ( 引数 ) { } の形で書きます";
+        return 0;
+    }
+    skip_spaces();
+    if (!parse_ident()) {
+        errmsg = "関数の名前が必要です";
+        return 0;
+    }
+    char name_buf[32];
+    int name_len = ident_len;
+    for (int i = 0; i < name_len; i++)
+        name_buf[i] = ident_buf[i];
+    if (find_func(name_buf, name_len) >= 0) {
+        errmsg = "同じ名前の関数が二つあります";
+        return 0;
+    }
+    if (nfunc >= 16) {
+        errmsg = "関数は16個までです";
+        return 0;
+    }
+    int f = nfunc++;
+    for (int i = 0; i < name_len; i++)
+        func_names[f][i] = name_buf[i];
+    func_name_len[f] = name_len;
+    func_has_param[f] = 0;
+    func_param_var[f] = -1;
+    func_body[f] = -1;
+
+    if (!expect_char('(', "関数名の後には ( が必要です"))
+        return 0;
+    skip_spaces();
+    if (*cur == ')') {
+        cur++;  /* 引数なし */
+    } else {
+        /* 引数: 型 名前 (名前が変数として登録される) */
+        if (!parse_type()) {
+            errmsg = "引数は 型 名前 の形で書きます";
+            return 0;
+        }
+        skip_spaces();
+        if (!parse_ident()) {
+            errmsg = "引数の名前が必要です";
+            return 0;
+        }
+        char pname[32];
+        int plen = ident_len;
+        for (int i = 0; i < plen; i++)
+            pname[i] = ident_buf[i];
+        int var = define_var(pname, plen);
+        if (var < 0)
+            return 0;
+        func_has_param[f] = 1;
+        func_param_var[f] = var;
+        skip_spaces();
+        if (*cur == ',') {
+            errmsg = "引数は今は1つまでです";
+            return 0;
+        }
+        if (!expect_char(')', "引数の後には ) が必要です"))
+            return 0;
+    }
+    if (!expect_char('{', "関数の本体は { で始めます"))
+        return 0;
+    int body = parse_stmt_list(1);
+    if (body == -2)
+        return 0;
+    func_body[f] = body;
+    return 1;
+}
+
 /* 文の並びを読む。in_brace が 1 のときは while の本体で、
  * '}' まで読んで '}' を消費する。0 のときはプログラムの
  * 頭から、最後の式か入力の終わりまで読む。
@@ -539,9 +726,24 @@ static int parse_stmt_list(int in_brace) {
             if (!parse_ident())
                 return -2;
             int is_keyword = ident_is("while") || ident_is("putc");
+            int is_type = ident_is("void") || ident_is("char") ||
+                          ident_is("int") || ident_is("const");
+            if (is_type) {
+                /* 型で始まるのは関数定義。置けるのは
+                 * プログラムの頭だけ (関数の中には書けない) */
+                if (in_brace) {
+                    errmsg = "関数定義はプログラムの頭にだけ書けます";
+                    return -2;
+                }
+                cur = save;
+                if (!parse_funcdef())
+                    return -2;
+                continue;
+            }
             skip_spaces();
             int is_assign = (*cur == '=' && cur[1] != '=');
-            if (is_keyword || is_assign) {
+            int is_call = (*cur == '(');
+            if (is_keyword || is_assign || is_call) {
                 cur = save;  /* parse_stmt に頭から読ませる */
                 int stmt = parse_stmt();
                 if (stmt < 0)
@@ -612,15 +814,45 @@ static int parse_stmt(void) {
         return new_node(NODE_PUTC, 0, expr, 0);
     }
 
-    /* 残る形は代入文: 名前 = 式 ;
-     * 右辺を先に読んでから名簿に載せる (右辺の中で代入先
-     * 自身を使うのは、初回代入ではまだ値が無いのでエラーに
-     * なるのが正しい)。再代入では名簿に既にあるので読める */
     char name_buf[32];
     int name_len = ident_len;
     for (int i = 0; i < name_len; i++)
         name_buf[i] = ident_buf[i];
-    if (!expect_char('=', "文は 代入 (名前 = 式 ;) か while か putc です"))
+
+    /* 名前の次が '(' なら、関数の呼び出し文:
+     * 名前 ( [式] ) ; 。関数は定義済みのものだけ呼べる
+     * (「使う前に定義」の約束は関数も同じ) */
+    skip_spaces();
+    if (*cur == '(') {
+        int f = find_func(name_buf, name_len);
+        if (f < 0) {
+            errmsg = "定義されていない関数が呼ばれました";
+            return -1;
+        }
+        cur++;
+        skip_spaces();
+        int arg = -1;
+        if (*cur != ')') {
+            arg = parse_expr();
+            if (arg < 0)
+                return -1;
+        }
+        if (!expect_char(')', "呼び出しの後には ) が必要です"))
+            return -1;
+        if (!expect_char(';', "呼び出し文の終わりには ; が必要です"))
+            return -1;
+        if ((arg >= 0) != func_has_param[f]) {
+            errmsg = "引数の数が関数の定義と合いません";
+            return -1;
+        }
+        return new_node(NODE_CALL, f, arg, 0);
+    }
+
+    /* 残る形は代入文: 名前 = 式 ;
+     * 右辺を先に読んでから名簿に載せる (右辺の中で代入先
+     * 自身を使うのは、初回代入ではまだ値が無いのでエラーに
+     * なるのが正しい)。再代入では名簿に既にあるので読める */
+    if (!expect_char('=', "文は 代入 (名前 = 式 ;) か while か putc か呼び出しです"))
         return -1;
     int expr = parse_expr();
     if (expr < 0)
@@ -641,6 +873,7 @@ static int parse_program(char *program) {
     nvar = 0;
     nstr = 0;
     str_used = 0;
+    nfunc = 0;
     prog_stmts = -1;
     prog_final = -1;
     prog_has_final = 0;
@@ -661,7 +894,7 @@ static int parse_program(char *program) {
     int head = parse_stmt_list(0);
     if (head == -2)
         return 0;
-    if (head == -1 && !prog_has_final) {
+    if (head == -1 && !prog_has_final && nfunc == 0) {
         /* 文も式も無い = 空のプログラム。文だけのプログラムは
          * よいが、空は書き間違いとしてエラーにしておく */
         errmsg = "プログラムが空です";
@@ -704,7 +937,19 @@ static int OP_BEQ = 8;   /* 2つのレジスタが等しければ飛ぶ。
                           * 入れる (バイト数ではない)。
                           * バイト単位の距離への変換は第3層 */
 static int OP_JAL = 9;   /* 無条件に飛ぶ。asm_imm は同上、
-                          * asm_rd は 0 (戻り先は保存しない) */
+                          * asm_rd は 0 (戻り先は保存しない)。
+                          * 関数呼び出しでは asm_rd を ra (1) にし、
+                          * asm_imm には関数番号を負数で入れる
+                          * (-(関数番号+1))。生成の最後に、
+                          * 関数の入口番号へ書き直す */
+static int OP_SD = 10;   /* メモリへ8バイト書く (ra の退避用) */
+static int OP_LD = 11;   /* メモリから8バイト読む (ra の復帰用) */
+static int OP_JALR = 12; /* レジスタの指す住所へ飛ぶ (関数からの
+                          * 戻り。rd=0, rs1=ra, imm=0) */
+static int OP_SLTU = 13; /* 符号なし比較: rs1 < rs2 なら 1
+                          * (0 と比べれば「0 でないか」になる) */
+static int OP_SLTIU = 14;/* 即値との符号なし比較
+                          * (1 と比べれば「0 かどうか」になる) */
 
 static int asm_op[2048];
 static int asm_rd[2048];
@@ -809,8 +1054,19 @@ static int gen_expr(int node) {
     gen_load_leaf(REG_T2, rhs);
     if (node_kind[node] == NODE_ADD)
         asm_push(OP_ADD, REG_T1, REG_T1, REG_T2, 0);
-    else
+    else if (node_kind[node] == NODE_SUB)
         asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
+    else {
+        /* 比較 (== / !=): まず引き算して「差」にする。
+         * 差が 0 なら等しい。あとは差を見て 1 か 0 を作る:
+         *   != : sltu t1, zero, t1  (差が 0 でない = 1)
+         *   == : sltiu t1, t1, 1    (差が 1 未満 = 差 0 = 1) */
+        asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
+        if (node_kind[node] == NODE_NE)
+            asm_push(OP_SLTU, REG_T1, REG_ZERO, REG_T1, 0);
+        else
+            asm_push(OP_SLTIU, REG_T1, REG_T1, 0, 1);
+    }
     return 1;
 }
 
@@ -842,6 +1098,18 @@ static int gen_stmt(int node) {
         asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
         return 1;
     }
+    if (kind == NODE_CALL) {
+        /* 呼び出し: 引数があれば式を t1 で計算して a0 へ写し、
+         * jal ra で関数へ飛ぶ。飛び先は生成の最後に直すので、
+         * ここでは関数番号を負数の印で入れておく */
+        if (node_lhs[node] >= 0) {
+            if (!gen_expr(node_lhs[node]))
+                return 0;
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
+        }
+        asm_push(OP_JAL, REG_RA, 0, 0, -(node_val[node] + 1));
+        return 1;
+    }
     if (kind == NODE_WHILE) {
         int l_cond = nasm;  /* 条件判定の命令番号 */
         if (!gen_expr(node_lhs[node]))
@@ -865,15 +1133,56 @@ static int gen_stmt(int node) {
     return 0;
 }
 
-/* 命令列を全部作る (1回分): 土台 (UART の住所) → 文の並びを
- * 順に実行 → 最後の式 (あれば) → UART へ書く → 止まる。
- * 代入文の実行は「右辺を t1 で計算し、変数のレジスタへ
- * 写す」ことで、変数の値が次の文へ持ち越される。
- * 失敗したら 0 */
+/* スタックの天井の住所 (第2層が2パス間で確定させる)。
+ * スタックはバイナリの後ろの空き地に置き、下へ伸ばす */
+static unsigned int stack_top_addr;
+
+/* 関数1つ分の命令列を作る: 入口の決まり文句 (プロローグ)
+ * → 本体 → 出口の決まり文句 (エピローグ)。
+ *   プロローグ: スタックに場所を取り、戻り先 ra を退避。
+ *               引数があれば a0 から引数の変数へ写す
+ *   エピローグ: ra をスタックから戻し、場所を返して、
+ *               jalr で呼び出し側へ戻る
+ * ra を退避するのが肝心で、これがあるから関数の中で
+ * さらに別の関数を呼んでも (ra が上書きされても)
+ * 自分の戻り先を失わない。失敗したら 0 */
+static int gen_func(int f) {
+    func_entry[f] = nasm;
+    /* addi sp, sp, -16 / sd ra, 8(sp) */
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+    asm_push(OP_SD, 0, REG_SP, REG_RA, 8);
+    if (func_has_param[f]) {
+        /* addi 引数の変数, a0, 0 -- 引数を受け取る */
+        asm_push(OP_ADDI, var_reg(func_param_var[f]), REG_A0, 0, 0);
+    }
+    for (int s = func_body[f]; s != -1; s = node_next[s]) {
+        if (!gen_stmt(s))
+            return 0;
+    }
+    /* ld ra, 8(sp) / addi sp, sp, 16 / jalr zero, ra, 0 */
+    asm_push(OP_LD, REG_RA, REG_SP, 0, 8);
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+    asm_push(OP_JALR, 0, REG_RA, 0, 0);
+    return 1;
+}
+
+/* 命令列を全部作る (1回分): 土台 (UART の住所) → (関数が
+ * あれば) スタックの用意 → 文の並び → 最後の式 (あれば) →
+ * UART へ書く → 止まる → その後に関数の本体を並べる。
+ * 関数の本体は「止まる」の後ろに置くので、上から実行して
+ * 関数の中に落ちてくることはない (関数は呼び出しでのみ入る)。
+ * 最後に、呼び出しの飛び先 (負数の印) を関数の入口番号へ
+ * 書き直す。失敗したら 0 */
 static int gen_all(void) {
     nasm = 0;
     /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る */
     asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
+    if (nfunc > 0) {
+        /* スタックの用意: 天井の住所を sp に作る
+         * (関数が無いプログラムでは出さない。昔のプログラムの
+         * 出力が変わらないようにするため) */
+        gen_load_addr(REG_SP, stack_top_addr);
+    }
     for (int s = prog_stmts; s != -1; s = node_next[s]) {
         if (!gen_stmt(s))
             return 0;
@@ -886,6 +1195,15 @@ static int gen_all(void) {
     }
     /* wfi -- 止まる */
     asm_push(OP_WFI, 0, 0, 0, 0);
+    for (int f = 0; f < nfunc; f++) {
+        if (!gen_func(f))
+            return 0;
+    }
+    /* 呼び出しの飛び先を書き直す (印: -(関数番号+1)) */
+    for (int i = 0; i < nasm; i++) {
+        if (asm_op[i] == OP_JAL && asm_imm[i] < 0)
+            asm_imm[i] = func_entry[-asm_imm[i] - 1];
+    }
     return 1;
 }
 
@@ -899,12 +1217,18 @@ static int gen_all(void) {
  *   2回目: 確定した住所で作り直す。これが最終成果になる */
 static int gen_program(void) {
     code_insts = 0;
+    stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */
     if (!gen_all())
         return 0;
     code_insts = nasm;
     for (int i = 0; i < nstr; i++)
         str_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
                       (unsigned int)str_off[i];
+    /* スタックは「コード + 文字列」の後ろ 4KB 先から下へ
+     * 伸ばす。16 バイト単位に切り上げておく (置き場所の約束) */
+    stack_top_addr = LOAD_BASE + (unsigned int)nasm * 4u +
+                     (unsigned int)str_used + 4096u;
+    stack_top_addr = (stack_top_addr + 15u) & ~15u;
     if (!gen_all())
         return 0;
     return 1;
@@ -975,6 +1299,34 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                (4u << 12) | ((unsigned int)rd << 7) | 0x03u;
     }
+    if (op == OP_SD) {
+        /* sd rs2, imm(rs1) -- S 形式 (sb と同じ並び)。
+         * sb との違いは funct3 が 3 (8バイト幅) なこと */
+        return ((unsigned int)(imm >> 5) << 25) |
+               ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (3u << 12) | ((unsigned int)(imm & 31) << 7) | 0x23u;
+    }
+    if (op == OP_LD) {
+        /* ld rd, imm(rs1) -- I 形式。lbu との違いは funct3 が 3 */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (3u << 12) | ((unsigned int)rd << 7) | 0x03u;
+    }
+    if (op == OP_JALR) {
+        /* jalr rd, rs1, imm -- I 形式 (opcode 0x67)。
+         * rd=0, rs1=ra, imm=0 で「呼び出し側へ戻る」になる */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x67u;
+    }
+    if (op == OP_SLTU) {
+        /* sltu rd, rs1, rs2 -- R 形式。add との違いは funct3 が 3 */
+        return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (3u << 12) | ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_SLTIU) {
+        /* sltiu rd, rs1, imm -- I 形式。addi との違いは funct3 が 3 */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (3u << 12) | ((unsigned int)rd << 7) | 0x13u;
+    }
     if (op == OP_BEQ) {
         /* beq rs1, rs2, offset -- B 形式 (分岐)。
          * 命令列での飛び先は「命令番号」なので、まず
@@ -1043,7 +1395,7 @@ static void write_binary(void) {
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        print_str(2, "usage: iwac '<プログラム>'   例: iwac 's=\"Hi\"; while (*s) { putc(*s); s = s + 1; }'\n");
+        print_str(2, "usage: iwac '<プログラム>'   例: iwac 'void f(char *s) { while (*s != 0) { putc(*s); s = s + 1; } } f(\"Hi\");'\n");
         return 1;
     }
 

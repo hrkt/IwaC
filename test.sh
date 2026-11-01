@@ -19,6 +19,8 @@
 #       *s+1 の計算、文字列2つ)、閉じていない文字列などは失敗
 #   v4: while と putc で print loop 本体 (文字列を丸ごと出す)、
 #       カウントするループ、条件が偽なら素通り、入れ子のループ
+#   v5: 関数定義と呼び出し (引数1つ、入れ子の呼び出し)、
+#       本物の uart_puts の形、比較 == / != のループ
 set -e
 cd "$(dirname "$0")"
 
@@ -168,5 +170,25 @@ check_tail "$TMP/v4e.bin" 'BBBB' "v4: while の入れ子"
 
 check_error 'putc(65)' "'putc(65)' (; が無い)"
 check_error 'while (1) { putc(65);' "閉じていない while"
+
+# --- v5: 関数と比較 ---
+"$IWAC" 'void out(char c) { putc(c); } out(65); out(66);' > "$TMP/v5a.bin"
+check_tail "$TMP/v5a.bin" 'AB' "v5: 関数の定義と呼び出し"
+
+"$IWAC" 'void out2(char c) { putc(c); putc(c); } void wrap(char c) { out2(c); } wrap(88);' > "$TMP/v5b.bin"
+check_tail "$TMP/v5b.bin" 'XX' "v5: 関数が関数を呼ぶ (ra の退避)"
+
+# 目標の形そのもの: 本物の uart_puts (型・引数・!= 0 付き)
+"$IWAC" 'void uart_puts(char *s) { while (*s != 0) { putc(*s); s = s + 1; } } msg = "hello"; uart_puts(msg);' > "$TMP/v5c.bin"
+check_tail "$TMP/v5c.bin" 'hello' "v5: uart_puts の形で hello"
+
+"$IWAC" 'x=3; while (x != 0) { putc(65); x = x - 1; }' > "$TMP/v5d.bin"
+check_tail "$TMP/v5d.bin" 'AAA' "v5: 比較 != のループ"
+
+"$IWAC" 'y=0; while (y == 0) { putc(66); y = 1; }' > "$TMP/v5e.bin"
+check_tail "$TMP/v5e.bin" 'B' "v5: 比較 == のループ"
+
+check_error 'foo(65);' "定義されていない関数の呼び出し"
+check_error 'void f() { } f(65);' "引数の数が合わない呼び出し"
 
 echo "PASS"

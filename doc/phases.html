@@ -304,7 +304,8 @@
   <a class="done" href="#v2">v2 変数</a><span class="arr">→</span>
   <a class="done" href="#v3">v3 文字列</a><span class="arr">→</span>
   <a class="done" href="#v4">v4 ループ</a><span class="arr">→</span>
-  <a class="next" href="#v5">v5 関数（次）</a>
+  <a class="done" href="#v5">v5 関数</a><span class="arr">→</span>
+  <a class="next" href="#v6">v6 putc本体（次）</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -548,7 +549,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
 <pre class="code"><span class="k">void</span> uart_puts(<span class="k">const char</span> *s)      <span class="c"># ← 関数の形は v5</span>
 {
     <span class="k">while</span> (*s != <span class="s">'\0'</span>) {        <span class="c"># ← while は v4、比較 != は v5</span>
-        uart_putc(*s);          <span class="c"># ← *s は v3、出力は v4 の putc</span>
+        uart_putc(*s);          <span class="c"># ← *s は v3、出力は v4 の putc（本体は v6）</span>
         s++;                    <span class="c"># ← ポインタを進めるのは v3</span>
     }
 }</pre>
@@ -558,18 +559,59 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v2</span>　変数 <code class="inline">s</code> のように、値を持ち回れる</li>
     <li><span class="ok">✓ v3</span>　文字列と、その住所を持てる。<code class="inline">*s</code> で先を読める</li>
     <li><span class="ok">✓ v4</span>　<code class="inline">while</code> でくり返し、途中で <code class="inline">putc</code> で出せる → <b>print loop の本体は達成</b></li>
-    <li><span class="todo">… v5（次）</span>　関数定義・引数・呼び出しで、本物の <code class="inline">uart_puts</code> の形にする。<code class="inline">!=</code> の比較と、<code class="inline">uart_putc</code> 本体（送信待ちのポーリング）もここで</li>
+    <li><span class="ok">✓ v5</span>　関数定義・引数・呼び出しと <code class="inline">!=</code> の比較で、本物の <code class="inline">uart_puts</code> の形が完成 → <b>print loop 目標は達成</b></li>
+    <li><span class="todo">… v6（次）</span>　<code class="inline">uart_putc</code> の本体（送信待ちのポーリング）を、組み込みでなく本物のコードで書く</li>
   </ul>
 </section>
 
 <!-- ================= v5 ================= -->
 <section class="phase" id="v5">
-  <div class="head"><span class="badge b-next">v5 次</span><h2>関数の形へ — 本物の uart_puts を</h2></div>
-  <p>最後に残っているのは「関数」です。関数になると、新しい問題が出てきます：
-  引数をどのレジスタで渡すか、呼び出した側へどう戻るか（戻り先の住所の保存）、
-  関数の中で別の関数を呼ぶときの約束事、など。
-  ここまで来れば、KosabaOS の <code class="inline">uart_puts</code> と同じ形のプログラムが
-  iwac でコンパイルできるようになります。</p>
+  <div class="head"><span class="badge b-v4">v5</span><h2>「関数」— uart_puts が本物の形で動いた！</h2></div>
+  <p class="goal-line">目標：<b>関数定義・引数・呼び出しができるようになり、目標の関数そのものを書くこと。</b></p>
+<pre class="code"><span class="k">void</span> uart_puts(<span class="k">char</span> *s) {
+    <span class="k">while</span> (*s != 0) { putc(*s); s = s + 1; }
+}
+msg = <span class="s">"hello\n"</span>;
+uart_puts(msg);</pre>
+  <div class="screen"><small>QEMU で実行すると…</small><span class="big">hello</span>（＋改行） ← 関数になった print loop！</div>
+
+  <h3 class="mini">関数の「約束事」（呼び出し規約）を決める</h3>
+  <div class="inst-list">
+    <div class="inst"><span class="mn">a0</span><span class="desc">引数はこのレジスタに入れて渡す。関数は入ってすぐ、自分の変数へ写す</span></div>
+    <div class="inst"><span class="mn">jal ra</span><span class="desc">呼び出し：戻り先の住所を <code class="inline">ra</code> に残して、関数へ飛ぶ</span></div>
+    <div class="inst"><span class="mn">sd / ld</span><span class="desc">関数は入るときに <code class="inline">ra</code> を<b>スタック</b>へ退避し、出るときに戻す。これで「関数が関数を呼ぶ」入れ子でも戻り先が消えない</span></div>
+    <div class="inst"><span class="mn">jalr</span><span class="desc">戻り：<code class="inline">ra</code> の指す場所へ飛んで帰る</span></div>
+  </div>
+  <p>スタック（退避用の積み場所）は、起動直後は用意されていないので、
+  コンパイラがバイナリの後ろの空き地に自分で作ります。
+  型（<code class="inline">void</code> や <code class="inline">char *</code>）は今は「形だけ読んで意味は持たない」扱いで、
+  値は全部ただの数として扱っています。</p>
+
+  <h3 class="mini">ついでに「比較」も：<code class="inline">!=</code> と <code class="inline">==</code></h3>
+  <p>本物の条件 <code class="inline">*s != 0</code> を書くために比較も入れました。
+  作り方は「引き算して、差が 0 かどうかを見る」。
+  比較の結果は、成り立てば 1、だめなら 0 の数になります。</p>
+
+  <div class="screen"><small>他の実行結果</small>
+    <span class="big">AB</span>（関数を2回呼ぶ）　<span class="big">XX</span>（関数が関数を呼ぶ）　<span class="big">ABCD</span>（2つの文字列を続けて）　<span class="big">AAA</span>（<code class="inline">!=</code> のループ）</div>
+
+  <div class="chips">
+    <span class="chip">呼び出し規約</span><span class="chip">スタックと ra 退避</span>
+    <span class="chip">比較 == / !=</span><span class="chip">型は読み捨て</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  関数とは「飛んで行って、帰って来る」仕組み。そのためには
+  <b>戻り先を忘れない工夫</b>が要り、入れ子になるほどスタックへの退避が効いてきます。
+  世の中の「呼び出し規約」は、この約束事を標準化したものです。</p></div>
+</section>
+
+<!-- ================= v6 ================= -->
+<section class="phase" id="v6">
+  <div class="head"><span class="badge b-next">v6 次</span><h2>uart_putc の本体を、本物のコードで</h2></div>
+  <p>残っている最後の組み込みが <code class="inline">putc</code> です。
+  本物の <code class="inline">uart_putc</code> は「送信の窓口が空くまで待ってから書く」ポーリングをします。
+  それを書くには、決まった住所のメモリを読むこと、ビット演算 <code class="inline">&amp;</code>、
+  メモリへ書く文が要ります。これが v6 の題材です。</p>
   <p>その先には、OSの側の成長（ユーザーモード、ファイル、シェル）と合流して、
   <b>「KosabaOS のシェルから iwac で Hello World をコンパイルして実行する」</b>
   という最終目標が待っています。</p>
@@ -579,13 +621,14 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
   <div class="sizebar"><span class="lbl">v1 の「65+1」</span><div class="bar" style="width:96px"></div><span class="num">24 バイト</span></div>
   <div class="sizebar"><span class="lbl">v2 の「x=65; x+1」</span><div class="bar" style="width:128px"></div><span class="num">32 バイト</span></div>
   <div class="sizebar"><span class="lbl">v4 の print loop</span><div class="bar" style="width:252px"></div><span class="num">63 バイト（コード＋文字列）</span></div>
+  <div class="sizebar"><span class="lbl">v5 の uart_puts</span><div class="bar" style="width:460px"></div><span class="num">115 バイト（関数＋呼び出し側＋文字列）</span></div>
   <p>小さく始めて、必要になった分だけ育っているのが、サイズにも表れています。</p>
 </section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v4 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v5 時点）</p>
 </footer>
 
 </div>
