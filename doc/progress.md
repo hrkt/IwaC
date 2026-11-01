@@ -1,5 +1,39 @@
 # IwaC 進捗（できていること）
 
+## 2026-11-02: v14（KosabaOS ターゲット）— 合流の第一歩が成立
+
+- 実装したこと:
+  - `--kosaba` 指定で出力ターゲットを切り替え。
+    LOAD_BASE を 0x40000000 に、組み込み putc と最後の
+    式の出力を putc システムコール（a7=1）に、終わりを
+    exit システムコール（a7=3 の ecall）に変更。UART の
+    lui と自前のスタック用意は出さない（OS が用意）
+  - 書き出しは ELF: ELF64/ET_EXEC/RISC-V、PT_LOAD 1本
+    （offset 4096、vaddr 0x40000000、filesz = コード＋
+    文字列、memsz = filesz＋配列領域＝ローダが差分を
+    ゼロ埋め）。新規命令は OP_ECALL の1つだけ
+  - 例題 examples/hello-kosaba.c を追加（出力は組み込み
+    putc 経由。MMIO の uart_putc は使えない旨を明記）
+- 検証:
+  - 従来ターゲットのプログラム（hello.c 含む）は出力不変
+  - readelf で ELF 構造（ELF64/EXEC/RISC-V/入口/LOAD）と、
+    逆アセンブルで ecall の並び・wfi と UART lui の不在、
+    OS のスタックを使う前提の関数序文を確認
+  - 統合検証: KosabaOS の作業ツリーを /tmp にコピーし
+    （OS リポジトリ自体は無変更）、iwac 製 ELF を
+    uprog.elf として埋め込んでビルド・起動。'u' キーで
+    「[kernel] starting uprog.elf / Hello, World! /
+    [kernel] back from user program」、シェルからは
+    「kosaba> run uprog.elf」で Hello, World! が出て
+    プロンプトへ復帰、までを確認
+  - `./test.sh` に v14 の ELF 構造確認を追加して PASS
+    （下記コミット時点）
+- 次の相談事項: v15（iwac 本体の OS 移植）にはファイル
+  への書き込みが要るが、現行の syscall v1 に write が
+  無い（open/read/close/readdir/exec はある）。OS 側と
+  仕様を相談して進める
+
+
 ## 2026-11-01: v13（単純な #define）— 定数に名前が付いた
 
 - 実装したこと:

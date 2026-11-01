@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v13)
+/* iwac -- Cコンパイラのサブセット (v14)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v13 の言語 (文法) ===
+ * === v14 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -191,6 +191,23 @@
  * iwac 自身のソースは今もプリプロセッサ無しで書く
  * (これはコンパイルされる側のプログラムの機能)。
  *
+ * v14 では出力ターゲットに KosabaOS が増えた
+ * (--kosaba)。言語は同じで、変わるのは舞台の約束:
+ *   配置: 0x80200000 (ベアメタル) → 0x40000000 (OS の
+ *     ユーザー領域)。住所の材料は auipc 相対なので、
+ *     基準の定数を差し替えるだけでよい
+ *   形式: 生バイナリ → ELF (OS のローダの約束に合わせ、
+ *     PT_LOAD 1本、配列の領域は memsz の差分として
+ *     ローダにゼロ埋めさせる)
+ *   出力: 組み込み putc と最後の式は UART 直書き →
+ *     putc システムコール (U モードからは UART を
+ *     直接触れない。OS の syscalls.md の番号 1)
+ *   終わり: wfi → exit システムコール (番号 3)
+ *   スタック: 自前で用意 → OS が用意する (出さない)
+ * KosabaOS 向けのプログラムでは、UART 直書きの
+ * uart_putc のような MMIO アクセスは使えない (保護違反で
+ * 終了させられる)。出力は組み込み putc で行うこと。
+ *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
  * 文字列リテラルの「値」は、その先頭の住所である。住所は
@@ -273,6 +290,8 @@ static int REG_T2 = 7;  /* 次の項 */
 static int REG_RA = 1;  /* 戻り先の住所 (関数の呼び出し用) */
 static int REG_SP = 2;  /* スタックポインタ (コンパイラが用意) */
 static int REG_A0 = 10; /* 引数を渡すレジスタ (呼び出し規約) */
+static int REG_A7 = 17; /* システムコール番号のレジスタ
+                         * (KosabaOS ターゲット用、v14) */
 /* 変数は宣言された順に t3 (x28) から割り当てる。変数 i 番の
  * レジスタ番号は REG_VAR_BASE + i (最大4個なので t3〜t6) */
 static int REG_VAR_BASE = 28;
@@ -1586,6 +1605,9 @@ static int OP_SLT = 18;  /* 符号付き比較: rs1 < rs2 なら 1
                           * (関係演算子用。SLTU と funct3 だけ違う) */
 static int OP_XORI = 19; /* 即値との XOR。1 との XOR は
                           * 「1か0の反転」に使える */
+static int OP_ECALL = 20; /* ecall (環境呼び出し)。KosabaOS
+                           * ターゲットで OS のシステムコールを
+                           * 呼ぶ命令。符号化は固定の1語 (v14) */
 
 static int asm_op[2048];
 static int asm_rd[2048];
@@ -1645,6 +1667,14 @@ static int is_leaf(int node) {
  * hi = (差分 + 0x800) >> 12、lo = 差分 - (hi << 12) */
 static unsigned int LOAD_BASE = 0x80200000u;  /* 配置先頭 (下記) */
 static int code_insts;  /* 1回目の生成で数えた命令の総数 */
+
+/* 出力ターゲット (v14): 0 = ベアメタル (QEMU の -kernel 用。
+ * 配置 0x80200000、出力は UART 直書き、終わりは wfi)、
+ * 1 = KosabaOS のユーザープログラム (ELF、配置 0x40000000、
+ * 出力は putc システムコール、終わりは exit システムコール。
+ * スタックは OS が用意するので自分では用意しない)。
+ * main が --kosaba の指定で切り替える */
+static int target_kosaba;
 
 static void gen_load_addr(int reg, unsigned int addr) {
     /* この auipc 命令自身が置かれる住所 (命令列の今の末尾) */
@@ -1845,6 +1875,15 @@ static int gen_stmt(int node) {
     if (kind == NODE_PUTC) {
         if (!gen_expr(node_lhs[node]))
             return 0;
+        if (target_kosaba) {
+            /* KosabaOS では U モードから UART のレジスタを
+             * 触れないので、putc システムコール (番号 1) で
+             * 出す。a0 = 文字、a7 = 1、ecall */
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
+            asm_push(OP_ADDI, REG_A7, REG_ZERO, 0, 1);
+            asm_push(OP_ECALL, 0, 0, 0, 0);
+            return 1;
+        }
         /* sb t1, 0(t0) -- 式の値の下1バイトを UART へ */
         asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
         return 1;
@@ -2039,12 +2078,16 @@ static int list_needs_stack(int head) {
  * 書き直す。失敗したら 0 */
 static int gen_all(void) {
     nasm = 0;
-    /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る */
-    asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
-    if (stack_needed) {
+    if (!target_kosaba) {
+        /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る
+         * (KosabaOS ターゲットでは UART を直接触らないので不要) */
+        asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
+    }
+    if (stack_needed && !target_kosaba) {
         /* スタックの用意: 天井の住所を sp に作る
          * (要らないプログラムでは出さない。昔のプログラムの
-         * 出力が変わらないようにするため) */
+         * 出力が変わらないようにするため。KosabaOS では
+         * スタックは OS が用意するので、これも出さない) */
         gen_load_addr(REG_SP, stack_top_addr);
     }
     for (int s = prog_stmts; s != -1; s = node_next[s]) {
@@ -2054,21 +2097,36 @@ static int gen_all(void) {
     if (prog_has_final) {
         if (!gen_expr(prog_final))
             return 0;
-        /* sb t1, 0(t0) -- 最後の式の下1バイトを UART へ */
-        asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+        if (target_kosaba) {
+            /* 最後の式の出力も putc システムコールで */
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
+            asm_push(OP_ADDI, REG_A7, REG_ZERO, 0, 1);
+            asm_push(OP_ECALL, 0, 0, 0, 0);
+        } else {
+            /* sb t1, 0(t0) -- 最後の式の下1バイトを UART へ */
+            asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+        }
     }
     if (prog_main >= 0) {
         /* main の形 (v12): 入口として main を呼ぶ。
          * 飛び先は通常の呼び出しと同じ印 (-(番号+1)) で置き、
          * この後の一括書き直しで確定する。main から戻ると
-         * ra の指す次の命令 = wfi に落ちて止まる。
-         * main の入口では、戻り先 (wfi の住所) が ra に
-         * 入っているのを通常の関数と同じく退避するので、
-         * 呼び出しの作法そのままで動く */
+         * ra の指す次の命令 = 終わりの命令に落ちる。
+         * main の入口では、戻り先が ra に入っているのを
+         * 通常の関数と同じく退避するので、呼び出しの作法
+         * そのままで動く */
         asm_push(OP_JAL, REG_RA, 0, 0, -(prog_main + 1));
     }
-    /* wfi -- 止まる */
-    asm_push(OP_WFI, 0, 0, 0, 0);
+    if (target_kosaba) {
+        /* KosabaOS: exit システムコール (番号 3) で終わる。
+         * 戻ってくることはない。シェルから起動された場合は
+         * シェルへ、'u' で起動された場合はカーネルへ戻る */
+        asm_push(OP_ADDI, REG_A7, REG_ZERO, 0, 3);
+        asm_push(OP_ECALL, 0, 0, 0, 0);
+    } else {
+        /* wfi -- 止まる */
+        asm_push(OP_WFI, 0, 0, 0, 0);
+    }
     for (int f = 0; f < nfunc; f++) {
         if (!gen_func(f))
             return 0;
@@ -2281,6 +2339,11 @@ static unsigned int encode_inst(int i) {
                ((unsigned int)((off >> 12) & 0xff) << 12) |
                ((unsigned int)rd << 7) | 0x6fu;
     }
+    if (op == OP_ECALL) {
+        /* ecall: 引数を取らない固定パターン (v14)。
+         * wfi と同じ末尾 0x73 の系統で、上位のビットが違う */
+        return 0x00000073u;
+    }
     /* OP_WFI: 引数を取らない固定パターン */
     return 0x10500073u;
 }
@@ -2300,7 +2363,74 @@ static void write32(unsigned int inst) {
  * 実行が wfi で止まるため、後ろの文字列が命令として
  * 実行されることはない。文字列の住所は第2層がこの並びに
  * 合わせて決めてある */
+/* ELF の数値をリトルエンディアンで書く道具 (v14) */
+static void out16le(unsigned int v) {
+    out_byte(v & 0xff);
+    out_byte((v >> 8) & 0xff);
+}
+static void out32le(unsigned int v) {
+    out16le(v & 0xffff);
+    out16le((v >> 16) & 0xffff);
+}
+static void out64le(unsigned long v) {
+    out32le((unsigned int)(v & 0xffffffffu));
+    out32le((unsigned int)(v >> 32));
+}
+
+/* KosabaOS 用の ELF ヘッダを書く (v14)。OS の ELF ローダ
+ * (elf.c) が読む約束に合わせた最小形:
+ *   ELF64 / リトルエンディアン / ET_EXEC / RISC-V
+ *   プログラムヘッダ1本 (PT_LOAD): ファイルの 4096 バイト目
+ *   からを仮想アドレス 0x40000000 へ置く。入口も同じ住所。
+ *   p_filesz はコード＋文字列の長さ、p_memsz はそれに配列の
+ *   領域を足した長さ (ローダが差分をゼロ埋めする = 配列は
+ *   0 で始まる)。4096 までの間は 0 で埋める (p_offset と
+ *   p_vaddr の 4096 での剰余を揃える、ELF の約束) */
+static void write_elf_header(void) {
+    unsigned long filesz = (unsigned long)code_insts * 4ul +
+                           (unsigned long)str_used;
+    unsigned long memsz = filesz + (unsigned long)arr_used;
+    /* ELF ヘッダ (64 バイト) */
+    out_byte(0x7f);
+    out_byte('E');
+    out_byte('L');
+    out_byte('F');
+    out_byte(2);  /* 64 ビット */
+    out_byte(1);  /* リトルエンディアン */
+    out_byte(1);  /* バージョン */
+    out_byte(0);  /* OS ABI: 指定なし */
+    for (int i = 0; i < 8; i++)
+        out_byte(0);  /* 残りの識別バイト */
+    out16le(2);       /* e_type = ET_EXEC */
+    out16le(243);     /* e_machine = RISC-V */
+    out32le(1);       /* e_version */
+    out64le(0x40000000ul);  /* e_entry = 先頭 */
+    out64le(64);      /* e_phoff = ヘッダの直後 */
+    out64le(0);       /* e_shoff = セクションヘッダ無し */
+    out32le(0);       /* e_flags */
+    out16le(64);      /* e_ehsize */
+    out16le(56);      /* e_phentsize */
+    out16le(1);       /* e_phnum = 1 本 */
+    out16le(0);       /* e_shentsize */
+    out16le(0);       /* e_shnum */
+    out16le(0);       /* e_shstrndx */
+    /* プログラムヘッダ (56 バイト) */
+    out32le(1);       /* p_type = PT_LOAD */
+    out32le(7);       /* p_flags = 読み・書き・実行 */
+    out64le(4096);    /* p_offset */
+    out64le(0x40000000ul);  /* p_vaddr */
+    out64le(0x40000000ul);  /* p_paddr */
+    out64le(filesz);  /* p_filesz */
+    out64le(memsz);   /* p_memsz (配列の分はゼロ埋め) */
+    out64le(0x1000);  /* p_align */
+    /* 実データの開始 (4096 バイト目) まで 0 で埋める */
+    for (int i = 120; i < 4096; i++)
+        out_byte(0);
+}
+
 static void write_binary(void) {
+    if (target_kosaba)
+        write_elf_header();
     for (int i = 0; i < nasm; i++)
         write32(encode_inst(i));
     for (int i = 0; i < str_used; i++)
@@ -2558,25 +2688,43 @@ static int expand_defines(char *src) {
  *   parse (失敗したら何も出さない) → gen (同) → write
  * ================================================================ */
 
+/* 文字列が同じかどうか (道具。#define の展開でも使う) */
+static int str_eq(char *a, char *b) {
+    int i = 0;
+    while (a[i] != '\0' && a[i] == b[i])
+        i++;
+    return a[i] == b[i];
+}
+
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n");
+    /* 出力ターゲットの選択 (v14): 先頭に --kosaba があれば
+     * KosabaOS のユーザープログラム用 (ELF) に切り替える */
+    int argi = 1;
+    target_kosaba = 0;
+    if (argc >= 2 && str_eq(argv[1], "--kosaba")) {
+        target_kosaba = 1;
+        argi = 2;
+    }
+    if (argc != argi + 1) {
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n");
         return 1;
     }
+    if (target_kosaba)
+        LOAD_BASE = 0x40000000u;  /* OS のユーザー領域の先頭 */
 
     /* 入力の決定: .c ファイルは必ずファイルとして読む。
      * それ以外は、ファイルが開ければファイル、無ければ
      * 引数そのものがプログラム */
-    char *src = argv[1];
-    int must_file = ends_with_c(argv[1]);
-    int loaded = load_file(argv[1]);
+    char *src = argv[argi];
+    int must_file = ends_with_c(argv[argi]);
+    int loaded = load_file(argv[argi]);
     if (loaded < 0 || (must_file && loaded == 0)) {
         print_str(2, "iwac: ");
         if (loaded < 0)
             print_str(2, errmsg);
         else {
             print_str(2, "ファイルが開けません: ");
-            print_str(2, argv[1]);
+            print_str(2, argv[argi]);
         }
         print_str(2, "\n");
         return 1;

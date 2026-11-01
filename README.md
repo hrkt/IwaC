@@ -14,7 +14,22 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/phases.html`](doc/phases.html)（単体で開ける HTML、
 初心者向けに各フェーズで何をやったかを解説）。
 
-## 現在地: v13
+## 現在地: v14
+
+出力ターゲットに KosabaOS が増えた:
+
+```
+iwac --kosaba hello-kosaba.c > hello.elf
+```
+
+OS の ELF ローダに載る ELF（配置 0x40000000）を出し、
+出力は putc システムコール、終わりは exit システム
+コールになる。同梱の `examples/hello-kosaba.c` を
+OS のスクラッチコピーで統合検証済み: シェルから
+`run` で実行して `Hello, World!` が出て、プロンプトに
+戻ることを確認した。
+
+その下の土台（v13 まで）:
 
 単純な `#define` が入った。`#define THRE 32` のように
 定数に名前が付けられる（単語単位の置き換えだけ。

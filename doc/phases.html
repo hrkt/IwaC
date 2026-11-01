@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v13 まで</title>
+<title>IwaC の歩み — v0 から v14 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v13 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v14 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -333,7 +333,8 @@
   <a class="done" href="#v10">v10 ファイル入力</a><span class="arr">→</span>
   <a class="done" href="#v11">v11 関係演算子</a><span class="arr">→</span>
   <a class="done" href="#v12">v12 main</a><span class="arr">→</span>
-  <a class="done" href="#v13">v13 #define</a>
+  <a class="done" href="#v13">v13 #define</a><span class="arr">→</span>
+  <a class="done" href="#v14">v14 KosabaOS</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -596,6 +597,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v11</span>　<code class="inline">&lt;</code> <code class="inline">&gt;</code> などの関係演算子で、条件が自然に書ける</li>
     <li><span class="ok">✓ v12</span>　<code class="inline">int main()</code> の形で、プログラムに「入口」ができた</li>
     <li><span class="ok">✓ v13</span>　単純な <code class="inline">#define</code> で、定数に名前が付けられる</li>
+    <li><span class="ok">✓ v14</span>　KosabaOS 向けの ELF を出せるようになり、OS の上で Hello World が動いた</li>
   </ul>
 </section>
 
@@ -1025,10 +1027,42 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   こういう場所でも効きます。</p></div>
 </section>
 
+<!-- ================= v14 ================= -->
+<section class="phase" id="v14">
+  <div class="head"><span class="badge b-v4">v14</span><h2>KosabaOS ターゲット — 合流の第一歩</h2></div>
+  <p class="goal-line">目標：<b>iwac の作ったプログラムが、自作 OS の上でユーザープログラムとして動くこと。</b></p>
+<pre class="code">iwac --kosaba hello-kosaba.c &gt; hello.elf</pre>
+  <p>今までの出力は「OS の無いコンピュータ（QEMU）に直接置く生バイナリ」でした。
+  v14 では出力先の舞台がもう1つ増えました。言語は同じで、変わるのは舞台の約束だけです：</p>
+  <div class="regs">
+    <div class="reg"><span class="rname">置き場所</span><small>0x80200000（更地）→ 0x40000000（OS のユーザー領域）</small></div>
+    <div class="reg"><span class="rname">形式</span><small>生バイナリ → ELF（OS のローダが読む「配置の申告書」付き）</small></div>
+    <div class="reg"><span class="rname">出力</span><small>UART 直書き → putc システムコール（OS に頼む）</small></div>
+    <div class="reg"><span class="rname">終わり方</span><small>wfi で駐車 → exit システムコールで OS に戻る</small></div>
+  </div>
+  <div class="screen"><small>KosabaOS のシェルで実行すると…</small>
+    <span class="big">kosaba&gt; run uprog.elf</span><br>
+    <span class="big">Hello, World!</span> ← iwac 製プログラムが OS の上で動いた！</div>
+  <p>検証は OS の作業コピーの中で行いました（OS 本体のリポジトリは無変更）。
+  iwac 製の ELF を OS のファイルシステムに載せ、カーネルの起動キーと
+  シェルの <code class="inline">run</code> の両方で実行でき、終わると
+  プロンプトやカーネルにきちんと戻ることまで確認しています。</p>
+  <div class="chips">
+    <span class="chip">--kosaba</span><span class="chip">ELF 出力</span>
+    <span class="chip">ecall 命令</span><span class="chip">OS と合流</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「ターゲット」という考え方です。コンパイラの仕事の大部分
+  （言語の意味を命令に変えること）は舞台に依らず共通で、
+  舞台ごとの違いは「置き場所・形式・出力と終わりの作法」の
+  薄い層に閉じ込められました。住所を auipc 相対で作るという
+  v3 の決断が、ここで効いています。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v13 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v14 時点）</p>
 </footer>
 
 </div>

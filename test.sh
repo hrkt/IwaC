@@ -31,6 +31,7 @@
 #   v11: 関係演算子 < > <= >= (優先順位は C の段)
 #   v12: main の形 (入口は main、混ぜ書きは禁止)
 #   v13: 単純な #define (単語単位の置き換え、文字列・コメントは対象外)
+#   v14: KosabaOS ターゲット (--kosaba: ELF/0x40000000/syscall)
 set -e
 cd "$(dirname "$0")"
 
@@ -355,5 +356,17 @@ check_error '#define A 65
 putc(A);' "#define の再定義"
 check_error '#include "x.h"
 putc(65);' "#include は対象外"
+
+# --- v14: KosabaOS ターゲット (--kosaba) ---
+# ELF の構造を readelf で確かめる (OS 上での実行確認は
+# KosabaOS 側との統合検証として別途実施。doc/progress.md)
+"$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/k.elf"
+readelf -h "$TMP/k.elf" > "$TMP/k.hdr"
+grep -q 'Class:.*ELF64' "$TMP/k.hdr" || fail "v14: ELF64 でない"
+grep -q 'Type:.*EXEC' "$TMP/k.hdr" || fail "v14: ET_EXEC でない"
+grep -q 'Machine:.*RISC-V' "$TMP/k.hdr" || fail "v14: RISC-V でない"
+grep -q 'Entry point address:.*0x40000000' "$TMP/k.hdr" || fail "v14: 入口が 0x40000000 でない"
+readelf -l "$TMP/k.elf" | grep 'LOAD' | grep -q '0x0000000040000000' || fail "v14: PT_LOAD の vaddr が違う"
+echo "ok: v14: --kosaba の ELF (ELF64/EXEC/RISC-V/入口 0x40000000)"
 
 echo "PASS"

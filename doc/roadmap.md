@@ -255,3 +255,27 @@ void uart_puts(const char *s)
   ELF ローダ等）と合わせて、出力形式と実行方法を再設計する
 - 最終形: KosabaOS のシェルから `iwac hello.c` で
   Hello World をコンパイルし、実行できること
+
+### v14: KosabaOS ターゲット出力（済み、2026-11-02）
+
+- `iwac --kosaba ファイル.c` で、KosabaOS のユーザー
+  プログラム用 ELF を出す。OS 側の仕様（syscalls.md v1、
+  elf.c のローダ、vm.h の配置）に合わせた:
+  - ELF64 / ET_EXEC / RISC-V、PT_LOAD 1本、入口と配置は
+    0x40000000、p_filesz はコード＋文字列、p_memsz の
+    差分（配列の領域）はローダがゼロ埋め
+  - 組み込み putc と最後の式の出力は putc システム
+    コール（a7=1）、終わりは exit システムコール（a7=3）
+  - スタックは OS が用意するので自前の用意は出さない。
+    UART の lui も出さない。住所の材料は auipc 相対の
+    まま、基準 LOAD_BASE を 0x40000000 に差し替える
+  - 従来（ベアメタル）ターゲットの出力は完全不変
+- 統合検証（OS の作業ツリーのスクラッチコピーで実施、
+  OS リポジトリ自体は無変更）: examples/hello-kosaba.c の
+  ELF を uprog.elf として埋め込み、'u' 起動とシェルの
+  `run uprog.elf` の両方で Hello, World! → 正常復帰を
+  確認。**合流の第一歩が成立**
+- 次: v15 = iwac 本体を OS のユーザープログラムとして
+  ビルドする（4つの外注関数を OS の open/read/close/
+  write 相当の syscall へ。write はファイル書き込みが
+  要る点が要相談: 現行 syscall に write は無い）
