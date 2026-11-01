@@ -207,6 +207,17 @@
   .layout .seg small { display: block; font-weight: 400; font-size: 12.5px; opacity: .9; }
   .seg-code { background: var(--accent); flex: 3; }
   .seg-data { background: #0f766e; flex: 2; }
+  .seg-array { background: #6b4fa1; flex: 2; }
+  .seg-stack { background: #94a3b8; flex: 2; }
+
+  /* 配列の小箱の図 (v9) */
+  .cell.arr { border-color: #6b4fa1; background: #efeaf7; }
+  .cell.empty { border-style: dashed; border-color: #c4b5dd; background: #faf8fd; color: #b7a8d4; }
+  .memrow.idxrow { margin-top: 0; }
+  .cell.idx {
+    border: none; background: none; height: auto; line-height: 1.3;
+    font-size: 12.5px; color: #6b4fa1; font-family: inherit; font-weight: 700;
+  }
 
   /* 文字列とポインタの図 */
   .memrow { display: flex; gap: 4px; margin: 10px 0 2px; flex-wrap: wrap; }
@@ -799,6 +810,21 @@ buf[0] = 72;  buf[1] = 105;  buf[2] = 0;
 uart_puts(buf);</pre>
   <div class="screen"><small>QEMU で実行すると…</small><span class="big">Hi</span> ← 配列に組んだ文字列を、関数へ渡して表示！</div>
 
+  <h3 class="mini">配列って、そもそも何？ — 番号の付いた小箱の並び</h3>
+  <p><code class="inline">char buf[8];</code> と書くと、メモリの中に<b>1バイト入りの小箱が8個、横一列に並んだ棚</b>が用意されます。
+  箱には 0 から始まる番号（<b>添字</b>）が付いていて、<code class="inline">buf[1]</code> は「buf の棚の1番の箱」を指す書き方です。
+  上のプログラムを実行したあとの棚は、こうなっています：</p>
+  <div class="memrow">
+    <div class="cell arr">H</div><div class="cell arr">i</div><div class="cell zero">0</div><div class="cell empty">・</div><div class="cell empty">・</div><div class="cell empty">・</div><div class="cell empty">・</div><div class="cell empty">・</div>
+  </div>
+  <div class="memrow idxrow">
+    <div class="cell idx">buf[0]</div><div class="cell idx">buf[1]</div><div class="cell idx">buf[2]</div><div class="cell idx">buf[3]</div><div class="cell idx">buf[4]</div><div class="cell idx">buf[5]</div><div class="cell idx">buf[6]</div><div class="cell idx">buf[7]</div>
+  </div>
+  <p>0番に <code class="inline">72</code>（文字の H の番号）、1番に <code class="inline">105</code>（i）、2番に <code class="inline">0</code>（文字列の終わりの印）。
+  残りの箱はまだ空です。変数が「名前の付いた箱1つ」なのに対して、配列は「<b>番号で選べる箱の集まり</b>」。
+  番号が計算で決められるのが大事な点で、<code class="inline">buf[i]</code> や <code class="inline">buf[i + 1]</code> のように、
+  実行の途中で「何番の箱か」が変わるプログラムが書けます。</p>
+
   <h3 class="mini">変数と配列の住みかの違い</h3>
   <div class="regs">
     <div class="reg var"><span class="rname">変数</span><small>レジスタの中（最大4個、速いけれど少しだけ）</small></div>
@@ -807,14 +833,50 @@ uart_puts(buf);</pre>
   <p>要素の読み書きは「先頭の住所 ＋ 添字」の計算です（要素は1バイトなので、そのまま足せます）。
   そして C と同じく、<b>配列の名前そのものの値は「先頭の住所」</b>。
   だから文字列リテラルと同じように、関数へ渡したりポインタ変数に入れたりできます。</p>
+
+  <h3 class="mini"><code class="inline">buf[1] = 105;</code> は、機械語ではどうなる？</h3>
+  <div class="loop-diagram">
+    <div class="loop-step"><b>① 棚の先頭の住所を用意する</b>：buf の棚がメモリのどこにあるかは、コンパイラが知っている</div>
+    <div class="loop-arrow">↓ 添字の <b>1</b> を足す（要素は1バイトなので、そのまま足せば1番の箱の住所になる）</div>
+    <div class="loop-step"><b>② 1番の箱の住所が決まる</b>：先頭 ＋ 1</div>
+    <div class="loop-arrow">↓ <b>sb</b>（store byte：1バイト書き込む命令）で、値 105 の下1バイトを置く</div>
+    <div class="loop-step exit"><b>③ 書き込み完了</b>：読むときは逆で、同じ住所計算をしてから <b>lbu</b> で1バイト読む</div>
+  </div>
+  <p>つまり配列の読み書きは、新しい命令ではなく「<b>住所の足し算 ＋ いつもの lbu / sb</b>」の組み合わせでした。
+  添字が <code class="inline">i + 1</code> のような式でも、足す数が計算結果になるだけで、仕組みは同じです。</p>
+
+  <h3 class="mini">棚はバイナリのどこに置かれる？</h3>
+  <div class="layout">
+    <div class="seg seg-code">コード<small>機械語の命令</small></div>
+    <div class="seg seg-data">文字列<small>"hello" など</small></div>
+    <div class="seg seg-array">配列の領域<small>buf の棚はここ</small></div>
+    <div class="seg seg-stack">スタック<small>後ろの方から手前に伸びる</small></div>
+  </div>
+  <p>棚の住所は、文字列と同じく「コードの長さが決まってから」でないと分かりません。
+  そこで v3 で覚えた<b>2パス生成</b>（1回目で命令の数を数え、住所を確定して作り直す）が、ここでも働きます。
+  ちなみに <code class="inline">char buf[8];</code> という<b>宣言の文自体は、機械語を1つも出しません</b>。
+  宣言は「棚の場所を予約する」約束であって、実行する仕事ではないからです。
+  スタックの置き場所を決めるときは、配列の領域とぶつからないよう、その分も避けて後ろにずらしています。</p>
+
+  <h3 class="mini">「自分で組み立てる文字列」ができるようになった</h3>
+  <p>v3 の文字列リテラル <code class="inline">"hello"</code> は、書いた瞬間に中身が決まっていました。
+  配列の棚は実行の途中で中身を入れ替えられるので、<b>プログラムが自分で文字列を組み立てて</b>、
+  それを <code class="inline">uart_puts(buf)</code> のように関数へ渡せます。
+  関数から見れば、渡されるのは「住所」ひとつで、リテラルのときと何も変わりません。
+  これが「配列の名前の値 ＝ 先頭の住所」という決まりのうれしさです。</p>
   <div class="screen"><small>他の実行結果</small>
     <span class="big">CD</span>（計算した添字 <code class="inline">b[i + 1]</code>）　
     <span class="big">E</span>（<code class="inline">p = b; *p = 69;</code> とポインタ経由で書く）</div>
 
   <div class="chips">
     <span class="chip">宣言 char buf[16];</span><span class="chip">要素は1バイト</span>
-    <span class="chip">名前 = 先頭アドレス</span>
+    <span class="chip">名前 = 先頭アドレス</span><span class="chip">静的領域＋2パス生成</span>
   </div>
+  <div class="warn"><p><b class="title">今の制限：</b>
+  配列は最大8個・合計4096バイトまで。要素は1バイトだけ（<code class="inline">int</code> の配列のような
+  大きい要素はまだ無い）。棚はプログラム全体で共有の1つだけで、関数ごとの棚（局所配列）もまだありません。
+  宣言した直後の箱の中身は「何が入っているか分からない」ので、使う前に自分で入れるのが約束です
+  （QEMU のメモリは偶然 0 で始まりますが、それに頼るのは本物の C でも禁じ手です）。</p></div>
   <div class="learn"><p><b class="title">ここでの学び：</b>
   配列とは「住所の算数」でできたデータ構造です。文字列も、実は
   終わりの印（0）付きの文字の配列でした。v3 の文字列と v9 の配列は、
