@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v17 まで</title>
+<title>IwaC の歩み — v0 から v18 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v17 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v18 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -337,7 +337,8 @@
   <a class="done" href="#v14">v14 KosabaOS</a><span class="arr">→</span>
   <a class="done" href="#v15">v15 OS で動く iwac</a><span class="arr">→</span>
   <a class="done" href="#v16">v16 字句の完成</a><span class="arrow">→</span>
-  <a class="done" href="#v17">v17 複数ファイル入力</a>
+  <a class="done" href="#v17">v17 複数ファイル入力</a><span class="arrow">→</span>
+  <a class="done" href="#v18">v18 条件付きコンパイル</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1103,13 +1104,13 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   <p class="goal-line">目標：<b>「iwac が iwac 自身をコンパイルできる」への第一歩として、本物の C ソースの字句を全部読めるようにすること。</b></p>
   <p>新しい目標はセルフホスト（自分自身をコンパイルできるコンパイラ）です。
   iwac 本体のソース（約116KB）を実測して「何が足りないか」を洗い出し、
-  v16 から v25 までの階段を計画しました。構造体や switch のように
+  v16 から v26 までの階段を計画しました。構造体や switch のように
   iwac 本体が使っていないものは、階段に入れていません。</p>
 <pre class="code">/* コメント */ putc('A');   ← ブロックコメントと文字リテラル
 long f(unsigned long x) { … }  ← 型の語彙の拡張</pre>
   <div class="chips">
     <span class="chip">ブロックコメント</span><span class="chip">文字リテラル</span>
-    <span class="chip">long / unsigned</span><span class="chip">階段は v25 まで</span>
+    <span class="chip">long / unsigned</span><span class="chip">階段は v26 まで</span>
   </div>
   <div class="learn"><p><b class="title">ここでの学び：</b>
   ゴールの測り方です。「自分をコンパイルできる」は遠い目標ですが、
@@ -1122,7 +1123,7 @@ long f(unsigned long x) { … }  ← 型の語彙の拡張</pre>
   <div class="head"><span class="badge b-v4">v17</span><h2>複数ファイル入力 — 部品と本体を分けて渡せる</h2></div>
   <p class="goal-line">目標：<b>プログラムを複数のファイルに分けて渡せるようにすること。</b></p>
   <p>「そろそろファイルを複数にしても何とかなるように」という提案で、
-  階段に差し込んだ段です（以降の段は v18〜v25 に繰り下げ）。
+  階段に差し込んだ段です（以降の段は繰り下げ）。
   <code>iwac a.c b.c</code> のように並べると、順につないで
   （境目には改行を1つ挟む）1つのソースとして読みます。
   引数が1つだけのときの規則と出力は、従来とバイト一致です。</p>
@@ -1139,10 +1140,37 @@ $ iwac kosaba_rt.c iwac.c          ← 将来のセルフコンパイルの形</
   持っておく方が筋が良い、という段です。</p></div>
 </section>
 
+<!-- ================= v18 ================= -->
+<section class="phase" id="v18">
+  <div class="head"><span class="badge b-v4">v18</span><h2>条件付きコンパイル — #ifdef で枝を選ぶ</h2></div>
+  <p class="goal-line">目標：<b>「#ifdef も欲しい」という希望に応え、前処理で範囲を選べるようにすること。</b></p>
+  <p><code>#ifdef</code> / <code>#ifndef</code> / <code>#else</code> / <code>#endif</code> が
+  使えるようになりました（入れ子は32段まで）。無効になった範囲の行は
+  捨てられ、その中の <code>#define</code> も登録されません。
+  コンパイラが用意する定義済みマクロ <code>__IWAC__</code>（常に）と
+  <code>__KOSABA__</code>（<code>--kosaba</code> のとき）があり、
+  1つのソースでベア版と OS 版を切り替えられます。
+  併せて、コメントの中の行頭の <code>#</code> を指令と間違えなくなりました。</p>
+<pre class="code">#ifdef __KOSABA__
+  … OS 用の書き方 …
+#else
+  … ベアメタル用の書き方 …
+#endif</pre>
+  <div class="chips">
+    <span class="chip">#ifdef / #ifndef / #else / #endif</span><span class="chip">入れ子32段</span>
+    <span class="chip">__KOSABA__ で判別</span><span class="chip">#if（式）は対象外</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  条件付きコンパイルは「前処理は単なる文字の置き換え」から
+  「ソースの形を決める仕組み」への一歩です。無効な範囲でも
+  条件の指令だけは数え続ける、という決まりが入れ子の正しさを
+  保ちます。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v17 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v18 時点）</p>
 </footer>
 
 </div>

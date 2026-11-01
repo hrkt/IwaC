@@ -35,6 +35,7 @@
 #   v15: iwac 本体の KosabaOS 版 (kosaba/ の crt+shim でビルド)
 #   v16: 字句の完成 (ブロックコメント/文字リテラル/型の語彙)
 #   v17: 複数ファイル入力 (順につないで1つのソースとして読む)
+#   v18: 条件付きコンパイル (#ifdef/#ifndef/#else/#endif、定義済みマクロ)
 set -e
 cd "$(dirname "$0")"
 
@@ -414,6 +415,47 @@ if "$IWAC" "$TMP/lib.c" "$TMP/nosuch.c" > "$TMP/err.bin" 2>/dev/null; then
 fi
 [ ! -s "$TMP/err.bin" ] || fail "v17: エラーなのにバイナリが出た"
 echo "ok: v17: 開けないファイルはエラーになり、出力は空だった"
+
+# --- v18: 条件付きコンパイル ---
+"$IWAC" '#define FOO
+#ifdef FOO
+putc(72);
+#else
+putc(66);
+#endif' > "$TMP/v18a.bin"
+check_run "$TMP/v18a.bin" H "v18: #ifdef 定義あり"
+"$IWAC" '#ifdef FOO
+putc(72);
+#else
+putc(66);
+#endif' > "$TMP/v18b.bin"
+check_run "$TMP/v18b.bin" B "v18: #ifdef 未定義は else"
+"$IWAC" '#ifndef FOO
+putc(72);
+#endif' > "$TMP/v18c.bin"
+check_run "$TMP/v18c.bin" H "v18: #ifndef"
+"$IWAC" '#ifdef NOPE
+#define X 66
+#else
+#define X 65
+#endif
+putc(X);' > "$TMP/v18d.bin"
+check_run "$TMP/v18d.bin" A "v18: 無効範囲の #define は効かない"
+"$IWAC" '#ifdef __KOSABA__
+putc(75);
+#else
+putc(66);
+#endif' > "$TMP/v18e.bin"
+check_run "$TMP/v18e.bin" B "v18: ベアでは __KOSABA__ 未定義"
+printf '#ifdef __KOSABA__\nputc(75);\n#else\nputc(66);\n#endif\n' > "$TMP/v18.c"
+"$IWAC" --kosaba "$TMP/v18.c" > "$TMP/v18k.elf"
+"$IWAC" --kosaba 'putc(75);' > "$TMP/v18k2.elf"
+cmp -s "$TMP/v18k.elf" "$TMP/v18k2.elf" || fail "v18: --kosaba では __KOSABA__ の枝になるはず"
+echo "ok: v18: --kosaba では __KOSABA__ の枝になった"
+check_error '#else
+putc(65);' "#else だけ"
+check_error '#ifdef FOO
+putc(65);' "#endif が無い"
 
 check_error "putc('');" "空の文字リテラル"
 check_error '/* 終わらない' "閉じないブロックコメント"
