@@ -21,6 +21,8 @@
 #       カウントするループ、条件が偽なら素通り、入れ子のループ
 #   v5: 関数定義と呼び出し (引数1つ、入れ子の呼び出し)、
 #       本物の uart_puts の形、比較 == / != のループ
+#   v6: 本物の uart_putc 本体 (LSR のポーリング)、絶対アドレス
+#       への書き込み、ビット演算 &、16進数、ポインタ経由の書き込み
 set -e
 cd "$(dirname "$0")"
 
@@ -135,7 +137,8 @@ check_run "$TMP/v3c.bin" B "v3: 's=\"AB\"; *s+1' (読んだ文字で計算)"
 check_run "$TMP/v3d.bin" B "v3: 's=\"A\"; t=\"B\"; *t' (文字列2つ)"
 
 check_error 's="Hi; *s' "文字列が閉じていない"
-check_error '*5' "'*5' (* の相手は変数だけ)"
+# v6 で '*5' は「アドレス5を読む」として意味を持つようになった
+# (絶対アドレス読み)。エラーではなくなったのでここには無い
 
 # --- v4: while と putc (print loop の本体) ---
 # 複数バイトの出力は「シリアルの末尾が期待の文字列と一致するか」で見る
@@ -190,5 +193,24 @@ check_tail "$TMP/v5e.bin" 'B' "v5: 比較 == のループ"
 
 check_error 'foo(65);' "定義されていない関数の呼び出し"
 check_error 'void f() { } f(65);' "引数の数が合わない呼び出し"
+
+# --- v6: デバイスに触る部品 (絶対アドレス・& ・メモリ書き込み) ---
+"$IWAC" 'void uart_putc(char c) { while (*0x10000005 & 32 == 0) { } *0x10000000 = c; } void uart_puts(char *s) { while (*s != 0) { uart_putc(*s); s = s + 1; } } msg = "hello"; uart_puts(msg);' > "$TMP/v6a.bin"
+check_tail "$TMP/v6a.bin" 'hello' "v6: 本物の uart_putc 本体 (ポーリング付き)"
+
+"$IWAC" '*0x10000000 = 65; *0x10000000 = 66;' > "$TMP/v6b.bin"
+check_tail "$TMP/v6b.bin" 'AB' "v6: 絶対アドレスへの書き込み文"
+
+"$IWAC" 'x = 6 & 3; putc(64 + x);' > "$TMP/v6c.bin"
+check_tail "$TMP/v6c.bin" 'B' "v6: ビット演算 & (6 & 3 = 2)"
+
+"$IWAC" 'putc(0x41);' > "$TMP/v6d.bin"
+check_tail "$TMP/v6d.bin" 'A' "v6: 16進数リテラル"
+
+"$IWAC" 'p = 0x10000000; *p = 88;' > "$TMP/v6e.bin"
+check_tail "$TMP/v6e.bin" 'X' "v6: ポインタ変数経由の書き込み"
+
+check_error 'x = 5 && 3;' "&& は未対応"
+check_error '*0x = 65;' "0x の後ろに数字が無い"
 
 echo "PASS"

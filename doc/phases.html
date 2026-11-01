@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v5 まで</title>
+<title>IwaC の歩み — v0 から v6 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -277,7 +277,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v5 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v6 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -315,7 +315,7 @@
   <a class="done" href="#v3">v3 文字列</a><span class="arr">→</span>
   <a class="done" href="#v4">v4 ループ</a><span class="arr">→</span>
   <a class="done" href="#v5">v5 関数</a><span class="arr">→</span>
-  <a class="next" href="#v6">v6 putc本体（次）</a>
+  <a class="done" href="#v6">v6 putc本体</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -570,7 +570,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v3</span>　文字列と、その住所を持てる。<code class="inline">*s</code> で先を読める</li>
     <li><span class="ok">✓ v4</span>　<code class="inline">while</code> でくり返し、途中で <code class="inline">putc</code> で出せる → <b>print loop の本体は達成</b></li>
     <li><span class="ok">✓ v5</span>　関数定義・引数・呼び出しと <code class="inline">!=</code> の比較で、本物の <code class="inline">uart_puts</code> の形が完成 → <b>print loop 目標は達成</b></li>
-    <li><span class="todo">… v6（次）</span>　<code class="inline">uart_putc</code> の本体（送信待ちのポーリング）を、組み込みでなく本物のコードで書く</li>
+    <li><span class="ok">✓ v6</span>　<code class="inline">uart_putc</code> の本体（送信待ちのポーリング）まで本物のコードで書ける → <b>print loop は端から端まで自前のコードに</b></li>
   </ul>
 </section>
 
@@ -662,11 +662,46 @@ uart_puts(msg);</pre>
 
 <!-- ================= v6 ================= -->
 <section class="phase" id="v6">
-  <div class="head"><span class="badge b-next">v6 次</span><h2>uart_putc の本体を、本物のコードで</h2></div>
-  <p>残っている最後の組み込みが <code class="inline">putc</code> です。
-  本物の <code class="inline">uart_putc</code> は「送信の窓口が空くまで待ってから書く」ポーリングをします。
-  それを書くには、決まった住所のメモリを読むこと、ビット演算 <code class="inline">&amp;</code>、
-  メモリへ書く文が要ります。これが v6 の題材です。</p>
+  <div class="head"><span class="badge b-v4">v6</span><h2>uart_putc の本体 — デバイスに触る</h2></div>
+  <p class="goal-line">目標：<b>最後の組み込みだった putc をやめて、送信待ち（ポーリング）付きの本物の uart_putc を書くこと。</b></p>
+<pre class="code"><span class="k">void</span> uart_putc(<span class="k">char</span> c) {
+    <span class="k">while</span> (*0x10000005 &amp; 32 == 0) { }   <span class="c"># 状態の窓口を見て、空くまで待つ</span>
+    *0x10000000 = c;                   <span class="c"># 送信の窓口へ書く = 送られる</span>
+}</pre>
+  <div class="screen"><small>uart_puts と組み合わせて QEMU で実行すると…</small><span class="big">hello</span>（＋改行） ← ポーリング付きの本物で！</div>
+
+  <h3 class="mini">デバイスは「決まった住所のメモリ」</h3>
+  <p>UART の窓口は、住所で読み書きする相手です（この仕組みを MMIO と言います）。
+  v6 で入れたのは、そのための部品です：</p>
+  <div class="inst-list">
+    <div class="inst"><span class="mn">*0x10000005</span><span class="desc">絶対アドレス読み：状態レジスタ LSR を読む。<code class="inline">*</code> の相手に数を書けるようにした</span></div>
+    <div class="inst"><span class="mn">&amp; 32</span><span class="desc">ビット演算：状態のうち「送信窓口が空いた」の合図ビット（32 = 0x20）だけを取り出す</span></div>
+    <div class="inst"><span class="mn">*0x10000000 = c;</span><span class="desc">メモリ書き込み文：送信レジスタ THR へ書くと、その文字が送られる</span></div>
+    <div class="inst"><span class="mn">0x…</span><span class="desc">16進数：アドレスはこの書き方が自然なので、数として書けるようにした</span></div>
+  </div>
+
+  <h3 class="mini">ポーリングの流れ</h3>
+  <div class="loop-diagram">
+    <div class="loop-step">LSR（0x10000005）を読む</div>
+    <div class="loop-arrow">↓ <code class="inline">&amp; 32</code> — 合図ビットだけを見る</div>
+    <div class="loop-step">まだ 0（窓口が忙しい）なら、本体の無い while で<b>その場で待つ</b></div>
+    <div class="loop-arrow back">↑ くり返し読み直す（合図が立つまで）</div>
+    <div class="loop-step exit">32 が立ったら抜けて、THR（0x10000000）へ文字を書く → 送信！</div>
+  </div>
+  <p>小さな決め事も1つ：iwac にはまだ式のかっこが無いので、
+  <code class="inline">&amp;</code> は比較（<code class="inline">==</code>）より先に計算することにしました（本物の C とは逆）。
+  おかげで <code class="inline">*0x10000005 &amp; 32 == 0</code> と、かっこ無しでポーリングの形が書けます。
+  なお QEMU の送信は一瞬で終わるので、「待つ」ところが本当に効くのは実機です。</p>
+
+  <div class="chips">
+    <span class="chip">MMIO</span><span class="chip">ポーリング</span>
+    <span class="chip">ビット演算 &amp;</span><span class="chip">16進数</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  デバイスドライバの正体は「決まった住所の読み書きと、合図を待つループ」。
+  v3 のポインタ読みが、ここでデバイス相手にもそのまま使えました。
+  これで print loop は、端から端まで iwac で書いたコードになりました。</p></div>
+
   <p>その先には、OSの側の成長（ユーザーモード、ファイル、シェル）と合流して、
   <b>「KosabaOS のシェルから iwac で Hello World をコンパイルして実行する」</b>
   という最終目標が待っています。</p>
@@ -677,13 +712,14 @@ uart_puts(msg);</pre>
   <div class="sizebar"><span class="lbl">v2 の「x=65; x+1」</span><div class="bar" style="width:128px"></div><span class="num">32 バイト</span></div>
   <div class="sizebar"><span class="lbl">v4 の print loop</span><div class="bar" style="width:252px"></div><span class="num">63 バイト（コード＋文字列）</span></div>
   <div class="sizebar"><span class="lbl">v5 の uart_puts</span><div class="bar" style="width:460px"></div><span class="num">115 バイト（関数＋呼び出し側＋文字列）</span></div>
+  <div class="sizebar"><span class="lbl">v6 の putc+puts</span><div class="bar" style="width:560px"></div><span class="num">203 バイト（ポーリング付き本体＋関数2つ＋文字列）</span></div>
   <p>小さく始めて、必要になった分だけ育っているのが、サイズにも表れています。</p>
 </section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v5 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v6 時点）</p>
 </footer>
 
 </div>

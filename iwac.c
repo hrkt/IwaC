@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v5)
+/* iwac -- Cコンパイラのサブセット (v6)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v5 の言語 (文法) ===
+ * === v6 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -49,15 +49,21 @@
  *              として扱い、型による区別はまだしない)
  *   param   = type ident          (引数は今は1つまで)
  *   stmt    = ident "=" expr ";"               (代入文)
- *           | "putc" "(" expr ")" ";"          (出力文)
+ *           | "*" (ident | number) "=" expr ";" (メモリへ書く文)
+ *           | "putc" "(" expr ")" ";"          (出力文。組み込み)
  *           | "while" "(" expr ")" "{" { stmt } "}"  (繰り返し)
  *           | ident "(" [ expr ] ")" ";"       (関数の呼び出し)
- *   expr    = add { ("==" | "!=") add }        (比較は一番外側)
+ *   expr    = and { ("==" | "!=") and }        (比較は一番外側)
+ *   and     = add { "&" add }     (& は比較より固く結ぶ。
+ *                                  C とは違うが、かっこ無しで
+ *                                  ポーリングの形を書くため)
  *   add     = primary { ("+" | "-" ) primary }
  *   primary = number | ident        (数、または変数)
  *           | string                (文字列。値はその住所)
- *           | "*" ident             (ポインタの先を読む)
- *   number  = 数字の並び (10進数、0..2047。理由は addi の項で)
+ *           | "*" primary           (ポインタの先を読む。
+ *                                  相手が数なら絶対アドレス読み)
+ *   number  = 10進数 (0..2047。理由は addi の項で)
+ *           | "0x" 16進数 (アドレス用。32ビットまで)
  *   ident   = 英字か _ で始まる名前 (while / putc と型の単語は予約語)
  *   string  = '"' 文字の並び '"'    (エスケープは \n \t \\ \" )
  *
@@ -67,6 +73,13 @@
  *       "msg = \"hello\n\"; uart_puts(msg);"
  *                              → hello と出る (v5。目標の
  *                                KosabaOS の uart_puts その形)
+ *       "void uart_putc(char c) {"
+ *       "  while (*0x10000005 & 32 == 0) { }"
+ *       "  *0x10000000 = c; }"
+ *                              → 本物の uart_putc 本体 (v6)。
+ *                                C では (REG(5) & 0x20) == 0 と
+ *                                かっこで囲むところを、iwac は
+ *                                & の結び方で表す (下記)
  *
  * v5 で育ったのは「関数」。呼び出しの約束 (呼び出し規約) は:
  *   - 引数は a0 レジスタで渡す。関数は入ってすぐ、それを
@@ -88,9 +101,22 @@
  * 飛び先を「命令の番号」で持ち、ビット列への変換 (第3層) で
  * 「今の命令からの距離 (相対オフセット)」に直す。
  * while の条件は「0 でない間くり返す」という意味。
- * 比較演算子 (*s != 0 のような書き方) はまだ無い。
- * putc は組み込みの出力文で、今は UART へ直接書く
- * (送信待ちのポーリングは uart_putc 本体を扱う v5 以降)。
+ * 比較 (== / !=) は v5 で入った。
+ *
+ * v6 で育ったのは「デバイスに触る」部品一式で、これで
+ * 本物の uart_putc の本体が書けるようになった:
+ *   - *0x10000005 のように、数 (絶対アドレス) を相手にした
+ *     ポインタ読み。デバイスのレジスタは「決まった住所の
+ *     メモリ」として読む (MMIO)。住所の材料は auipc 相対
+ *     なので、0x1000xxxx のような住所でも壊れない
+ *   - ビット演算 & (状態レジスタから目的のビットだけを
+ *     取り出すため。LSR の bit5 = 0x20 が送信窓口の合図)
+ *   - *住所 = 値; のメモリ書き込み文 (THR へ書く = 送信)
+ *   - 16進数リテラル 0x... (アドレスを書くための数)
+ * 組み込みの putc は互換のため残してあるが、もう必須では
+ * ない。iwac のプログラムは毎回メモリを読む (コンパイラが
+ * 読みを消すことはない) ので、C の volatile に相当する
+ * 指定は今のところ要らない。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -196,7 +222,9 @@ static int NODE_VAR = 3;  /* 変数 (葉)。node_val = 変数番号 */
 static int NODE_STR = 4;  /* 文字列 (葉)。node_val = 文字列番号。
                            * このノードの「値」は文字列の住所 */
 static int NODE_DEREF = 5; /* ポインタ読み (葉扱い)。
-                            * node_lhs = ポインタの変数ノード */
+                            * node_lhs = 住所を表すノード
+                            * (変数ノード、または数のノード =
+                            * 絶対アドレス読み) */
 static int NODE_ASSIGN = 6; /* 代入文。node_val = 変数番号、
                              * node_lhs = 右辺の式 */
 static int NODE_PUTC = 7;   /* 出力文。node_lhs = 出す式 */
@@ -206,6 +234,11 @@ static int NODE_CALL = 9;   /* 呼び出し文。node_val = 関数番号、
                              * node_lhs = 引数の式 (無ければ -1) */
 static int NODE_EQ = 10;    /* 比較 (==)。結果は 1 か 0 */
 static int NODE_NE = 11;    /* 比較 (!=)。結果は 1 か 0 */
+static int NODE_AND = 12;   /* ビット演算 (&) */
+static int NODE_STORE = 13; /* メモリ書き込み文。
+                             * node_lhs = 書き込み先を表すノード
+                             * (変数 = ポインタ、数 = 絶対アドレス)、
+                             * node_rhs = 書く値の式 */
 
 static int node_kind[512];
 static int node_val[512];
@@ -393,8 +426,41 @@ static int parse_number_value(void) {
     return value;
 }
 
-/* 数字を読み、その NODE_NUM ノードを作って番号を返す */
+/* 16進数の1文字が表す値。16進数でなければ -1 */
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/* 数字を読み、その NODE_NUM ノードを作って番号を返す。
+ * 10進数は従来どおり 2047 まで (式の項用)。
+ * 0x で始まる16進数は「アドレスを書くための数」として
+ * 32ビットまで許す。値そのものが大きい数の扱いは第2層で
+ * 行う (addi では入らないので住所の材料と同じ作り方で
+ * レジスタに作る) */
 static int parse_number_node(void) {
+    if (cur[0] == '0' && (cur[1] == 'x' || cur[1] == 'X')) {
+        cur += 2;
+        if (hex_value(*cur) < 0) {
+            errmsg = "0x の後には16進数の数字が必要です";
+            return -1;
+        }
+        unsigned long value = 0;
+        while (hex_value(*cur) >= 0) {
+            value = value * 16ul + (unsigned long)hex_value(*cur);
+            if (value > 0xFFFFFFFFul) {
+                errmsg = "16進数が大きすぎます (32ビットまで)";
+                return -1;
+            }
+            cur++;
+        }
+        return new_node(NODE_NUM, (int)(unsigned int)value, 0, 0);
+    }
     int value = parse_number_value();
     if (value < 0)
         return -1;
@@ -470,14 +536,20 @@ static int parse_primary_node(void) {
     if (*cur == '"')
         return parse_string_node();
     if (*cur == '*') {
-        /* ポインタ読み: * の次に変数が来る形だけを扱う */
+        /* ポインタ読み: * の次は「住所を表すもの」。
+         * 変数なら、その変数が持つ住所 (ポインタ)。
+         * 数なら、その数そのものが住所になる (絶対アドレス
+         * 読み)。デバイスのレジスタは決まった住所にあるので、
+         * *0x10000005 と書けば LSR が読める (MMIO) */
         cur++;
         skip_spaces();
         int operand = parse_primary_node();
         if (operand < 0)
             return -1;
-        if (node_kind[operand] != NODE_VAR) {
-            errmsg = "* の相手は変数だけです (今の文法)";
+        int okind = node_kind[operand];
+        if (okind != NODE_VAR && okind != NODE_NUM &&
+            okind != NODE_STR) {
+            errmsg = "* の相手は変数かアドレス (数) です";
             return -1;
         }
         return new_node(NODE_DEREF, 0, operand, 0);
@@ -514,6 +586,8 @@ static int parse_add_expr(void) {
         if ((*cur == '=' && cur[1] == '=') ||
             (*cur == '!' && cur[1] == '='))
             return lhs;  /* 比較が続く。parse_expr の仕事 */
+        if (*cur == '&')
+            return lhs;  /* & が続く。parse_and_expr の仕事 */
         int kind;
         if (*cur == '+')
             kind = NODE_ADD;
@@ -537,13 +611,42 @@ static int parse_add_expr(void) {
     }
 }
 
-/* 式を読む。式は「足し引きの式」で、さらにその外側に
- * 比較 (== / !=) が最大で連なる形。比較は足し引きより
- * ゆるく結ぶ (C と同じ優先順位) ので、木の根の側に来る。
+/* ビット演算 & の式を読む。& は足し引きよりゆるく、
+ * 比較より固く結ぶ (C では & は比較よりゆるいが、iwac には
+ * かっこがまだ無いので、ポーリングの形
+ *   (*0x10000005 & 32) == 0
+ * をかっこ無しで書けるよう、こちらを固くした)。
+ * 例: "*p & 32 == 0" は ==(&(*p, 32), 0) という木になる */
+static int parse_and_expr(void) {
+    int lhs = parse_add_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        if (*cur != '&')
+            return lhs;
+        if (cur[1] == '&') {
+            errmsg = "&& はまだありません (& は1つで書きます)";
+            return -1;
+        }
+        cur++;
+        skip_spaces();
+        int rhs = parse_add_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(NODE_AND, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* 式を読む。式は「& の式」で、さらにその外側に
+ * 比較 (== / !=) が最大で連なる形。比較は一番ゆるく
+ * 結ぶので、木の根の側に来る。
  * 例: "*s != 0" は !=(*s, 0) という木になる。
  * 結果は「成り立てば 1、だめなら 0」の数になる */
 static int parse_expr(void) {
-    int lhs = parse_add_expr();
+    int lhs = parse_and_expr();
     if (lhs < 0)
         return -1;
     for (;;) {
@@ -557,7 +660,7 @@ static int parse_expr(void) {
             return lhs;
         cur += 2;
         skip_spaces();
-        int rhs = parse_add_expr();
+        int rhs = parse_and_expr();
         if (rhs < 0)
             return -1;
         lhs = new_node(kind, 0, lhs, rhs);
@@ -718,6 +821,37 @@ static int parse_stmt_list(int in_brace) {
             if (*cur == '\0')
                 return head;  /* 文だけのプログラムもよい */
         }
+        /* '*' で始まる場合の先読み: 相手の後ろに '=' が
+         * あればメモリ書き込み文、無ければ * で始まる式
+         * (プログラムの最後の式) である。相手は変数か数
+         * だけを試す (副作用の無い読み方しかしない) */
+        if (*cur == '*') {
+            char *save_star = cur;
+            cur++;
+            skip_spaces();
+            int is_store = 0;
+            if (is_digit(*cur) || is_ident_start(*cur)) {
+                int operand = parse_primary_node();
+                if (operand >= 0) {
+                    skip_spaces();
+                    if (*cur == '=' && cur[1] != '=')
+                        is_store = 1;
+                }
+            }
+            cur = save_star;
+            if (is_store) {
+                int stmt = parse_stmt();
+                if (stmt < 0)
+                    return -2;
+                if (head < 0)
+                    head = stmt;
+                else
+                    node_next[tail] = stmt;
+                tail = stmt;
+                continue;
+            }
+            /* 式だった。先読みを巻き戻して下へ進む */
+        }
         /* 文の始まりかどうかを先読みする: 識別子で始まる場合、
          * 名前とその次第で「代入文・while・putc」のどれか、
          * それ以外 (式の始まり) もありうる */
@@ -780,6 +914,30 @@ static int parse_stmt_list(int in_brace) {
  * 呼び出し時点でカーソルは文の頭にあること */
 static int parse_stmt(void) {
     skip_spaces();
+    if (*cur == '*') {
+        /* メモリ書き込み文: * 先 = 式 ;
+         * 先は変数 (ポインタ) か数 (絶対アドレス)。
+         * デバイスへ書くのはこの形: *0x10000000 = c; は
+         * 「UART の送信窓口へ c を置く = 送信する」になる */
+        cur++;
+        skip_spaces();
+        int addr = parse_primary_node();
+        if (addr < 0)
+            return -1;
+        int akind = node_kind[addr];
+        if (akind != NODE_VAR && akind != NODE_NUM) {
+            errmsg = "書き込む先は変数 (ポインタ) かアドレス (数) です";
+            return -1;
+        }
+        if (!expect_char('=', "メモリ書き込みは *先 = 式 ; の形です"))
+            return -1;
+        int val = parse_expr();
+        if (val < 0)
+            return -1;
+        if (!expect_char(';', "書き込み文の終わりには ; が必要です"))
+            return -1;
+        return new_node(NODE_STORE, 0, addr, val);
+    }
     if (!parse_ident())
         return -1;
 
@@ -950,6 +1108,7 @@ static int OP_SLTU = 13; /* 符号なし比較: rs1 < rs2 なら 1
                           * (0 と比べれば「0 でないか」になる) */
 static int OP_SLTIU = 14;/* 即値との符号なし比較
                           * (1 と比べれば「0 かどうか」になる) */
+static int OP_AND = 15;  /* ビットごとの AND (両方 1 の桁だけ 1) */
 
 static int asm_op[2048];
 static int asm_rd[2048];
@@ -1011,20 +1170,39 @@ static void gen_load_addr(int reg, unsigned int addr) {
 }
 
 /* 葉を、指定レジスタへ読み出す命令を積む。
- *   数:       即値で入れる
+ *   数:       小さければ即値で入れる。大きければ (16進の
+ *             アドレスなど) 住所の材料と同じ作り方で作る
  *   変数:     そのレジスタからの写し (addi rd, 相手, 0 = mv)
  *   文字列:   その住所を作る (auipc + addi の2命令)
- *   ポインタ読み: 変数の持つ住所から1バイト読む (lbu) */
+ *   ポインタ読み: 住所から1バイト読む (lbu)。住所は、
+ *             変数ならその値、数なら絶対アドレスそのもの */
 static void gen_load_leaf(int reg, int leaf) {
     int k = node_kind[leaf];
-    if (k == NODE_NUM)
-        asm_push(OP_ADDI, reg, REG_ZERO, 0, node_val[leaf]);
-    else if (k == NODE_VAR)
+    if (k == NODE_NUM) {
+        if ((unsigned int)node_val[leaf] <= 2047u)
+            asm_push(OP_ADDI, reg, REG_ZERO, 0, node_val[leaf]);
+        else
+            gen_load_addr(reg, (unsigned int)node_val[leaf]);
+    } else if (k == NODE_VAR)
         asm_push(OP_ADDI, reg, var_reg(node_val[leaf]), 0, 0);
     else if (k == NODE_STR)
         gen_load_addr(reg, str_addr[node_val[leaf]]);
-    else /* NODE_DEREF: lhs がポインタの変数ノード */
-        asm_push(OP_LBU, reg, var_reg(node_val[node_lhs[leaf]]), 0, 0);
+    else { /* NODE_DEREF: lhs が住所を表すノード */
+        int operand = node_lhs[leaf];
+        if (node_kind[operand] == NODE_VAR) {
+            /* 変数の持つ住所から読む (従来の形) */
+            asm_push(OP_LBU, reg, var_reg(node_val[operand]), 0, 0);
+        } else {
+            /* 絶対アドレス読み: 住所を reg に作ってから読む。
+             * 住所の材料は auipc 相対なので、0x10000005 の
+             * ようなデバイスの住所でも壊れない */
+            if (node_kind[operand] == NODE_NUM)
+                gen_load_addr(reg, (unsigned int)node_val[operand]);
+            else /* NODE_STR: 文字列の住所から読む */
+                gen_load_addr(reg, str_addr[node_val[operand]]);
+            asm_push(OP_LBU, reg, reg, 0, 0);
+        }
+    }
 }
 
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
@@ -1056,6 +1234,8 @@ static int gen_expr(int node) {
         asm_push(OP_ADD, REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_SUB)
         asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_AND)
+        asm_push(OP_AND, REG_T1, REG_T1, REG_T2, 0);
     else {
         /* 比較 (== / !=): まず引き算して「差」にする。
          * 差が 0 なら等しい。あとは差を見て 1 か 0 を作る:
@@ -1096,6 +1276,22 @@ static int gen_stmt(int node) {
             return 0;
         /* sb t1, 0(t0) -- 式の値の下1バイトを UART へ */
         asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+        return 1;
+    }
+    if (kind == NODE_STORE) {
+        /* メモリ書き込み: 先に「書く値」を t1 で計算し、
+         * 次に「書き込み先の住所」を t2 に作って sb する。
+         * この順番なのは、住所作りが t1 を壊さないため
+         * (値の計算は t2 を下書きに使うことがある) */
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        int addr = node_lhs[node];
+        if (node_kind[addr] == NODE_NUM)
+            gen_load_addr(REG_T2, (unsigned int)node_val[addr]);
+        else /* NODE_VAR: 変数の値そのものが住所 (ポインタ) */
+            asm_push(OP_ADDI, REG_T2, var_reg(node_val[addr]), 0, 0);
+        /* sb t1, 0(t2) -- 値の下1バイトを住所へ書く */
+        asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
         return 1;
     }
     if (kind == NODE_CALL) {
@@ -1316,6 +1512,11 @@ static unsigned int encode_inst(int i) {
          * rd=0, rs1=ra, imm=0 で「呼び出し側へ戻る」になる */
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                ((unsigned int)rd << 7) | 0x67u;
+    }
+    if (op == OP_AND) {
+        /* and rd, rs1, rs2 -- R 形式。add との違いは funct3 が 7 */
+        return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (7u << 12) | ((unsigned int)rd << 7) | 0x33u;
     }
     if (op == OP_SLTU) {
         /* sltu rd, rs1, rs2 -- R 形式。add との違いは funct3 が 3 */
