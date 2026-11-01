@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v11 まで</title>
+<title>IwaC の歩み — v0 から v12 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v11 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v12 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -331,7 +331,8 @@
   <a class="done" href="#v8">v8 if/else</a><span class="arr">→</span>
   <a class="done" href="#v9">v9 配列</a><span class="arr">→</span>
   <a class="done" href="#v10">v10 ファイル入力</a><span class="arr">→</span>
-  <a class="done" href="#v11">v11 関係演算子</a>
+  <a class="done" href="#v11">v11 関係演算子</a><span class="arr">→</span>
+  <a class="done" href="#v12">v12 main</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -592,6 +593,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v9</span>　配列で、データを並べて持てる</li>
     <li><span class="ok">✓ v10</span>　<code class="inline">iwac hello.c</code> の形で、ファイルからコンパイルできる</li>
     <li><span class="ok">✓ v11</span>　<code class="inline">&lt;</code> <code class="inline">&gt;</code> などの関係演算子で、条件が自然に書ける</li>
+    <li><span class="ok">✓ v12</span>　<code class="inline">int main()</code> の形で、プログラムに「入口」ができた</li>
   </ul>
 </section>
 
@@ -965,10 +967,36 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   こういう「後から足すとき」に効いてきます。</p></div>
 </section>
 
+<!-- ================= v12 ================= -->
+<section class="phase" id="v12">
+  <div class="head"><span class="badge b-v4">v12</span><h2>main — プログラムに「入口」ができた</h2></div>
+  <p class="goal-line">目標：<b><code class="inline">int main() { ... }</code> と、普通の C と同じ姿で書けること。</b></p>
+<pre class="code"><span class="k">int</span> main() {
+    uart_puts(<span class="s">"Hello, World!\n"</span>);
+}</pre>
+  <div class="screen"><small>examples/hello.c はこの形に移行済み。実行すると…</small><span class="big">Hello, World!</span></div>
+  <p>仕組みは驚くほど単純です。コンパイラが作るバイナリの先頭に
+  「<b>main を呼び出す</b>」命令を1つ置き、その直後に「止まる」命令を置く。
+  main が仕事を終えて戻ってくると、止まる命令に落ちて終わります。
+  main 自体は普通の関数とまったく同じ作りで、入口で戻り先を退避する作法もそのまま使いました。
+  新しい仕組みを足すのではなく、<b>今ある「関数の呼び出し」を入口にも使う</b>、という一手です。</p>
+  <p>約束も C に合わせました：main があるプログラムでは、外側に文を書く
+  「今までの形」との混ぜ書きはエラー。main が無ければ今までの形もそのまま動きます（二つの形の併存）。
+  戻り値の <code class="inline">int</code> は今までどおり読み捨てで、終了コードのような仕組みはまだありません。</p>
+  <div class="chips">
+    <span class="chip">int main()</span><span class="chip">入口 = 関数の呼び出し1つ</span><span class="chip">混ぜ書きは禁止</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「main が特別」なのは名前だけで、中身は普通の関数でした。
+  特別扱いはコンパイラの入口の1命令と、parse のときの
+  「main という名前かどうか」の判定だけ。部品が揃ってくると、
+  新しい機能がこうして小さな組み合わせで実現できるようになります。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v11 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v12 時点）</p>
 </footer>
 
 </div>

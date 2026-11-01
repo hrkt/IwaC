@@ -29,6 +29,7 @@
 #   v9: 配列 (宣言・要素の読み書き・先頭アドレス・関数へ渡す)
 #   v10: ファイル入力 (iwac hello.c の形、改行・// コメント)
 #   v11: 関係演算子 < > <= >= (優先順位は C の段)
+#   v12: main の形 (入口は main、混ぜ書きは禁止)
 set -e
 cd "$(dirname "$0")"
 
@@ -313,6 +314,16 @@ check_error_file() {
     echo "ok: $2 はエラーになり、出力は空だった"
 }
 check_error_file "$TMP/no-such-file.c" "存在しない .c ファイル"
+
+# --- v12: main の形 ---
+"$IWAC" 'int main() { putc(65); putc(66); }' > "$TMP/v12a.bin"
+check_tail "$TMP/v12a.bin" 'AB' "v12: main のみ"
+
+"$IWAC" 'void uart_puts(char *s) { while (*s != 0) { putc(*s); s = s + 1; } } int main() { uart_puts("main!"); }' > "$TMP/v12b.bin"
+check_tail "$TMP/v12b.bin" 'main!' "v12: main から関数を呼ぶ"
+
+check_error 'int main() { putc(65); } putc(66);' "main と外の文の混ぜ書き"
+check_error 'int main(int x) { putc(65); }' "main の引数"
 
 # --- v11: 関係演算子 ---
 "$IWAC" 'i = 0; while (i < 3) { putc(65); i = i + 1; }' > "$TMP/v11a.bin"

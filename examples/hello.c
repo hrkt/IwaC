@@ -24,4 +24,7 @@ void uart_puts(char *s) {
     }
 }
 
-uart_puts("Hello, World!\n");
+// 入口 (v12 から main の形で書ける)
+int main() {
+    uart_puts("Hello, World!\n");
+}

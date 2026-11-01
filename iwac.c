@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v11)
+/* iwac -- Cコンパイラのサブセット (v12)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v11 の言語 (文法) ===
+ * === v12 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -171,6 +171,16 @@
  * (符号付き比較) が中心で、> は両辺を入れ替えた <、
  * <= と >= は反対の比較を xori 1 で反転して作る。これで
  * ループの条件が while (i < 10) と自然に書ける。
+ *
+ * v12 では main の形を入れた。main という名前の関数が
+ * あると、それがプログラムの入口になる: 生成は「入口で
+ * main を jal で呼び、戻ってきたら wfi で止まる」形で、
+ * main 自体は通常の関数とまったく同じ作り (戻り先の
+ * 退避も含む)。main がある場合は、外側に文や最後の式を
+ * 書く形との混ぜ書きを禁止する (C の作法に合わせる)。
+ * main が無ければ従来の形のままで、出力も変わらない。
+ * 戻り値 (int main の int) は今までどおり読み捨てで、
+ * 終了コードのような仕組みはまだ無い。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -389,6 +399,11 @@ static int define_var(char *name, int len) {
 static int prog_stmts;
 static int prog_final;
 static int prog_has_final;
+/* main 関数の番号 (v12)。プログラムに main があれば
+ * その番号、無ければ -1。main があるプログラムでは、
+ * 実行は「関数の並びの後に、main を呼び出して止まる」
+ * 形になり、外側の文は置けない */
+static int prog_main;
 
 /* --- 関数の名簿 ---
  * 関数も変数と同じく名簿で管理する。関数 i 番について:
@@ -1049,6 +1064,17 @@ static int parse_funcdef(void) {
         if (!expect_char(')', "引数の後には ) が必要です"))
             return 0;
     }
+    /* main という名前の関数は特別扱い (v12): プログラムの
+     * 入口になる。引数は持てない。入口そのものの生成は
+     * gen_all が行う (main を呼び出す jal を置く) */
+    if (name_len == 4 && name_buf[0] == 'm' && name_buf[1] == 'a' &&
+        name_buf[2] == 'i' && name_buf[3] == 'n') {
+        if (func_has_param[f]) {
+            errmsg = "main に引数は書けません";
+            return 0;
+        }
+        prog_main = f;
+    }
     if (!expect_char('{', "関数の本体は { で始めます"))
         return 0;
     int body = parse_stmt_list(1);
@@ -1464,6 +1490,7 @@ static int parse_program(char *program) {
     prog_stmts = -1;
     prog_final = -1;
     prog_has_final = 0;
+    prog_main = -1;
     skip_spaces();
 
     /* v0 互換: プログラムが丸ごと1文字 (数字以外) なら、
@@ -1485,6 +1512,12 @@ static int parse_program(char *program) {
         /* 文も式も無い = 空のプログラム。文だけのプログラムは
          * よいが、空は書き間違いとしてエラーにしておく */
         errmsg = "プログラムが空です";
+        return 0;
+    }
+    if (prog_main >= 0 && (head != -1 || prog_has_final)) {
+        /* main の形と、外に文を書く形の混ぜ書きは禁止。
+         * どちらかに統一する (C の作法に合わせる) */
+        errmsg = "main があるプログラムでは、文は main の中に書きます";
         return 0;
     }
     prog_stmts = head;
@@ -2014,6 +2047,16 @@ static int gen_all(void) {
             return 0;
         /* sb t1, 0(t0) -- 最後の式の下1バイトを UART へ */
         asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+    }
+    if (prog_main >= 0) {
+        /* main の形 (v12): 入口として main を呼ぶ。
+         * 飛び先は通常の呼び出しと同じ印 (-(番号+1)) で置き、
+         * この後の一括書き直しで確定する。main から戻ると
+         * ra の指す次の命令 = wfi に落ちて止まる。
+         * main の入口では、戻り先 (wfi の住所) が ra に
+         * 入っているのを通常の関数と同じく退避するので、
+         * 呼び出しの作法そのままで動く */
+        asm_push(OP_JAL, REG_RA, 0, 0, -(prog_main + 1));
     }
     /* wfi -- 止まる */
     asm_push(OP_WFI, 0, 0, 0, 0);
