@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v1、内部構造を分離した版)
+/* iwac -- Cコンパイラのサブセット (v2)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,16 +39,29 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v1 の言語 (文法) ===
+ * === v2 の言語 (文法) ===
  *
- *   program = 1文字               (v0 との互換。その文字コードが値)
- *           | expr
- *   expr    = number { ("+" | "-" ) number }
+ *   program = 1文字                 (v0 との互換。その文字コードが値)
+ *           | { stmt } expr         (文の並び + 最後の式)
+ *   stmt    = ident "=" expr ";"    (代入文)
+ *   expr    = primary { ("+" | "-" ) primary }
+ *   primary = number | ident        (数、または変数)
  *   number  = 数字の並び (10進数、0..2047。理由は addi の項で)
+ *   ident   = 英字か _ で始まる名前 (変数名)
+ *
+ *   例: "x = 65; x + 1"  → 66 になり 'B' が出る
+ *       "x = 60; y = 5; x + y" → 65 になり 'A' が出る
+ *       "x = 65; x = x + 1; x" → 再代入できて 'B' が出る
+ *
+ * v2 で育ったのは「変数と代入、文の並び」。目標である
+ * KosabaOS の print loop (uart_puts) に必要な部品の最初の一歩
+ * (計画は doc/roadmap.md の「print loop」目標の節)。
+ * 変数は最大4個までで、実体はレジスタ (t3〜t6) に割り当てる。
+ * 代入されていない変数を使うとエラーになる。
  *
  * 計算はコンパイラが代行せず、出力バイナリの中の add / sub が
- * 実行時に行う。結果の下1バイトが UART に出る。
- * シェルで実行するときは './iwac '65+1'' のように引用符で囲む。
+ * 実行時に行う。最後の式の値の下1バイトが UART に出る。
+ * シェルで実行するときは './iwac 'x=65; x+1'' のように引用符で囲む。
  *
  * === なぜこのファイルに #include が無いのか ===
  *
@@ -105,6 +118,9 @@ static int REG_ZERO = 0;
 static int REG_T0 = 5;  /* UART ベースアドレス専用 */
 static int REG_T1 = 6;  /* 今の値 */
 static int REG_T2 = 7;  /* 次の項 */
+/* 変数は宣言された順に t3 (x28) から割り当てる。変数 i 番の
+ * レジスタ番号は REG_VAR_BASE + i (最大4個なので t3〜t6) */
+static int REG_VAR_BASE = 28;
 
 /* ================================================================
  * 第1層 parse: ソース文字列 → AST
@@ -124,15 +140,63 @@ static int REG_T2 = 7;  /* 次の項 */
  * iwac の言語に無いもの」を iwac 自身も使わないため)
  * ================================================================ */
 
-static int NODE_NUM = 0;  /* 数 (葉) */
+static int NODE_NUM = 0;  /* 数 (葉)。node_val = その数値 */
 static int NODE_ADD = 1;  /* 足し算 */
 static int NODE_SUB = 2;  /* 引き算 */
+static int NODE_VAR = 3;  /* 変数 (葉)。node_val = 変数番号 */
 
 static int node_kind[512];
 static int node_val[512];
 static int node_lhs[512];
 static int node_rhs[512];
 static int nnode;  /* 作ったノードの数 */
+
+/* --- 変数の名簿 (記号表) ---
+ * 変数は「名前 → 番号」の対応表で管理する。番号が決まれば、
+ * 第2層でレジスタ (t3 + 番号) に割り当てられる。
+ * 名前は最大31文字、変数は最大4個まで (レジスタの数の都合) */
+static char var_names[4][32];
+static int var_name_len[4];
+static int nvar;  /* 登録された変数の数 */
+
+/* 名前 (場所と長さで渡す) が名簿にあればその番号、無ければ -1 */
+static int find_var(char *name, int len) {
+    for (int i = 0; i < nvar; i++) {
+        if (var_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && var_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
+
+/* 名前を名簿に登録し、番号を返す。既にある名前なら同じ番号を
+ * 返す (再代入は同じ変数への代入になる)。失敗したら -1 */
+static int define_var(char *name, int len) {
+    int found = find_var(name, len);
+    if (found >= 0)
+        return found;
+    if (nvar >= 4) {
+        errmsg = "変数は4個までです (レジスタ t3〜t6 の都合)";
+        return -1;
+    }
+    int i = nvar++;
+    for (int j = 0; j < len; j++)
+        var_names[i][j] = name[j];
+    var_name_len[i] = len;
+    return i;
+}
+
+/* --- 代入文の並び ---
+ * プログラムは「代入文の並び + 最後の式」でできている。
+ * 代入文1つは (代入先の変数番号, 右辺の式の根ノード) の組。
+ * 最後の式の根は parse_program の戻り値で返す */
+static int stmt_var[128];
+static int stmt_expr[128];
+static int nstmt;  /* 代入文の数 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
@@ -154,6 +218,37 @@ static char *cur;  /* 入力の「今読んでいる場所」 */
 
 static int is_digit(char c) {
     return c >= '0' && c <= '9';
+}
+
+/* 変数名 (識別子) に使える文字: 英字と _ で始まり、
+ * その後は数字もよい (C と同じ約束) */
+static int is_ident_start(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+static int is_ident_char(char c) {
+    return is_ident_start(c) || is_digit(c);
+}
+
+/* 読み取ったばかりの識別子の置き場 */
+static char ident_buf[32];
+static int ident_len;
+
+/* カーソルの位置から識別子を1つ読み、ident_buf に置く。
+ * カーソルは識別子の直後まで進む。失敗したら 0 */
+static int parse_ident(void) {
+    if (!is_ident_start(*cur)) {
+        errmsg = "変数名が必要です";
+        return 0;
+    }
+    ident_len = 0;
+    while (is_ident_char(*cur)) {
+        if (ident_len >= 31) {
+            errmsg = "変数名が長すぎます (31文字まで)";
+            return 0;
+        }
+        ident_buf[ident_len++] = *cur++;
+    }
+    return 1;
 }
 
 /* 空白は意味を持たないので読み飛ばす (字句解析の仕事) */
@@ -191,6 +286,29 @@ static int parse_number_node(void) {
     return new_node(NODE_NUM, value, 0, 0);
 }
 
+/* 式の材料 (primary) を1つ読む: 数、または変数。
+ * 変数は名簿にあるものだけが使える。代入されていない変数を
+ * 使うのはエラー (「いつか入るはず」の値で計算しないため。
+ * この小さい言語では、使う前に必ず代入文が先にある書き方)。
+ * 成功したらノード番号、失敗したら -1 を返す */
+static int parse_primary_node(void) {
+    skip_spaces();
+    if (is_digit(*cur))
+        return parse_number_node();
+    if (is_ident_start(*cur)) {
+        if (!parse_ident())
+            return -1;
+        int var = find_var(ident_buf, ident_len);
+        if (var < 0) {
+            errmsg = "代入されていない変数が使われました";
+            return -1;
+        }
+        return new_node(NODE_VAR, var, 0, 0);
+    }
+    errmsg = "数か変数が必要です";
+    return -1;
+}
+
 /* 式を読み、AST の根のノード番号を返す。失敗したら -1。
  *
  * 読み方 (左結合): まず項を読む。演算子が来たら、次の項を
@@ -198,25 +316,28 @@ static int parse_number_node(void) {
  * 根」を作る。"50+10+5" は ((50+10)+5) という木になる。
  * 左から順に計算する v1 の意味は、この木の形そのものである */
 static int parse_expr(void) {
-    int lhs = parse_number_node();
+    int lhs = parse_primary_node();
     if (lhs < 0)
         return -1;
     for (;;) {
         skip_spaces();
-        if (*cur == '\0')
-            return lhs;  /* 式の終わり */
+        if (*cur == '\0' || *cur == ';')
+            return lhs;  /* 式の終わり (文の区切りか、全体の終わり) */
         int kind;
         if (*cur == '+')
             kind = NODE_ADD;
         else if (*cur == '-')
             kind = NODE_SUB;
-        else {
+        else if (is_ident_start(*cur)) {
+            errmsg = "式の途中に名前があります (文の区切り ; の不足かもしれません)";
+            return -1;
+        } else {
             errmsg = "演算子は + か - だけです (他の記号はまだ未対応)";
             return -1;
         }
         cur++;
         skip_spaces();
-        int rhs = parse_number_node();
+        int rhs = parse_primary_node();
         if (rhs < 0)
             return -1;
         lhs = new_node(kind, 0, lhs, rhs);
@@ -225,18 +346,79 @@ static int parse_expr(void) {
     }
 }
 
-/* プログラム全体を読み、AST の根を返す。失敗したら -1 */
+/* プログラム全体を読み、最後の式の AST の根を返す。
+ * 代入文は stmt_var[] / stmt_expr[] に溜まる。失敗したら -1。
+ *
+ * 代入文か最後の式かは「先読み」で見分ける: 識別子で始まって、
+ * その次 (空白の後) が '=' なら代入文。そうでなければ読み
+ * 直して式として扱う (カーソルを巻き戻すのが先読みの実体) */
 static int parse_program(char *program) {
     cur = program;
     nnode = 0;
+    nvar = 0;
+    nstmt = 0;
     skip_spaces();
 
     /* v0 互換: プログラムが丸ごと1文字 (数字以外) なら、
-     * その文字コードを数のノードとして扱う */
+     * その文字コードを数のノードとして扱う。
+     * (この互換のため、1文字の変数名だけのプログラムは
+     * 「その変数の値」ではなく「その文字コード」になる) */
     if (cur[0] != '\0' && cur[1] == '\0' && !is_digit(cur[0]))
         return new_node(NODE_NUM, (unsigned char)cur[0], 0, 0);
 
-    return parse_expr();
+    for (;;) {
+        skip_spaces();
+        char *save = cur;
+        if (is_ident_start(*cur)) {
+            /* 先読み: 名前の後に '=' があるか */
+            if (!parse_ident())
+                return -1;
+            /* 名前は巻き戻しても使うことがあるので控える */
+            char name_buf[32];
+            int name_len = ident_len;
+            for (int i = 0; i < name_len; i++)
+                name_buf[i] = ident_buf[i];
+            skip_spaces();
+            if (*cur == '=' && cur[1] != '=') {
+                /* 代入文だった。右辺を先に読んでから名簿に載せる
+                 * (右辺の中で代入先自身を使うのは、初回代入では
+                 * まだ値が無いのでエラーになるのが正しい) */
+                cur++;
+                int expr = parse_expr();
+                if (expr < 0)
+                    return -1;
+                int var = define_var(name_buf, name_len);
+                if (var < 0)
+                    return -1;
+                skip_spaces();
+                if (*cur != ';') {
+                    errmsg = "代入文の終わりには ; が必要です";
+                    return -1;
+                }
+                cur++;
+                if (nstmt >= 128) {
+                    errmsg = "文が多すぎます";
+                    return -1;
+                }
+                stmt_var[nstmt] = var;
+                stmt_expr[nstmt] = expr;
+                nstmt++;
+                continue;
+            }
+            /* 代入文ではなかった。カーソルを巻き戻して式へ */
+            cur = save;
+        }
+        /* 最後の式。これでプログラムは終わる */
+        int expr = parse_expr();
+        if (expr < 0)
+            return -1;
+        skip_spaces();
+        if (*cur != '\0') {
+            errmsg = "最後の式の後に、余分な文字があります";
+            return -1;
+        }
+        return expr;
+    }
 }
 
 /* ================================================================
@@ -254,9 +436,9 @@ static int parse_program(char *program) {
  * 変換は第3層の仕事。
  *
  * 容量の約束: ノード上限 512 に対し命令は最大でも
- * ノード数 x2 + 3 個 (演算ノード1つが addi + add/sub の
- * 2命令、数ノードは子の側で数えられる)。2048 あれば
- * 解析が成功した後は生成があふれることはない。
+ * ノード数 x2 + 文の数 + 3 個程度 (演算ノード1つが
+ * addi + add/sub の2命令、代入文1つが余分に移し替え1命令)。
+ * 2048 あれば解析が成功した後は生成があふれることはない。
  * ================================================================ */
 
 static int OP_LUI = 0;
@@ -283,30 +465,45 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
     asm_imm[i] = imm;
 }
 
+/* 変数番号から、その変数の住むレジスタ番号を出す */
+static int var_reg(int var) {
+    return REG_VAR_BASE + var;
+}
+
+/* 葉 (数か変数) を、指定レジスタへ読み出す命令を1つ積む。
+ * 数なら即値で、変数ならそのレジスタからの写しで入れる。
+ * (addi rd, 相手, 0 は「写す」命令として使える: mv の実体) */
+static void gen_load_leaf(int reg, int leaf) {
+    if (node_kind[leaf] == NODE_NUM)
+        asm_push(OP_ADDI, reg, REG_ZERO, 0, node_val[leaf]);
+    else /* NODE_VAR */
+        asm_push(OP_ADDI, reg, var_reg(node_val[leaf]), 0, 0);
+}
+
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
  * 失敗したら 0 を返す (理由は errmsg)。
  *
- * 作り方: 左の子を先に生成する (結果は t1)。右の子は、
- * 今の文法では必ず数なので、t2 に入れて演算する。
+ * 作り方: 左の子を先に生成する (結果は t1)。右の子は葉
+ * (数か変数) なので、t2 に入れて演算する。
  * 「右の子も式になる」一般形 (かっこや優先順位) では
  * t1 を退避する仕組み (スタック) が必要になる。それは
- * v2 で扱う題材で、ここでは文法の範囲だけを相手にする */
+ * 後回しリストの題材で、ここでは文法の範囲だけを相手にする */
 static int gen_expr(int node) {
-    if (node_kind[node] == NODE_NUM) {
-        /* 数: t1 にその値を入れる */
-        asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, node_val[node]);
+    if (node_kind[node] == NODE_NUM || node_kind[node] == NODE_VAR) {
+        /* 葉: t1 にその値 (変数なら今の値) が入る */
+        gen_load_leaf(REG_T1, node);
         return 1;
     }
     /* 演算: まず左を t1 に */
     if (!gen_expr(node_lhs[node]))
         return 0;
     int rhs = node_rhs[node];
-    if (node_kind[rhs] != NODE_NUM) {
-        errmsg = "内部エラー: 右の子が数でない式はまだ扱えません";
+    if (node_kind[rhs] != NODE_NUM && node_kind[rhs] != NODE_VAR) {
+        errmsg = "内部エラー: 右の子が葉でない式はまだ扱えません";
         return 0;
     }
     /* 次の項を t2 に入れて、t1 と演算する */
-    asm_push(OP_ADDI, REG_T2, REG_ZERO, 0, node_val[rhs]);
+    gen_load_leaf(REG_T2, rhs);
     if (node_kind[node] == NODE_ADD)
         asm_push(OP_ADD, REG_T1, REG_T1, REG_T2, 0);
     else
@@ -315,11 +512,20 @@ static int gen_expr(int node) {
 }
 
 /* プログラム全体の命令列を作る: 土台 (UART の住所) →
- * 式の計算 → UART へ書く → 止まる。失敗したら 0 */
+ * 代入文を順に実行 → 最後の式 → UART へ書く → 止まる。
+ * 代入文の実行は「右辺を t1 で計算し、変数のレジスタへ
+ * 写す」ことで、変数の値が次の文へ持ち越される。
+ * 失敗したら 0 */
 static int gen_program(int root) {
     nasm = 0;
     /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る */
     asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
+    for (int i = 0; i < nstmt; i++) {
+        if (!gen_expr(stmt_expr[i]))
+            return 0;
+        /* addi 変数レジスタ, t1, 0 -- 結果を変数へ写す (代入) */
+        asm_push(OP_ADDI, var_reg(stmt_var[i]), REG_T1, 0, 0);
+    }
     if (!gen_expr(root))
         return 0;
     /* sb t1, 0(t0) -- 結果の下1バイトを UART 送信レジスタへ */
@@ -408,7 +614,7 @@ static void write_binary(void) {
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        print_str(2, "usage: iwac '<式>'   例: iwac '65+1'\n");
+        print_str(2, "usage: iwac '<プログラム>'   例: iwac 'x=65; x+1'\n");
         return 1;
     }
 

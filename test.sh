@@ -13,6 +13,8 @@
 #   v1: 式 65+1 → B、66-1 → A、50+10+5 → A が実行時に計算されて出る
 #       空白ありの式が空白なしと同じバイナリになる
 #       文法エラー (65+ / 65*2 / 2048) では失敗し、出力が空になる
+#   v2: 変数と代入 (x=65; x+1 → B、2変数の加算、再代入、長い変数名)、
+#       未代入の変数や変数5個では失敗し、出力が空になる
 set -e
 cd "$(dirname "$0")"
 
@@ -95,5 +97,22 @@ check_error '65+' "'65+'"
 check_error '65*2' "'65*2' (v1 では * は未対応)"
 check_error '2048' "'2048' (addi 即値の上限超え)"
 check_error '' "空文字列"
+
+# --- v2: 変数と代入、文の並び ---
+"$IWAC" 'x=65; x+1' > "$TMP/v2a.bin"
+check_run "$TMP/v2a.bin" B "v2: 'x=65; x+1'"
+
+"$IWAC" 'x=60; y=5; x+y' > "$TMP/v2b.bin"
+check_run "$TMP/v2b.bin" A "v2: 'x=60; y=5; x+y'"
+
+"$IWAC" 'x=65; x=x+1; x' > "$TMP/v2c.bin"
+check_run "$TMP/v2c.bin" B "v2: 'x=65; x=x+1; x' (再代入)"
+
+"$IWAC" 'abc=66; abc' > "$TMP/v2d.bin"
+check_run "$TMP/v2d.bin" B "v2: 'abc=66; abc' (長い変数名)"
+
+check_error 'y+1' "'y+1' (代入されていない変数)"
+check_error 'x=x+1; x' "'x=x+1; x' (初回代入での自己参照)"
+check_error 'a=1; b=2; c=3; d=4; e=5; a' "変数5個 (上限は4個)"
 
 echo "PASS"
