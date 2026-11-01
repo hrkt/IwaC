@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v4 まで</title>
+<title>IwaC の歩み — v0 から v5 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -249,6 +249,16 @@
   }
   .warn b.title { color: #b3552e; }
 
+  /* スタックの積み重ね図 */
+  .stack { max-width: 540px; margin: 12px auto; }
+  .stack .frame {
+    border: 2px solid var(--green); background: var(--green-soft);
+    border-radius: 10px; padding: 8px 14px; margin: 6px 0;
+  }
+  .stack .frame.base { border-color: #b6a888; background: #f3ecdf; text-align: center; color: #6d6353; }
+  .stack .frame .ra { font-family: "SF Mono", Menlo, monospace; font-weight: 700; color: #9a4d16; }
+  .stack .cap { text-align: center; color: #6d6353; font-size: 13.5px; margin-top: 2px; }
+
   .sizebar { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 14px; }
   .sizebar .bar { height: 16px; border-radius: 8px; background: var(--accent); }
   .sizebar .lbl { min-width: 118px; font-weight: 700; }
@@ -267,7 +277,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v4 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v5 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -587,10 +597,55 @@ uart_puts(msg);</pre>
   型（<code class="inline">void</code> や <code class="inline">char *</code>）は今は「形だけ読んで意味は持たない」扱いで、
   値は全部ただの数として扱っています。</p>
 
+  <h3 class="mini">呼び出しの流れを、1回分だけ追ってみよう</h3>
+  <div class="loop-diagram">
+    <div class="loop-step"><b>呼ぶ側</b>：引数を <code class="inline">a0</code> に入れる（例：文字列の住所）</div>
+    <div class="loop-arrow">↓ <code class="inline">jal ra</code> — 「次の命令の住所」を <code class="inline">ra</code> にメモして、関数へ飛ぶ</div>
+    <div class="loop-step"><b>関数</b>：入ってすぐ <code class="inline">ra</code> をスタックへ退避し、<code class="inline">a0</code> から引数を受け取る</div>
+    <div class="loop-arrow">↓ 本体を実行する（この間、別の関数を呼んでもよい）</div>
+    <div class="loop-step"><b>関数</b>：<code class="inline">ra</code> をスタックから戻す</div>
+    <div class="loop-arrow back">↓ <code class="inline">jalr</code> — <code class="inline">ra</code> の指す場所へ飛んで帰る</div>
+    <div class="loop-step exit"><b>呼ぶ側</b>：飛ぶ前にメモした場所から、続きを実行する</div>
+  </div>
+  <p>ポイントは、<code class="inline">jal</code> が「ただ飛ぶ」のではなく
+  <b>「帰り道をメモしてから飛ぶ」</b>命令だということです。
+  関数の本体そのものは、プログラムの実行部分の後ろ（止まる命令 <code class="inline">wfi</code> の後）に
+  並べて置くので、上から実行してうっかり関数の中に落ちてくることはありません：</p>
+  <div class="layout">
+    <div class="seg seg-code">実行部（呼び出し側）<small>上から実行される</small></div>
+    <div class="seg" style="background:#8a6d3b; flex:1;">wfi<small>ここで止まる</small></div>
+    <div class="seg" style="background:#6b4fa1; flex:2;">関数の本体<small>呼ばれたときだけ入る</small></div>
+    <div class="seg seg-data">文字列<small>データ</small></div>
+  </div>
+
+  <h3 class="mini">なぜ <code class="inline">ra</code> の退避が要るのか — 入れ子の呼び出し</h3>
+  <p>関数 <code class="inline">wrap</code> が、中で別の関数 <code class="inline">out2</code> を呼ぶ場面を考えます。
+  <code class="inline">out2</code> を呼ぶ <code class="inline">jal</code> は、<code class="inline">ra</code> を
+  「<code class="inline">wrap</code> の中へ戻る住所」で<b>上書き</b>します。
+  もし <code class="inline">wrap</code> が自分の <code class="inline">ra</code>（呼び出し元へ戻る住所）を
+  どこかに退避していなければ、<code class="inline">out2</code> から戻ったあと、
+  <code class="inline">wrap</code> は自分の帰り道を失います。
+  そこで関数は入ってすぐ、自分の <code class="inline">ra</code> をスタックに積みます：</p>
+  <div class="stack">
+    <div class="frame"><b>out2 の番</b>（実行中）<br>使う <span class="ra">ra</span> ＝ wrap の中へ戻る住所</div>
+    <div class="frame"><b>wrap の退避分</b>（スタックに積んである）<br>守られている <span class="ra">ra</span> ＝ 呼び出し元へ戻る住所</div>
+    <div class="frame base">スタックの土台（コンパイラが用意した空き地）</div>
+    <p class="cap">呼び出しが深くなるほど、退避分が下へ積み重なっていく（だから「スタック＝積み重ね」）</p>
+  </div>
+  <p>確かめとして、<code class="inline">wrap</code> が <code class="inline">out2</code> を呼ぶプログラムを実行すると
+  ちゃんと <b>XX</b> と出て戻って来ます。退避をやめると戻り先が壊れる——というのが、
+  この仕組みの存在理由です。</p>
+
   <h3 class="mini">ついでに「比較」も：<code class="inline">!=</code> と <code class="inline">==</code></h3>
   <p>本物の条件 <code class="inline">*s != 0</code> を書くために比較も入れました。
   作り方は「引き算して、差が 0 かどうかを見る」。
-  比較の結果は、成り立てば 1、だめなら 0 の数になります。</p>
+  比較の結果は、成り立てば 1、だめなら 0 の数になります。
+  たとえば <code class="inline">*s != 0</code> なら：</p>
+  <div class="loop-diagram">
+    <div class="loop-step">文字が <b>H</b>（72）のとき： 72 − 0 ＝ <b>72</b> → 0 ではない → 結果は <b>1</b> → ループは続く</div>
+    <div class="loop-arrow">↓ 次の文字へ…をくり返し、文字列の終わり（0）に来たら</div>
+    <div class="loop-step exit">文字が <b>0</b> のとき： 0 − 0 ＝ <b>0</b> → 結果は <b>0</b> → ループは終わる</div>
+  </div>
 
   <div class="screen"><small>他の実行結果</small>
     <span class="big">AB</span>（関数を2回呼ぶ）　<span class="big">XX</span>（関数が関数を呼ぶ）　<span class="big">ABCD</span>（2つの文字列を続けて）　<span class="big">AAA</span>（<code class="inline">!=</code> のループ）</div>
