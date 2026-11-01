@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v2)
+/* iwac -- Cコンパイラのサブセット (v3)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,23 +39,37 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v2 の言語 (文法) ===
+ * === v3 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { stmt } expr         (文の並び + 最後の式)
  *   stmt    = ident "=" expr ";"    (代入文)
  *   expr    = primary { ("+" | "-" ) primary }
  *   primary = number | ident        (数、または変数)
+ *           | string                (文字列。値はその住所)
+ *           | "*" ident             (ポインタの先を読む)
  *   number  = 数字の並び (10進数、0..2047。理由は addi の項で)
  *   ident   = 英字か _ で始まる名前 (変数名)
+ *   string  = '"' 文字の並び '"'    (エスケープは \n \t \\ \" )
  *
- *   例: "x = 65; x + 1"  → 66 になり 'B' が出る
- *       "x = 60; y = 5; x + y" → 65 になり 'A' が出る
- *       "x = 65; x = x + 1; x" → 再代入できて 'B' が出る
+ *   例: "x = 65; x + 1"        → 66 になり 'B' が出る (v2)
+ *       "s = \"Hi\"; *s"       → 'H' が出る (v3)
+ *       "s = \"Hi\"; s = s + 1; *s" → 'i' が出る (v3)
  *
- * v2 で育ったのは「変数と代入、文の並び」。目標である
- * KosabaOS の print loop (uart_puts) に必要な部品の最初の一歩
+ * v3 で育ったのは「ポインタと文字列」。目標である KosabaOS の
+ * print loop (uart_puts) に必要な部品の2つ目
  * (計画は doc/roadmap.md の「print loop」目標の節)。
+ *
+ * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
+ * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
+ * 文字列リテラルの「値」は、その先頭の住所である。住所は
+ * コードの長さが決まらないと分からないので、第2層 (gen) は
+ * 2回生成する: 1回目で命令数を数え、文字列の住所を確定
+ * させて、2回目で本物の住所を入れる (2パス生成)。
+ *
+ * ポインタは特別な型ではなく「住所が入った変数」にすぎない。
+ * s = s + 1 は住所の足し算であり、*s は、その住所から
+ * 1バイト読む (lbu) ことである。* の相手は今は変数だけ。
  * 変数は最大4個までで、実体はレジスタ (t3〜t6) に割り当てる。
  * 代入されていない変数を使うとエラーになる。
  *
@@ -144,6 +158,10 @@ static int NODE_NUM = 0;  /* 数 (葉)。node_val = その数値 */
 static int NODE_ADD = 1;  /* 足し算 */
 static int NODE_SUB = 2;  /* 引き算 */
 static int NODE_VAR = 3;  /* 変数 (葉)。node_val = 変数番号 */
+static int NODE_STR = 4;  /* 文字列 (葉)。node_val = 文字列番号。
+                           * このノードの「値」は文字列の住所 */
+static int NODE_DEREF = 5; /* ポインタ読み (葉扱い)。
+                            * node_lhs = ポインタの変数ノード */
 
 static int node_kind[512];
 static int node_val[512];
@@ -197,6 +215,22 @@ static int define_var(char *name, int len) {
 static int stmt_var[128];
 static int stmt_expr[128];
 static int nstmt;  /* 代入文の数 */
+
+/* --- 文字列の置き場 (文字列テーブル) ---
+ * プログラム中に出てきた文字列リテラルを全部溜める。
+ * str_pool には各文字列のバイト列が、末尾の 0 (文字列の
+ * 終わり印) 付きで連続して並ぶ。文字列 i 番は:
+ *   str_off[i] : str_pool の中の開始位置
+ *   str_len[i] : 長さ (末尾の 0 は含まない)
+ * 実行時の住所 (str_addr) は第2層が決める (コードの後ろに
+ * このプールをそのまま置くので、住所 = 読み込み先頭 +
+ * コードのバイト数 + str_off[i]) */
+static char str_pool[4096];
+static int str_off[64];
+static int str_len[64];
+static int nstr;       /* 文字列の数 */
+static int str_used;   /* str_pool の使用済みバイト数 */
+static unsigned int str_addr[64];  /* 第2層が確定させる住所 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
@@ -286,7 +320,64 @@ static int parse_number_node(void) {
     return new_node(NODE_NUM, value, 0, 0);
 }
 
-/* 式の材料 (primary) を1つ読む: 数、または変数。
+/* 文字列リテラルを読み、文字列テーブルに登録して、その
+ * NODE_STR ノードを作る。カーソルは開きの '"' の位置にある
+ * 前提。エスケープは \n (改行) \t (タブ) \\ \" の4つだけ。
+ * 閉じの '"' が無い、知らないエスケープ、長すぎる文字列は
+ * エラー。成功したらノード番号、失敗したら -1 を返す */
+static int parse_string_node(void) {
+    if (nstr >= 64) {
+        errmsg = "文字列が多すぎます";
+        return -1;
+    }
+    int idx = nstr;
+    int start = str_used;
+    int len = 0;
+    cur++;  /* 開きの '"' を飛ばす */
+    for (;;) {
+        char c = *cur;
+        if (c == '\0') {
+            errmsg = "文字列が閉じていません (\" が必要です)";
+            return -1;
+        }
+        if (c == '"') {
+            cur++;
+            break;
+        }
+        if (c == '\\') {
+            cur++;
+            if (*cur == 'n')
+                c = '\n';
+            else if (*cur == 't')
+                c = '\t';
+            else if (*cur == '\\')
+                c = '\\';
+            else if (*cur == '"')
+                c = '"';
+            else {
+                errmsg = "使えるエスケープは \\n \\t \\\\ \\\" だけです";
+                return -1;
+            }
+        }
+        if (str_used >= 4095) {
+            errmsg = "文字列が長すぎます";
+            return -1;
+        }
+        str_pool[str_used++] = c;
+        len++;
+        cur++;
+    }
+    /* C の文字列の約束: 末尾に 0 を置く (print loop が
+     * 「0 が来たら終わり」と判定するための目印) */
+    str_pool[str_used++] = '\0';
+    str_off[idx] = start;
+    str_len[idx] = len;
+    nstr++;
+    return new_node(NODE_STR, idx, 0, 0);
+}
+
+/* 式の材料 (primary) を1つ読む: 数、変数、文字列、
+ * または *変数 (ポインタの先の1バイト)。
  * 変数は名簿にあるものだけが使える。代入されていない変数を
  * 使うのはエラー (「いつか入るはず」の値で計算しないため。
  * この小さい言語では、使う前に必ず代入文が先にある書き方)。
@@ -295,6 +386,21 @@ static int parse_primary_node(void) {
     skip_spaces();
     if (is_digit(*cur))
         return parse_number_node();
+    if (*cur == '"')
+        return parse_string_node();
+    if (*cur == '*') {
+        /* ポインタ読み: * の次に変数が来る形だけを扱う */
+        cur++;
+        skip_spaces();
+        int operand = parse_primary_node();
+        if (operand < 0)
+            return -1;
+        if (node_kind[operand] != NODE_VAR) {
+            errmsg = "* の相手は変数だけです (今の文法)";
+            return -1;
+        }
+        return new_node(NODE_DEREF, 0, operand, 0);
+    }
     if (is_ident_start(*cur)) {
         if (!parse_ident())
             return -1;
@@ -357,6 +463,8 @@ static int parse_program(char *program) {
     nnode = 0;
     nvar = 0;
     nstmt = 0;
+    nstr = 0;
+    str_used = 0;
     skip_spaces();
 
     /* v0 互換: プログラムが丸ごと1文字 (数字以外) なら、
@@ -447,6 +555,8 @@ static int OP_ADD = 2;
 static int OP_SUB = 3;
 static int OP_SB = 4;
 static int OP_WFI = 5;
+static int OP_LBU = 6;  /* メモリから1バイト読む (符号なし) */
+static int OP_AUIPC = 7; /* 自分の住所 + 即値 (PC 相対) */
 
 static int asm_op[2048];
 static int asm_rd[2048];
@@ -470,14 +580,58 @@ static int var_reg(int var) {
     return REG_VAR_BASE + var;
 }
 
-/* 葉 (数か変数) を、指定レジスタへ読み出す命令を1つ積む。
- * 数なら即値で、変数ならそのレジスタからの写しで入れる。
- * (addi rd, 相手, 0 は「写す」命令として使える: mv の実体) */
+/* 葉かどうか: 式の中で「そのまま値として使える材料」は
+ * 数・変数・文字列 (住所)・ポインタ読みの4種 */
+static int is_leaf(int node) {
+    int k = node_kind[node];
+    return k == NODE_NUM || k == NODE_VAR || k == NODE_STR ||
+           k == NODE_DEREF;
+}
+
+/* 文字列の住所をレジスタに作る命令 (2つ) を積む。
+ *
+ * 最初は lui + addi (絶対アドレス) で作ろうとして失敗した:
+ * RV64 の lui は、作った32ビットの値を符号拡張して64ビット
+ * にする。0x8020001c のような住所は32ビット目が立っている
+ * ため、0xffffffff8020001c という「変な住所」になり、
+ * lbu が例外 (load fault) になった (QEMU の例外ログで確認)。
+ *
+ * そこで auipc (PC 相対) を使う。「今いる命令の住所 + 差分」
+ * で住所を作るので、差分は小さく、符号拡張に邪魔されない。
+ * KosabaOS の C 版が -mcmodel=medany で auipc を使うのも
+ * 同じ理由である。
+ *   auipc reg, hi   -- reg = 自分の住所 + (hi << 12)
+ *   addi  reg, reg, lo
+ * 差分の分け方は addi の符号付き即値に合わせる定石:
+ * hi = (差分 + 0x800) >> 12、lo = 差分 - (hi << 12) */
+static unsigned int LOAD_BASE = 0x80200000u;  /* 配置先頭 (下記) */
+static int code_insts;  /* 1回目の生成で数えた命令の総数 */
+
+static void gen_load_addr(int reg, unsigned int addr) {
+    /* この auipc 命令自身が置かれる住所 (命令列の今の末尾) */
+    unsigned int pc = LOAD_BASE + (unsigned int)nasm * 4u;
+    long diff = (long)addr - (long)pc;
+    long hi = (diff + 0x800) >> 12;
+    long lo = diff - (hi << 12);
+    asm_push(OP_AUIPC, reg, 0, 0, (int)hi);
+    asm_push(OP_ADDI, reg, reg, 0, (int)lo);
+}
+
+/* 葉を、指定レジスタへ読み出す命令を積む。
+ *   数:       即値で入れる
+ *   変数:     そのレジスタからの写し (addi rd, 相手, 0 = mv)
+ *   文字列:   その住所を作る (auipc + addi の2命令)
+ *   ポインタ読み: 変数の持つ住所から1バイト読む (lbu) */
 static void gen_load_leaf(int reg, int leaf) {
-    if (node_kind[leaf] == NODE_NUM)
+    int k = node_kind[leaf];
+    if (k == NODE_NUM)
         asm_push(OP_ADDI, reg, REG_ZERO, 0, node_val[leaf]);
-    else /* NODE_VAR */
+    else if (k == NODE_VAR)
         asm_push(OP_ADDI, reg, var_reg(node_val[leaf]), 0, 0);
+    else if (k == NODE_STR)
+        gen_load_addr(reg, str_addr[node_val[leaf]]);
+    else /* NODE_DEREF: lhs がポインタの変数ノード */
+        asm_push(OP_LBU, reg, var_reg(node_val[node_lhs[leaf]]), 0, 0);
 }
 
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
@@ -489,8 +643,9 @@ static void gen_load_leaf(int reg, int leaf) {
  * t1 を退避する仕組み (スタック) が必要になる。それは
  * 後回しリストの題材で、ここでは文法の範囲だけを相手にする */
 static int gen_expr(int node) {
-    if (node_kind[node] == NODE_NUM || node_kind[node] == NODE_VAR) {
-        /* 葉: t1 にその値 (変数なら今の値) が入る */
+    if (is_leaf(node)) {
+        /* 葉: t1 にその値 (変数なら今の値、文字列なら住所、
+         * ポインタ読みなら指された先の1バイト) が入る */
         gen_load_leaf(REG_T1, node);
         return 1;
     }
@@ -498,7 +653,7 @@ static int gen_expr(int node) {
     if (!gen_expr(node_lhs[node]))
         return 0;
     int rhs = node_rhs[node];
-    if (node_kind[rhs] != NODE_NUM && node_kind[rhs] != NODE_VAR) {
+    if (!is_leaf(rhs)) {
         errmsg = "内部エラー: 右の子が葉でない式はまだ扱えません";
         return 0;
     }
@@ -511,12 +666,12 @@ static int gen_expr(int node) {
     return 1;
 }
 
-/* プログラム全体の命令列を作る: 土台 (UART の住所) →
- * 代入文を順に実行 → 最後の式 → UART へ書く → 止まる。
+/* 命令列を全部作る (1回分): 土台 (UART の住所) → 代入文を
+ * 順に実行 → 最後の式 → UART へ書く → 止まる。
  * 代入文の実行は「右辺を t1 で計算し、変数のレジスタへ
  * 写す」ことで、変数の値が次の文へ持ち越される。
  * 失敗したら 0 */
-static int gen_program(int root) {
+static int gen_all(int root) {
     nasm = 0;
     /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る */
     asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
@@ -532,6 +687,27 @@ static int gen_program(int root) {
     asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
     /* wfi -- 止まる */
     asm_push(OP_WFI, 0, 0, 0, 0);
+    return 1;
+}
+
+/* プログラム全体の生成。文字列の住所を確定させるため、
+ * 生成を2回行う (2パス生成):
+ *   1回目: 命令の個数を数えることが目的。この時点では
+ *          文字列の住所は仮の値だが、住所を作る命令の
+ *          個数 (lui + addi) は本物と同じになる
+ *   住所の確定: 文字列はコードの後ろに並ぶので、
+ *          住所 = LOAD_BASE + 命令数 x 4 + プール内の位置
+ *   2回目: 確定した住所で作り直す。これが最終成果になる */
+static int gen_program(int root) {
+    code_insts = 0;
+    if (!gen_all(root))
+        return 0;
+    code_insts = nasm;
+    for (int i = 0; i < nstr; i++)
+        str_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
+                      (unsigned int)str_off[i];
+    if (!gen_all(root))
+        return 0;
     return 1;
 }
 
@@ -588,6 +764,18 @@ static unsigned int encode_inst(int i) {
                ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
                ((unsigned int)(imm & 31) << 7) | 0x23u;
     }
+    if (op == OP_AUIPC) {
+        /* auipc rd, imm -- U 形式 (lui と同じ並び、opcode だけ
+         * 違う: 0x17)。rd = 実行中の命令の住所 + (imm << 12) */
+        return ((unsigned int)imm << 12) | ((unsigned int)rd << 7) | 0x17u;
+    }
+    if (op == OP_LBU) {
+        /* lbu rd, imm(rs1) -- I 形式 (addi と同じ並び)。
+         * addi との違いは opcode が 0x03 (読み込み系) で、
+         * funct3 が 4 (符号なしバイト読み) なこと */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (4u << 12) | ((unsigned int)rd << 7) | 0x03u;
+    }
     /* OP_WFI: 引数を取らない固定パターン */
     return 0x10500073u;
 }
@@ -601,10 +789,17 @@ static void write32(unsigned int inst) {
     out_byte((inst >> 24) & 0xff);
 }
 
-/* 命令列を全部変換して書き出す。これが最終成果物の生成 */
+/* 命令列を全部変換して書き出し、続けて文字列のデータ
+ * (str_pool の中身そのもの) を書き出す。これが最終成果物。
+ * バイナリの姿: [コード (命令 x 4バイト)] [文字列の並び]
+ * 実行が wfi で止まるため、後ろの文字列が命令として
+ * 実行されることはない。文字列の住所は第2層がこの並びに
+ * 合わせて決めてある */
 static void write_binary(void) {
     for (int i = 0; i < nasm; i++)
         write32(encode_inst(i));
+    for (int i = 0; i < str_used; i++)
+        out_byte((unsigned char)str_pool[i]);
 }
 
 /* ================================================================
@@ -614,7 +809,7 @@ static void write_binary(void) {
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        print_str(2, "usage: iwac '<プログラム>'   例: iwac 'x=65; x+1'\n");
+        print_str(2, "usage: iwac '<プログラム>'   例: iwac 's=\"Hi\"; *s'\n");
         return 1;
     }
 

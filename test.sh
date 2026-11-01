@@ -15,6 +15,8 @@
 #       文法エラー (65+ / 65*2 / 2048) では失敗し、出力が空になる
 #   v2: 変数と代入 (x=65; x+1 → B、2変数の加算、再代入、長い変数名)、
 #       未代入の変数や変数5個では失敗し、出力が空になる
+#   v3: 文字列とポインタ (s="Hi"; *s → H、s=s+1 で次を読む、
+#       *s+1 の計算、文字列2つ)、閉じていない文字列などは失敗
 set -e
 cd "$(dirname "$0")"
 
@@ -114,5 +116,21 @@ check_run "$TMP/v2d.bin" B "v2: 'abc=66; abc' (長い変数名)"
 check_error 'y+1' "'y+1' (代入されていない変数)"
 check_error 'x=x+1; x' "'x=x+1; x' (初回代入での自己参照)"
 check_error 'a=1; b=2; c=3; d=4; e=5; a' "変数5個 (上限は4個)"
+
+# --- v3: ポインタと文字列 ---
+"$IWAC" 's="Hi"; *s' > "$TMP/v3a.bin"
+check_run "$TMP/v3a.bin" H "v3: 's=\"Hi\"; *s'"
+
+"$IWAC" 's="Hi"; s=s+1; *s' > "$TMP/v3b.bin"
+check_run "$TMP/v3b.bin" i "v3: 's=\"Hi\"; s=s+1; *s' (ポインタを進める)"
+
+"$IWAC" 's="AB"; *s+1' > "$TMP/v3c.bin"
+check_run "$TMP/v3c.bin" B "v3: 's=\"AB\"; *s+1' (読んだ文字で計算)"
+
+"$IWAC" 's="A"; t="B"; *t' > "$TMP/v3d.bin"
+check_run "$TMP/v3d.bin" B "v3: 's=\"A\"; t=\"B\"; *t' (文字列2つ)"
+
+check_error 's="Hi; *s' "文字列が閉じていない"
+check_error '*5' "'*5' (* の相手は変数だけ)"
 
 echo "PASS"
