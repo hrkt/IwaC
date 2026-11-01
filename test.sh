@@ -25,6 +25,7 @@
 #       への書き込み、ビット演算 &、16進数、ポインタ経由の書き込み
 #   v7: 優先順位を C に合わせる (乗除が先、== が & より先)、
 #       かっこ、両側が式になる計算 (スタック評価)
+#   v8: if / else / else if (while の中や関数の中でも)
 set -e
 cd "$(dirname "$0")"
 
@@ -232,5 +233,24 @@ check_tail "$TMP/v7d.bin" 'A' "v7: 割り算 (100/4+40 = 65)"
 check_tail "$TMP/v7e.bin" 'A' "v7: C の順では == が & より先 (1 & (2==2) = 1)"
 
 check_error '(65' "かっこが閉じていない"
+
+# --- v8: if / else ---
+"$IWAC" 'x = 5; if (x == 5) { putc(65); }' > "$TMP/v8a.bin"
+check_tail "$TMP/v8a.bin" 'A' "v8: if が成り立つ"
+
+"$IWAC" 'x = 4; if (x == 5) { putc(65); } else { putc(66); }' > "$TMP/v8b.bin"
+check_tail "$TMP/v8b.bin" 'B' "v8: if/else の else 側"
+
+"$IWAC" 'x = 2; if (x == 1) { putc(65); } else if (x == 2) { putc(66); } else { putc(67); }' > "$TMP/v8c.bin"
+check_tail "$TMP/v8c.bin" 'B' "v8: else if の連なり"
+
+"$IWAC" 'i = 3; while (i) { if (i == 2) { putc(66); } else { putc(65); } i = i - 1; }' > "$TMP/v8d.bin"
+check_tail "$TMP/v8d.bin" 'ABA' "v8: while の中の if/else"
+
+"$IWAC" 'void f(char c) { if (c == 65) { putc(97); } else { putc(98); } } f(65); f(66);' > "$TMP/v8e.bin"
+check_tail "$TMP/v8e.bin" 'ab' "v8: 関数の中の if"
+
+check_error 'if (1) putc(65);' "if の本体に { } が無い"
+check_error 'if (1) { putc(65);' "if の本体が閉じていない"
 
 echo "PASS"

@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v7)
+/* iwac -- Cコンパイラのサブセット (v8)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v7 の言語 (文法) ===
+ * === v8 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -52,6 +52,8 @@
  *           | "*" (ident | number) "=" expr ";" (メモリへ書く文)
  *           | "putc" "(" expr ")" ";"          (出力文。組み込み)
  *           | "while" "(" expr ")" "{" { stmt } "}"  (繰り返し)
+ *           | "if" "(" expr ")" "{" { stmt } "}"
+ *             [ "else" ( "{" { stmt } "}" | if文 ) ]  (条件分岐)
  *           | ident "(" [ expr ] ")" ";"       (関数の呼び出し)
  *   expr    = eq { "&" eq }         (優先順位は C と同じ順。
  *   eq      = add { ("==" | "!=") add }   固い順に * / 、+ -、
@@ -130,6 +132,13 @@
  * プログラムと同じ仕組みでコンパイラが用意する
  * (要るプログラムのときだけ出すので、昔のプログラムの
  * 出力は変わらない)。
+ *
+ * v8 では条件分岐 if / else を入れた。本体は while と
+ * 同じく { } で囲む形だけ (ぶら下がり文は扱わない)。
+ * else の中身は { } の塊か、else if の連なりのための
+ * if 文1つ。生成は while と同じ道具立て: 条件が 0 なら
+ * beq で else (または末尾) へ飛び、else がある場合は
+ * 本体の末尾に jal を置いて else を飛び越える。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -248,6 +257,10 @@ static int NODE_CALL = 9;   /* 呼び出し文。node_val = 関数番号、
 static int NODE_EQ = 10;    /* 比較 (==)。結果は 1 か 0 */
 static int NODE_NE = 11;    /* 比較 (!=)。結果は 1 か 0 */
 static int NODE_AND = 12;   /* ビット演算 (&) */
+static int NODE_IF = 16;    /* 条件分岐文。node_lhs = 条件の式、
+                             * node_rhs = 成り立つときの文の並び、
+                             * node_val = else の文の並び (無ければ -1。
+                             * else if の場合は if 文ノード1つ) */
 static int NODE_MUL = 14;   /* 掛け算 */
 static int NODE_DIV = 15;   /* 割り算 (符号付き。除数が 0 なら
                              * RISC-V の決まりで結果は -1) */
@@ -869,7 +882,7 @@ static int parse_stmt_list(int in_brace) {
                 return head;
             }
             if (*cur == '\0') {
-                errmsg = "while の本体が } で閉じていません";
+                errmsg = "文の並びが } で閉じていません";
                 return -2;
             }
         } else {
@@ -914,7 +927,8 @@ static int parse_stmt_list(int in_brace) {
         if (is_ident_start(*cur)) {
             if (!parse_ident())
                 return -2;
-            int is_keyword = ident_is("while") || ident_is("putc");
+            int is_keyword = ident_is("while") || ident_is("putc") ||
+                             ident_is("if");
             int is_type = ident_is("void") || ident_is("char") ||
                           ident_is("int") || ident_is("const");
             if (is_type) {
@@ -1025,6 +1039,50 @@ static int parse_stmt(void) {
         if (!expect_char(';', "putc 文の終わりには ; が必要です"))
             return -1;
         return new_node(NODE_PUTC, 0, expr, 0);
+    }
+
+    if (ident_is("if")) {
+        /* if ( 条件 ) { 文の並び } [ else { 文の並び }
+         *                          | else if ... ]
+         * 本体は while と同じく { } で囲む形だけにする */
+        if (!expect_char('(', "if の後には ( が必要です"))
+            return -1;
+        int cond = parse_expr();
+        if (cond < 0)
+            return -1;
+        if (!expect_char(')', "if の条件の後には ) が必要です"))
+            return -1;
+        if (!expect_char('{', "if の後には { が必要です"))
+            return -1;
+        int then_body = parse_stmt_list(1);
+        if (then_body == -2)
+            return -1;
+        /* else があるかを先読みする (無ければ巻き戻す) */
+        int else_body = -1;
+        char *save = cur;
+        skip_spaces();
+        if (is_ident_start(*cur) && parse_ident() &&
+            ident_is("else")) {
+            skip_spaces();
+            if (*cur == '{') {
+                cur++;
+                else_body = parse_stmt_list(1);
+                if (else_body == -2)
+                    return -1;
+            } else if (is_ident_start(*cur)) {
+                /* else if の形: else の中身は if 文を1つ */
+                int sub = parse_stmt();
+                if (sub < 0)
+                    return -1;
+                else_body = sub;
+            } else {
+                errmsg = "else の後には { か if が必要です";
+                return -1;
+            }
+        } else {
+            cur = save;  /* else ではなかった */
+        }
+        return new_node(NODE_IF, else_body, cond, then_body);
     }
 
     char name_buf[32];
@@ -1392,6 +1450,43 @@ static int gen_stmt(int node) {
         asm_push(OP_JAL, REG_RA, 0, 0, -(node_val[node] + 1));
         return 1;
     }
+    if (kind == NODE_IF) {
+        /* if の作り方:
+         *   条件を計算 (結果は t1)
+         *   beq t1, zero, L_else (または L_end)  (0 なら飛ぶ)
+         *   成り立つときの文...
+         *   (else がある場合) jal zero, L_end
+         * L_else:
+         *   else の文...
+         * L_end:
+         * 飛び先の書き直しは while と同じやり方 */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        int beq_index = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int then_body = node_rhs[node];
+        for (int s = then_body; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+        int else_body = node_val[node];
+        if (else_body < 0) {
+            /* else 無し: ここが L_end */
+            asm_imm[beq_index] = nasm;
+            return 1;
+        }
+        /* else あり: 本体を飛び越えるジャンプを置き、
+         * beq の飛び先 (else の頭) を確定させる */
+        int jal_index = nasm;
+        asm_push(OP_JAL, 0, 0, 0, 0);
+        asm_imm[beq_index] = nasm;
+        for (int s = else_body; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+        asm_imm[jal_index] = nasm;
+        return 1;
+    }
     if (kind == NODE_WHILE) {
         int l_cond = nasm;  /* 条件判定の命令番号 */
         if (!gen_expr(node_lhs[node]))
@@ -1479,6 +1574,11 @@ static int stmt_needs_stack(int node) {
     if (k == NODE_WHILE)
         return expr_needs_stack(node_lhs[node]) ||
                list_needs_stack(node_rhs[node]);
+    if (k == NODE_IF)
+        return expr_needs_stack(node_lhs[node]) ||
+               list_needs_stack(node_rhs[node]) ||
+               (node_val[node] >= 0 &&
+                list_needs_stack(node_val[node]));
     if (k == NODE_CALL)
         return node_lhs[node] >= 0 &&
                expr_needs_stack(node_lhs[node]);

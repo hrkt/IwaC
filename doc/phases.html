@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v7 まで</title>
+<title>IwaC の歩み — v0 から v8 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -277,7 +277,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v7 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v8 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -316,7 +316,8 @@
   <a class="done" href="#v4">v4 ループ</a><span class="arr">→</span>
   <a class="done" href="#v5">v5 関数</a><span class="arr">→</span>
   <a class="done" href="#v6">v6 putc本体</a><span class="arr">→</span>
-  <a class="done" href="#v7">v7 優先順位</a>
+  <a class="done" href="#v7">v7 優先順位</a><span class="arr">→</span>
+  <a class="done" href="#v8">v8 if/else</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -573,6 +574,7 @@ x + 1        <span class="c"># 最後の式 → 66 = 'B'</span></pre>
     <li><span class="ok">✓ v5</span>　関数定義・引数・呼び出しと <code class="inline">!=</code> の比較で、本物の <code class="inline">uart_puts</code> の形が完成 → <b>print loop 目標は達成</b></li>
     <li><span class="ok">✓ v6</span>　<code class="inline">uart_putc</code> の本体（送信待ちのポーリング）まで本物のコードで書ける → <b>print loop は端から端まで自前のコードに</b></li>
     <li><span class="ok">✓ v7</span>　演算子の優先順位が C と同じ順に。かっこと掛け算・割り算も使える</li>
+    <li><span class="ok">✓ v8</span>　<code class="inline">if</code> / <code class="inline">else</code> で、条件で道を選べる</li>
   </ul>
 </section>
 
@@ -751,6 +753,39 @@ uart_puts(msg);</pre>
   そのままの読みで iwac に持って来られるようになりました。
   構文解析は「段」を重ねる形になり、段を1つ足せば新しい演算子の置き場が増えます。</p></div>
 
+</section>
+
+<!-- ================= v8 ================= -->
+<section class="phase" id="v8">
+  <div class="head"><span class="badge b-v4">v8</span><h2>if / else — 条件で道を選ぶ</h2></div>
+  <p class="goal-line">目標：<b>条件が成り立つかどうかで、実行する文を選べるようにすること。</b></p>
+<pre class="code"><span class="k">if</span> (x == 5) { putc(65); } <span class="k">else</span> { putc(66); }</pre>
+  <div class="screen"><small>QEMU で実行すると…</small>
+    x が 5 なら <span class="big">A</span>、そうでなければ <span class="big">B</span></div>
+
+  <h3 class="mini">流れは「分かれ道」</h3>
+  <div class="loop-diagram">
+    <div class="loop-step">条件を計算する（結果は 1 か 0）</div>
+    <div class="loop-arrow">↓ 0 なら <code class="inline">beq</code> で else 側へ飛ぶ</div>
+    <div class="loop-step">成り立つときの文を実行</div>
+    <div class="loop-arrow">↓ 終わったら <code class="inline">jal</code> で else を飛び越える</div>
+    <div class="loop-step exit">else の文（あれば）を実行して、合流する</div>
+  </div>
+  <p><code class="inline">while</code> で覚えた「飛び先を後から書き直す」やり方の、そのままの応用です。
+  <code class="inline">else if</code> の連なりも書けて、<code class="inline">while</code> の中でも関数の中でも使えます。</p>
+  <div class="screen"><small>他の実行結果</small>
+    <span class="big">ABA</span>（while の中で i の値によって出す文字を変える）　
+    <span class="big">ab</span>（関数の中で引数を見て分ける）</div>
+
+  <div class="chips">
+    <span class="chip">if / else</span><span class="chip">else if</span>
+    <span class="chip">分かれ道は beq と jal</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  制御構造はどれも「条件つきのジャンプ」の組み合わせ。
+  while が「戻る分かれ道」なら、if は「行きの分かれ道」です。
+  道具が揃うと、新しい文は既存の部品の組み合わせで作れるようになります。</p></div>
+
   <h3 class="mini">おまけ：バイナリの大きさの育ち方</h3>
   <div class="sizebar"><span class="lbl">v0 の「A」</span><div class="bar" style="width:64px"></div><span class="num">16 バイト（4命令）</span></div>
   <div class="sizebar"><span class="lbl">v1 の「65+1」</span><div class="bar" style="width:96px"></div><span class="num">24 バイト</span></div>
@@ -759,13 +794,14 @@ uart_puts(msg);</pre>
   <div class="sizebar"><span class="lbl">v5 の uart_puts</span><div class="bar" style="width:460px"></div><span class="num">115 バイト（関数＋呼び出し側＋文字列）</span></div>
   <div class="sizebar"><span class="lbl">v6 の putc+puts</span><div class="bar" style="width:560px"></div><span class="num">203 バイト（ポーリング付き本体＋関数2つ＋文字列）</span></div>
   <div class="sizebar"><span class="lbl">v7 の式 (50+10)*(1+1)</span><div class="bar" style="width:272px"></div><span class="num">68 バイト（スタック評価つき）</span></div>
+  <div class="sizebar"><span class="lbl">v8 の if/else</span><div class="bar" style="width:224px"></div><span class="num">56 バイト（x=4 の場合分け）</span></div>
   <p>小さく始めて、必要になった分だけ育っているのが、サイズにも表れています。</p>
 </section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v7 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-01（v8 時点）</p>
 </footer>
 
 </div>
