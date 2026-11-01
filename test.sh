@@ -17,6 +17,8 @@
 #       未代入の変数や変数5個では失敗し、出力が空になる
 #   v3: 文字列とポインタ (s="Hi"; *s → H、s=s+1 で次を読む、
 #       *s+1 の計算、文字列2つ)、閉じていない文字列などは失敗
+#   v4: while と putc で print loop 本体 (文字列を丸ごと出す)、
+#       カウントするループ、条件が偽なら素通り、入れ子のループ
 set -e
 cd "$(dirname "$0")"
 
@@ -132,5 +134,39 @@ check_run "$TMP/v3d.bin" B "v3: 's=\"A\"; t=\"B\"; *t' (文字列2つ)"
 
 check_error 's="Hi; *s' "文字列が閉じていない"
 check_error '*5' "'*5' (* の相手は変数だけ)"
+
+# --- v4: while と putc (print loop の本体) ---
+# 複数バイトの出力は「シリアルの末尾が期待の文字列と一致するか」で見る
+check_tail() {
+    bin=$1; expect=$2; label=$3
+    timeout 3 "$QEMU" -machine virt -bios default -kernel "$bin" \
+        -m 128M -display none -monitor none -serial "file:$TMP/serial.log" \
+        >/dev/null 2>&1 || true
+    n=${#expect}
+    last=$(tail -c "$n" "$TMP/serial.log")
+    if [ "$last" != "$expect" ]; then
+        fail "$label: 末尾が '$last' (期待は '$expect')"
+    fi
+    echo "ok: $label → '$expect' が出た"
+}
+
+"$IWAC" 'putc(72); putc(105);' > "$TMP/v4a.bin"
+check_tail "$TMP/v4a.bin" 'Hi' "v4: 'putc(72); putc(105);'"
+
+"$IWAC" 'i=3; while (i) { putc(65); i=i-1; }' > "$TMP/v4b.bin"
+check_tail "$TMP/v4b.bin" 'AAA' "v4: カウントする while"
+
+"$IWAC" 'x=0; while (x) { putc(88); } 65' > "$TMP/v4c.bin"
+check_run "$TMP/v4c.bin" A "v4: 条件が最初から偽なら本体は動かない"
+
+# 目標の print loop 本体: 文字列を終わり (0) まで1文字ずつ出す
+"$IWAC" 's="hello"; while (*s) { putc(*s); s = s + 1; }' > "$TMP/v4d.bin"
+check_tail "$TMP/v4d.bin" 'hello' "v4: print loop 'while (*s) { putc(*s); s = s + 1; }'"
+
+"$IWAC" 'i=2; while (i) { j=2; while (j) { putc(66); j=j-1; } i=i-1; }' > "$TMP/v4e.bin"
+check_tail "$TMP/v4e.bin" 'BBBB' "v4: while の入れ子"
+
+check_error 'putc(65)' "'putc(65)' (; が無い)"
+check_error 'while (1) { putc(65);' "閉じていない while"
 
 echo "PASS"

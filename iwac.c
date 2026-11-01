@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v3)
+/* iwac -- Cコンパイラのサブセット (v4)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,26 +39,40 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v3 の言語 (文法) ===
+ * === v4 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
- *           | { stmt } expr         (文の並び + 最後の式)
- *   stmt    = ident "=" expr ";"    (代入文)
+ *           | { stmt } [ expr ]     (文の並び + 最後の式は任意)
+ *   stmt    = ident "=" expr ";"               (代入文)
+ *           | "putc" "(" expr ")" ";"          (出力文)
+ *           | "while" "(" expr ")" "{" { stmt } "}"  (繰り返し)
  *   expr    = primary { ("+" | "-" ) primary }
  *   primary = number | ident        (数、または変数)
  *           | string                (文字列。値はその住所)
  *           | "*" ident             (ポインタの先を読む)
  *   number  = 数字の並び (10進数、0..2047。理由は addi の項で)
- *   ident   = 英字か _ で始まる名前 (変数名)
+ *   ident   = 英字か _ で始まる名前 (変数名。while と putc は予約語)
  *   string  = '"' 文字の並び '"'    (エスケープは \n \t \\ \" )
  *
  *   例: "x = 65; x + 1"        → 66 になり 'B' が出る (v2)
  *       "s = \"Hi\"; *s"       → 'H' が出る (v3)
- *       "s = \"Hi\"; s = s + 1; *s" → 'i' が出る (v3)
+ *       "s = \"hello\n\"; while (*s) { putc(*s); s = s + 1; }"
+ *                              → hello と出る (v4。これが目標の
+ *                                KosabaOS の print loop の本体)
  *
- * v3 で育ったのは「ポインタと文字列」。目標である KosabaOS の
- * print loop (uart_puts) に必要な部品の2つ目
- * (計画は doc/roadmap.md の「print loop」目標の節)。
+ * v4 で育ったのは「while と出力文」。目標である KosabaOS の
+ * print loop (uart_puts) の本体が、この言語で書けるように
+ * なった (関数の形にするのは v5)。
+ * (計画は doc/roadmap.md の「print loop」目標の節)
+ *
+ * 制御の流れは、分岐 (beq: 条件が 0 なら飛ぶ) とジャンプ
+ * (jal: 無条件に戻る) で作る。命令列 (第2層) の段階では
+ * 飛び先を「命令の番号」で持ち、ビット列への変換 (第3層) で
+ * 「今の命令からの距離 (相対オフセット)」に直す。
+ * while の条件は「0 でない間くり返す」という意味。
+ * 比較演算子 (*s != 0 のような書き方) はまだ無い。
+ * putc は組み込みの出力文で、今は UART へ直接書く
+ * (送信待ちのポーリングは uart_putc 本体を扱う v5 以降)。
  *
  * 文字列の置き場所: バイナリの「コードの後ろ」に文字列の
  * バイト列を並べる (最後に 0 を付けた C の文字列の形)。
@@ -162,11 +176,18 @@ static int NODE_STR = 4;  /* 文字列 (葉)。node_val = 文字列番号。
                            * このノードの「値」は文字列の住所 */
 static int NODE_DEREF = 5; /* ポインタ読み (葉扱い)。
                             * node_lhs = ポインタの変数ノード */
+static int NODE_ASSIGN = 6; /* 代入文。node_val = 変数番号、
+                             * node_lhs = 右辺の式 */
+static int NODE_PUTC = 7;   /* 出力文。node_lhs = 出す式 */
+static int NODE_WHILE = 8;  /* 繰り返し文。node_lhs = 条件の式、
+                             * node_rhs = 本体の文の並びの先頭 */
 
 static int node_kind[512];
 static int node_val[512];
 static int node_lhs[512];
 static int node_rhs[512];
+static int node_next[512]; /* 文の並び用: 次の文ノード (-1 で終わり)。
+                            * 式のノードでは使わない */
 static int nnode;  /* 作ったノードの数 */
 
 /* --- 変数の名簿 (記号表) ---
@@ -208,13 +229,16 @@ static int define_var(char *name, int len) {
     return i;
 }
 
-/* --- 代入文の並び ---
- * プログラムは「代入文の並び + 最後の式」でできている。
- * 代入文1つは (代入先の変数番号, 右辺の式の根ノード) の組。
- * 最後の式の根は parse_program の戻り値で返す */
-static int stmt_var[128];
-static int stmt_expr[128];
-static int nstmt;  /* 代入文の数 */
+/* --- プログラムの形 ---
+ * プログラムは「文の並び + 任意の最後の式」でできている。
+ * 文も式と同じく AST のノードで表す (NODE_ASSIGN など)。
+ * 文の並びは node_next で数珠つなぎにしたリストで、
+ * prog_stmts が先頭の文ノード (-1 なら文が無い)。
+ * prog_final は最後の式の根 (無いときは -1 で、prog_has_final
+ * で区別する)。どちらも parse_program が置く */
+static int prog_stmts;
+static int prog_final;
+static int prog_has_final;
 
 /* --- 文字列の置き場 (文字列テーブル) ---
  * プログラム中に出てきた文字列リテラルを全部溜める。
@@ -243,6 +267,7 @@ static int new_node(int kind, int val, int lhs, int rhs) {
     node_val[i] = val;
     node_lhs[i] = lhs;
     node_rhs[i] = rhs;
+    node_next[i] = -1;
     return i;
 }
 
@@ -427,8 +452,9 @@ static int parse_expr(void) {
         return -1;
     for (;;) {
         skip_spaces();
-        if (*cur == '\0' || *cur == ';')
-            return lhs;  /* 式の終わり (文の区切りか、全体の終わり) */
+        if (*cur == '\0' || *cur == ';' || *cur == ')')
+            return lhs;  /* 式の終わり (文の区切り、全体の終わり、
+                          * または while / putc の閉じかっこ) */
         int kind;
         if (*cur == '+')
             kind = NODE_ADD;
@@ -452,81 +478,197 @@ static int parse_expr(void) {
     }
 }
 
-/* プログラム全体を読み、最後の式の AST の根を返す。
- * 代入文は stmt_var[] / stmt_expr[] に溜まる。失敗したら -1。
- *
- * 代入文か最後の式かは「先読み」で見分ける: 識別子で始まって、
- * その次 (空白の後) が '=' なら代入文。そうでなければ読み
- * 直して式として扱う (カーソルを巻き戻すのが先読みの実体) */
+/* 読み取ったばかりの識別子 (ident_buf) が、指定した単語と
+ * 一致するか。while や putc の予約語の判定に使う */
+static int ident_is(char *word) {
+    int i = 0;
+    while (word[i] != '\0') {
+        if (i >= ident_len || ident_buf[i] != word[i])
+            return 0;
+        i++;
+    }
+    return i == ident_len;
+}
+
+/* 期待する1文字があるか確かめて、あれば進む。無ければエラー */
+static int expect_char(char c, char *msg) {
+    skip_spaces();
+    if (*cur != c) {
+        errmsg = msg;
+        return 0;
+    }
+    cur++;
+    return 1;
+}
+
+/* 文を1つ読む関数は互いに呼び合う (while の本体が文の並びで、
+ * その文にまた while がありうる) ので、先に宣言だけ置く */
+static int parse_stmt(void);
+static int parse_stmt_list(int in_brace);
+
+/* 文の並びを読む。in_brace が 1 のときは while の本体で、
+ * '}' まで読んで '}' を消費する。0 のときはプログラムの
+ * 頭から、最後の式か入力の終わりまで読む。
+ * 読めたら先頭の文ノード (文が無ければ -1)、
+ * 失敗したら -2 を返す (エラー理由は errmsg)。
+ * プログラムの頭 (in_brace=0) では、最後の式に出会ったら
+ * prog_final / prog_has_final に置いて終わる */
+static int parse_stmt_list(int in_brace) {
+    int head = -1;
+    int tail = -1;
+    for (;;) {
+        skip_spaces();
+        if (in_brace) {
+            if (*cur == '}') {
+                cur++;
+                return head;
+            }
+            if (*cur == '\0') {
+                errmsg = "while の本体が } で閉じていません";
+                return -2;
+            }
+        } else {
+            if (*cur == '\0')
+                return head;  /* 文だけのプログラムもよい */
+        }
+        /* 文の始まりかどうかを先読みする: 識別子で始まる場合、
+         * 名前とその次第で「代入文・while・putc」のどれか、
+         * それ以外 (式の始まり) もありうる */
+        char *save = cur;
+        if (is_ident_start(*cur)) {
+            if (!parse_ident())
+                return -2;
+            int is_keyword = ident_is("while") || ident_is("putc");
+            skip_spaces();
+            int is_assign = (*cur == '=' && cur[1] != '=');
+            if (is_keyword || is_assign) {
+                cur = save;  /* parse_stmt に頭から読ませる */
+                int stmt = parse_stmt();
+                if (stmt < 0)
+                    return -2;
+                if (head < 0)
+                    head = stmt;
+                else
+                    node_next[tail] = stmt;
+                tail = stmt;
+                continue;
+            }
+            cur = save;  /* 式だった。先読みを巻き戻す */
+        }
+        if (in_brace) {
+            errmsg = "while の本体には文だけが書けます";
+            return -2;
+        }
+        /* 最後の式。プログラムはここで終わる */
+        int expr = parse_expr();
+        if (expr < 0)
+            return -2;
+        skip_spaces();
+        if (*cur != '\0') {
+            errmsg = "最後の式の後に、余分な文字があります";
+            return -2;
+        }
+        prog_final = expr;
+        prog_has_final = 1;
+        return head;
+    }
+}
+
+/* 文を1つ読み、その AST ノードを返す。失敗したら -1。
+ * 呼び出し時点でカーソルは文の頭にあること */
+static int parse_stmt(void) {
+    skip_spaces();
+    if (!parse_ident())
+        return -1;
+
+    if (ident_is("while")) {
+        /* while ( 条件 ) { 文の並び } */
+        if (!expect_char('(', "while の後には ( が必要です"))
+            return -1;
+        int cond = parse_expr();
+        if (cond < 0)
+            return -1;
+        if (!expect_char(')', "while の条件の後には ) が必要です"))
+            return -1;
+        if (!expect_char('{', "while の後には { が必要です"))
+            return -1;
+        int body = parse_stmt_list(1);
+        if (body == -2)
+            return -1;
+        return new_node(NODE_WHILE, 0, cond, body);
+    }
+
+    if (ident_is("putc")) {
+        /* putc ( 式 ); -- 組み込みの出力文 */
+        if (!expect_char('(', "putc の後には ( が必要です"))
+            return -1;
+        int expr = parse_expr();
+        if (expr < 0)
+            return -1;
+        if (!expect_char(')', "putc の式の後には ) が必要です"))
+            return -1;
+        if (!expect_char(';', "putc 文の終わりには ; が必要です"))
+            return -1;
+        return new_node(NODE_PUTC, 0, expr, 0);
+    }
+
+    /* 残る形は代入文: 名前 = 式 ;
+     * 右辺を先に読んでから名簿に載せる (右辺の中で代入先
+     * 自身を使うのは、初回代入ではまだ値が無いのでエラーに
+     * なるのが正しい)。再代入では名簿に既にあるので読める */
+    char name_buf[32];
+    int name_len = ident_len;
+    for (int i = 0; i < name_len; i++)
+        name_buf[i] = ident_buf[i];
+    if (!expect_char('=', "文は 代入 (名前 = 式 ;) か while か putc です"))
+        return -1;
+    int expr = parse_expr();
+    if (expr < 0)
+        return -1;
+    int var = define_var(name_buf, name_len);
+    if (var < 0)
+        return -1;
+    if (!expect_char(';', "代入文の終わりには ; が必要です"))
+        return -1;
+    return new_node(NODE_ASSIGN, var, expr, 0);
+}
+
+/* プログラム全体を読む。成功したら 1、失敗したら 0。
+ * 結果は prog_stmts / prog_final / prog_has_final に置く */
 static int parse_program(char *program) {
     cur = program;
     nnode = 0;
     nvar = 0;
-    nstmt = 0;
     nstr = 0;
     str_used = 0;
+    prog_stmts = -1;
+    prog_final = -1;
+    prog_has_final = 0;
     skip_spaces();
 
     /* v0 互換: プログラムが丸ごと1文字 (数字以外) なら、
      * その文字コードを数のノードとして扱う。
      * (この互換のため、1文字の変数名だけのプログラムは
      * 「その変数の値」ではなく「その文字コード」になる) */
-    if (cur[0] != '\0' && cur[1] == '\0' && !is_digit(cur[0]))
-        return new_node(NODE_NUM, (unsigned char)cur[0], 0, 0);
-
-    for (;;) {
-        skip_spaces();
-        char *save = cur;
-        if (is_ident_start(*cur)) {
-            /* 先読み: 名前の後に '=' があるか */
-            if (!parse_ident())
-                return -1;
-            /* 名前は巻き戻しても使うことがあるので控える */
-            char name_buf[32];
-            int name_len = ident_len;
-            for (int i = 0; i < name_len; i++)
-                name_buf[i] = ident_buf[i];
-            skip_spaces();
-            if (*cur == '=' && cur[1] != '=') {
-                /* 代入文だった。右辺を先に読んでから名簿に載せる
-                 * (右辺の中で代入先自身を使うのは、初回代入では
-                 * まだ値が無いのでエラーになるのが正しい) */
-                cur++;
-                int expr = parse_expr();
-                if (expr < 0)
-                    return -1;
-                int var = define_var(name_buf, name_len);
-                if (var < 0)
-                    return -1;
-                skip_spaces();
-                if (*cur != ';') {
-                    errmsg = "代入文の終わりには ; が必要です";
-                    return -1;
-                }
-                cur++;
-                if (nstmt >= 128) {
-                    errmsg = "文が多すぎます";
-                    return -1;
-                }
-                stmt_var[nstmt] = var;
-                stmt_expr[nstmt] = expr;
-                nstmt++;
-                continue;
-            }
-            /* 代入文ではなかった。カーソルを巻き戻して式へ */
-            cur = save;
-        }
-        /* 最後の式。これでプログラムは終わる */
-        int expr = parse_expr();
-        if (expr < 0)
-            return -1;
-        skip_spaces();
-        if (*cur != '\0') {
-            errmsg = "最後の式の後に、余分な文字があります";
-            return -1;
-        }
-        return expr;
+    if (cur[0] != '\0' && cur[1] == '\0' && !is_digit(cur[0])) {
+        prog_final = new_node(NODE_NUM, (unsigned char)cur[0], 0, 0);
+        if (prog_final < 0)
+            return 0;
+        prog_has_final = 1;
+        return 1;
     }
+
+    int head = parse_stmt_list(0);
+    if (head == -2)
+        return 0;
+    if (head == -1 && !prog_has_final) {
+        /* 文も式も無い = 空のプログラム。文だけのプログラムは
+         * よいが、空は書き間違いとしてエラーにしておく */
+        errmsg = "プログラムが空です";
+        return 0;
+    }
+    prog_stmts = head;
+    return 1;
 }
 
 /* ================================================================
@@ -557,6 +699,12 @@ static int OP_SB = 4;
 static int OP_WFI = 5;
 static int OP_LBU = 6;  /* メモリから1バイト読む (符号なし) */
 static int OP_AUIPC = 7; /* 自分の住所 + 即値 (PC 相対) */
+static int OP_BEQ = 8;   /* 2つのレジスタが等しければ飛ぶ。
+                          * asm_imm には「飛び先の命令番号」を
+                          * 入れる (バイト数ではない)。
+                          * バイト単位の距離への変換は第3層 */
+static int OP_JAL = 9;   /* 無条件に飛ぶ。asm_imm は同上、
+                          * asm_rd は 0 (戻り先は保存しない) */
 
 static int asm_op[2048];
 static int asm_rd[2048];
@@ -666,25 +814,76 @@ static int gen_expr(int node) {
     return 1;
 }
 
-/* 命令列を全部作る (1回分): 土台 (UART の住所) → 代入文を
- * 順に実行 → 最後の式 → UART へ書く → 止まる。
+/* 文の AST から命令列を作る。失敗したら 0。
+ *
+ * while の作り方 (命令列の並びがループの形そのもの):
+ *   L_cond: 条件を計算 (結果は t1)
+ *           beq t1, zero, L_end   (0 なら繰り返しを抜ける)
+ *           本体の文...
+ *           jal zero, L_cond      (条件の判定に戻る)
+ *   L_end:
+ * 飛び先 (L_cond / L_end) は「命令の番号」で表す。L_end は
+ * 本体を作り終えた時点の末尾の番号なので、beq は飛び先を
+ * 後から書き直す (asm_imm の書換え)。アセンブラでラベルを
+ * 使うのと同じことを、番号と書換えでやっている */
+static int gen_stmt(int node) {
+    int kind = node_kind[node];
+    if (kind == NODE_ASSIGN) {
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        /* addi 変数レジスタ, t1, 0 -- 結果を変数へ写す (代入) */
+        asm_push(OP_ADDI, var_reg(node_val[node]), REG_T1, 0, 0);
+        return 1;
+    }
+    if (kind == NODE_PUTC) {
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        /* sb t1, 0(t0) -- 式の値の下1バイトを UART へ */
+        asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+        return 1;
+    }
+    if (kind == NODE_WHILE) {
+        int l_cond = nasm;  /* 条件判定の命令番号 */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        /* beq t1, zero, L_end -- 飛び先はまだ分からないので
+         * 仮に 0 を入れておき、下で書き直す */
+        int beq_index = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int body = node_rhs[node];
+        for (int s = body; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+        /* jal zero, L_cond -- 条件の判定に戻る */
+        asm_push(OP_JAL, 0, 0, 0, l_cond);
+        /* ここ (末尾) が L_end。beq の飛び先を書き直す */
+        asm_imm[beq_index] = nasm;
+        return 1;
+    }
+    errmsg = "内部エラー: 知らない種類の文です";
+    return 0;
+}
+
+/* 命令列を全部作る (1回分): 土台 (UART の住所) → 文の並びを
+ * 順に実行 → 最後の式 (あれば) → UART へ書く → 止まる。
  * 代入文の実行は「右辺を t1 で計算し、変数のレジスタへ
  * 写す」ことで、変数の値が次の文へ持ち越される。
  * 失敗したら 0 */
-static int gen_all(int root) {
+static int gen_all(void) {
     nasm = 0;
     /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る */
     asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
-    for (int i = 0; i < nstmt; i++) {
-        if (!gen_expr(stmt_expr[i]))
+    for (int s = prog_stmts; s != -1; s = node_next[s]) {
+        if (!gen_stmt(s))
             return 0;
-        /* addi 変数レジスタ, t1, 0 -- 結果を変数へ写す (代入) */
-        asm_push(OP_ADDI, var_reg(stmt_var[i]), REG_T1, 0, 0);
     }
-    if (!gen_expr(root))
-        return 0;
-    /* sb t1, 0(t0) -- 結果の下1バイトを UART 送信レジスタへ */
-    asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+    if (prog_has_final) {
+        if (!gen_expr(prog_final))
+            return 0;
+        /* sb t1, 0(t0) -- 最後の式の下1バイトを UART へ */
+        asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+    }
     /* wfi -- 止まる */
     asm_push(OP_WFI, 0, 0, 0, 0);
     return 1;
@@ -698,15 +897,15 @@ static int gen_all(int root) {
  *   住所の確定: 文字列はコードの後ろに並ぶので、
  *          住所 = LOAD_BASE + 命令数 x 4 + プール内の位置
  *   2回目: 確定した住所で作り直す。これが最終成果になる */
-static int gen_program(int root) {
+static int gen_program(void) {
     code_insts = 0;
-    if (!gen_all(root))
+    if (!gen_all())
         return 0;
     code_insts = nasm;
     for (int i = 0; i < nstr; i++)
         str_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
                       (unsigned int)str_off[i];
-    if (!gen_all(root))
+    if (!gen_all())
         return 0;
     return 1;
 }
@@ -776,6 +975,41 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                (4u << 12) | ((unsigned int)rd << 7) | 0x03u;
     }
+    if (op == OP_BEQ) {
+        /* beq rs1, rs2, offset -- B 形式 (分岐)。
+         * 命令列での飛び先は「命令番号」なので、まず
+         * バイト単位の相対オフセットに直す:
+         *   offset = (飛び先番号 - 自分の番号) x 4
+         * 即値 (オフセット) のビットは形式の都合で
+         * バラバラの場所に散らばっているのが B 形式の特徴:
+         * [ imm[12] << 31 | imm[10:5] << 25 | rs2 << 20
+         *   | rs1 << 15 | funct3(0) << 12 | imm[4:1] << 8
+         *   | imm[11] << 7 | opcode 0x63 ]
+         * オフセットの下1ビットは常に 0 (命令は4バイト単位)
+         * なので格納されない。届く範囲は 前後 約4KB */
+        int off = (imm - i) * 4;
+        return ((unsigned int)((off >> 12) & 1) << 31) |
+               ((unsigned int)((off >> 5) & 0x3f) << 25) |
+               ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) |
+               ((unsigned int)((off >> 1) & 0xf) << 8) |
+               ((unsigned int)((off >> 11) & 1) << 7) | 0x63u;
+    }
+    if (op == OP_JAL) {
+        /* jal rd, offset -- J 形式 (ジャンプ)。
+         * 相対オフセットへの直し方は beq と同じ。ビットの
+         * 散らばり方は J 形式の流儀:
+         * [ imm[20] << 31 | imm[10:1] << 21 | imm[11] << 20
+         *   | imm[19:12] << 12 | rd << 7 | opcode 0x6f ]
+         * 届く範囲は 前後 約1MB。rd が 0 のときは「戻り先を
+         * 保存しない単なるジャンプ」(アセンブリの j) になる */
+        int off = (imm - i) * 4;
+        return ((unsigned int)((off >> 20) & 1) << 31) |
+               ((unsigned int)((off >> 1) & 0x3ff) << 21) |
+               ((unsigned int)((off >> 11) & 1) << 20) |
+               ((unsigned int)((off >> 12) & 0xff) << 12) |
+               ((unsigned int)rd << 7) | 0x6fu;
+    }
     /* OP_WFI: 引数を取らない固定パターン */
     return 0x10500073u;
 }
@@ -809,19 +1043,18 @@ static void write_binary(void) {
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        print_str(2, "usage: iwac '<プログラム>'   例: iwac 's=\"Hi\"; *s'\n");
+        print_str(2, "usage: iwac '<プログラム>'   例: iwac 's=\"Hi\"; while (*s) { putc(*s); s = s + 1; }'\n");
         return 1;
     }
 
-    int root = parse_program(argv[1]);
-    if (root < 0) {
+    if (!parse_program(argv[1])) {
         print_str(2, "iwac: ");
         print_str(2, errmsg);
         print_str(2, "\n");
         return 1;
     }
 
-    if (!gen_program(root)) {
+    if (!gen_program()) {
         print_str(2, "iwac: ");
         print_str(2, errmsg);
         print_str(2, "\n");
