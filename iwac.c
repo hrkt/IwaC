@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v16)
+/* iwac -- Cコンパイラのサブセット (v17)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -39,7 +39,7 @@
  * ファイルの並びも層の順: 外部宣言と道具 → 第1層 → 第2層 →
  * 第3層 → main (層を順に呼ぶだけ)。
  *
- * === v16 の言語 (文法) ===
+ * === v17 の言語 (文法) ===
  *
  *   program = 1文字                 (v0 との互換。その文字コードが値)
  *           | { funcdef | stmt } [ expr ]
@@ -206,6 +206,13 @@
  *   スタック: 自前で用意 → OS が用意する (出さない)
  * v15 では iwac 本体が KosabaOS のユーザープログラムに
  * なった (kosaba/ の crt と shim。iwac.c は無変更)。
+ *
+ * v17 では入力が複数ファイルになった (言語は不変):
+ * iwac a.c b.c のように並べると、順につないで (境目に
+ * 改行を挟む) 1つのソースとして読む。全ファイル必須で、
+ * 開けないときは名前を出してエラー。部品のファイルと
+ * 本体のファイル、という分け方や、OS 用ランタイムと
+ * 本体の連結に使う。引数が1つのときの規則は従来どおり。
  *
  * v16 はセルフホストへの階段の1段目: 字句の完成。
  *   C 形式のブロックコメント (skip_spaces で読み飛ばす。
@@ -2565,11 +2572,14 @@ static int ends_with_c(char *path) {
  * 戻り値: 1 = 読めた、0 = ファイルとして開けなかった
  * (引数そのものとして扱ってよい)、-1 = エラー
  * (errmsg に理由。開けたのに読めなかった、大きすぎる等) */
-static int load_file(char *path) {
+/* ファイルを src_buf の *used_io の位置から後ろへ読み足す。
+ * 戻り値: 1 = 読めた、0 = ファイルとして開けなかった、
+ * -1 = エラー (errmsg に理由) */
+static int append_file(char *path, int *used_io) {
     int fd = open(path, 0);
     if (fd < 0)
         return 0;
-    int used = 0;
+    int used = *used_io;
     for (;;) {
         if (used >= 65535) {
             close(fd);
@@ -2588,6 +2598,44 @@ static int load_file(char *path) {
         used += (int)n;
     }
     close(fd);
+    *used_io = used;
+    return 1;
+}
+
+static int load_file(char *path) {
+    int used = 0;
+    int r = append_file(path, &used);
+    if (r == 1)
+        src_buf[used] = '\0';
+    return r;
+}
+
+/* 複数ファイル入力 (v17) で開けなかったファイルの名前 */
+static char *load_failed_name;
+
+/* 複数のファイルを順につないで src_buf へ読む (v17)。
+ * 境目には改行を1つ挟む (トークンがくっつかないように)。
+ * こちらは全ファイルが必須: 1つでも開けなければ 0 を
+ * 返し、名前を load_failed_name に置く。読みの失敗は -1 */
+static int load_files(char **paths, int count) {
+    int used = 0;
+    load_failed_name = 0;
+    for (int i = 0; i < count; i++) {
+        if (used > 0) {
+            if (used >= 65535) {
+                errmsg = "ファイルが大きすぎます (約64KBまで)";
+                return -1;
+            }
+            src_buf[used++] = '\n';
+        }
+        int r = append_file(paths[i], &used);
+        if (r == 0) {
+            load_failed_name = paths[i];
+            return 0;
+        }
+        if (r < 0)
+            return -1;
+    }
     src_buf[used] = '\0';
     return 1;
 }
@@ -2809,32 +2857,50 @@ int main(int argc, char **argv) {
         target_kosaba = 1;
         argi = 2;
     }
-    if (argc != argi + 1) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n");
+    if (argc < argi + 1) {
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n");
         return 1;
     }
     if (target_kosaba)
         LOAD_BASE = 0x40000000u;  /* OS のユーザー領域の先頭 */
 
-    /* 入力の決定: .c ファイルは必ずファイルとして読む。
-     * それ以外は、ファイルが開ければファイル、無ければ
-     * 引数そのものがプログラム */
+    /* 入力の決定: 引数が2つ以上なら全部ファイルとして
+     * つないで読む (v17)。1つだけなら従来どおり:
+     * .c ファイルは必ずファイルとして読む。それ以外は、
+     * ファイルが開ければファイル、無ければ引数そのもの
+     * がプログラム */
     char *src = argv[argi];
-    int must_file = ends_with_c(argv[argi]);
-    int loaded = load_file(argv[argi]);
-    if (loaded < 0 || (must_file && loaded == 0)) {
-        print_str(2, "iwac: ");
-        if (loaded < 0)
-            print_str(2, errmsg);
-        else {
-            print_str(2, "ファイルが開けません: ");
-            print_str(2, argv[argi]);
+    if (argc - argi >= 2) {
+        int loaded = load_files(&argv[argi], argc - argi);
+        if (loaded <= 0) {
+            print_str(2, "iwac: ");
+            if (loaded < 0)
+                print_str(2, errmsg);
+            else {
+                print_str(2, "ファイルが開けません: ");
+                print_str(2, load_failed_name);
+            }
+            print_str(2, "\n");
+            return 1;
         }
-        print_str(2, "\n");
-        return 1;
-    }
-    if (loaded == 1)
         src = src_buf;
+    } else {
+        int must_file = ends_with_c(argv[argi]);
+        int loaded = load_file(argv[argi]);
+        if (loaded < 0 || (must_file && loaded == 0)) {
+            print_str(2, "iwac: ");
+            if (loaded < 0)
+                print_str(2, errmsg);
+            else {
+                print_str(2, "ファイルが開けません: ");
+                print_str(2, argv[argi]);
+            }
+            print_str(2, "\n");
+            return 1;
+        }
+        if (loaded == 1)
+            src = src_buf;
+    }
 
     /* 前処理: #define を展開してから parse に渡す (v13) */
     if (!expand_defines(src)) {

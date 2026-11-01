@@ -34,6 +34,7 @@
 #   v14: KosabaOS ターゲット (--kosaba: ELF/0x40000000/syscall)
 #   v15: iwac 本体の KosabaOS 版 (kosaba/ の crt+shim でビルド)
 #   v16: 字句の完成 (ブロックコメント/文字リテラル/型の語彙)
+#   v17: 複数ファイル入力 (順につないで1つのソースとして読む)
 set -e
 cd "$(dirname "$0")"
 
@@ -403,6 +404,17 @@ check_run "$TMP/v16c.bin" C "v16: エスケープ文字リテラル"
 check_run "$TMP/v16d.bin" D "v16: long の型"
 "$IWAC" 'unsigned char buf[2]; buf[0] = 69; putc(buf[0]);' > "$TMP/v16e.bin"
 check_run "$TMP/v16e.bin" E "v16: unsigned char の配列"
+# --- v17: 複数ファイル入力 ---
+printf 'void kputs(char *s) { while (*s != 0) { putc(*s); s = s + 1; } }\n' > "$TMP/lib.c"
+printf 'int main() { kputs("Hi"); }' > "$TMP/main.c"
+"$IWAC" "$TMP/lib.c" "$TMP/main.c" > "$TMP/v17.bin"
+check_run "$TMP/v17.bin" i "v17: 複数ファイル (lib + main)"
+if "$IWAC" "$TMP/lib.c" "$TMP/nosuch.c" > "$TMP/err.bin" 2>/dev/null; then
+    fail "v17: 開けないファイルでエラーになるはずが成功した"
+fi
+[ ! -s "$TMP/err.bin" ] || fail "v17: エラーなのにバイナリが出た"
+echo "ok: v17: 開けないファイルはエラーになり、出力は空だった"
+
 check_error "putc('');" "空の文字リテラル"
 check_error '/* 終わらない' "閉じないブロックコメント"
 check_error "putc('AB');" "2文字の文字リテラル"
