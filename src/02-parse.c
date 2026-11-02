@@ -79,6 +79,21 @@ static int NODE_FORSTEP = 42;  /* for の更新部 (v20)。node_val =
 static int NODE_VDECL = 43;   /* 変数の宣言だけの文 (v21)。
                              * node_val = 変数番号。実行時の
                              * コードは出ない (置き場所の予約) */
+static int NODE_INDEX2 = 45;  /* 2次元配列の要素読み (v23)。
+                             * node_val = 配列番号、node_lhs =
+                             * 行の式、node_rhs = 列の式 */
+static int NODE_ROWADDR = 46; /* 2次元配列の行の先頭アドレス
+                             * (v23)。node_val = 配列番号、
+                             * node_rhs = 行の式。値は住所 */
+static int NODE_PINDEX = 47;  /* ポインタの添字読み (v23)。
+                             * node_val = 変数番号、node_rhs =
+                             * 添字の式。p[i] は *(p + i ×
+                             * 指す先の大きさ) として読む */
+static int NODE_ELEM_STORE = 48; /* 要素への書き込み文 (v23)。
+                             * node_lhs = 要素を表す式ノード
+                             * (INDEX2 か PINDEX)、node_rhs =
+                             * 書く値の式。1次元の配列要素は
+                             * 従来の NODE_INDEX_STORE のまま */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -246,13 +261,21 @@ static int nfunc;
  * 置き場所はバイナリの「コード＋文字列の後ろ」にまとめて
  * 確保し (静的な領域)、住所は文字列と同じく2パス生成で
  * 確定させる。配列 i 番について:
- *   arr_size[i] : 要素数 (= バイト数。要は1バイト配列)
- *   arr_off[i]  : 配列領域の中での位置
+ *   arr_size[i] : 最初の [ ] の数 (1次元なら要素数、
+ *                 2次元なら行数)
+ *   arr_cols[i] : 2次元の列数 (1次元なら 0、v23)
+ *   arr_esize[i]: 要素の大きさ (1 か 8 バイト、v23)。
+ *                 宣言の型から決まる: ポインタの配列
+ *                 (型に * が付く) は 8、char は 1、
+ *                 それ以外は 8
+ *   arr_off[i]  : 配列領域の中での位置 (バイト単位)
  *   arr_addr[i] : 確定した先頭アドレス (第2層が決める)
- * 配列は最大8個、合計 4096 バイトまで */
+ * 配列は最大8個、合計 4096 バイトまで (上限は v25 で調整) */
 static char arr_names[8][32];
 static int arr_name_len[8];
 static int arr_size[8];
+static int arr_cols[8];
+static int arr_esize[8];
 static int arr_off[8];
 static unsigned int arr_addr[8];
 static int narr;      /* 登録された配列の数 */
@@ -272,9 +295,12 @@ static int find_array(char *name, int len) {
     return -1;
 }
 
-/* 配列を名簿に登録し、番号を返す。名前は変数とも配列とも
- * 重なってはいけない。失敗したら -1 */
-static int define_array(char *name, int len, int size) {
+/* 配列を名簿に登録し、番号を返す。rows は最初の [ ] の
+ * 数、cols は2つ目の [ ] の数 (1次元なら 0)、esize は
+ * 要素の大きさ。確保する大きさは 要素数 × esize バイト。
+ * 名前は変数とも配列とも重なってはいけない。失敗したら -1 */
+static int define_array(char *name, int len, int rows, int cols,
+                        int esize) {
     if (find_array(name, len) >= 0 || find_var(name, len) >= 0) {
         errmsg = "その名前は既に使われています";
         return -1;
@@ -283,7 +309,8 @@ static int define_array(char *name, int len, int size) {
         errmsg = "配列は8個までです";
         return -1;
     }
-    if (arr_used + size > 4096) {
+    int elems = cols > 0 ? rows * cols : rows;
+    if (arr_used + elems * esize > 4096) {
         errmsg = "配列の合計が大きすぎます (4096バイトまで)";
         return -1;
     }
@@ -291,9 +318,11 @@ static int define_array(char *name, int len, int size) {
     for (int j = 0; j < len; j++)
         arr_names[i][j] = name[j];
     arr_name_len[i] = len;
-    arr_size[i] = size;
+    arr_size[i] = rows;
+    arr_cols[i] = cols;
+    arr_esize[i] = esize;
     arr_off[i] = arr_used;
-    arr_used += size;
+    arr_used += elems * esize;
     return i;
 }
 
@@ -697,6 +726,25 @@ static int parse_primary_node(void) {
                     return -1;
                 if (!expect_char(']', "添字の後には ] が必要です"))
                     return -1;
+                skip_spaces();
+                if (*cur == '[') {
+                    /* もう1つ添字が続けば、2次元の要素 (v23) */
+                    if (arr_cols[arr] == 0) {
+                        errmsg = "1次元の配列に付けられる添字は1つだけです";
+                        return -1;
+                    }
+                    cur++;
+                    int idx2 = parse_expr();
+                    if (idx2 < 0)
+                        return -1;
+                    if (!expect_char(']', "添字の後には ] が必要です"))
+                        return -1;
+                    return new_node(NODE_INDEX2, arr, idx, idx2);
+                }
+                if (arr_cols[arr] > 0)
+                    /* 2次元で添字が1つだけなら、行の先頭
+                     * アドレスが値になる (v23) */
+                    return new_node(NODE_ROWADDR, arr, 0, idx);
                 return new_node(NODE_INDEX, arr, 0, idx);
             }
             /* 添字が無ければ、配列の先頭アドレスが値になる
@@ -707,6 +755,23 @@ static int parse_primary_node(void) {
         if (var < 0) {
             errmsg = "代入されていない変数が使われました";
             return -1;
+        }
+        skip_spaces();
+        if (*cur == '[') {
+            /* ポインタの添字読み (v23): p[i] は
+             * *(p + i × 指す先の大きさ) と同じ意味。
+             * ポインタとして宣言された変数だけに付く */
+            if (var_plevel[var] < 1) {
+                errmsg = "添字 [ ] を付けられるのは配列かポインタだけです";
+                return -1;
+            }
+            cur++;
+            int idx = parse_expr();
+            if (idx < 0)
+                return -1;
+            if (!expect_char(']', "添字の後には ] が必要です"))
+                return -1;
+            return new_node(NODE_PINDEX, var, 0, idx);
         }
         return new_node(NODE_VAR, var, 0, 0);
     }
@@ -1427,25 +1492,34 @@ static int parse_stmt_list(int in_brace) {
                             (cur[0] == '-' && cur[1] == '-');
             int is_index_store = 0;
             if (*cur == '[') {
-                /* 名前 [ ... ] の後ろに '=' があれば、配列の
-                 * 要素への書き込み文 (式の要素読みと見分ける)。
-                 * ']' までを数えて先読みするだけ */
+                /* 名前 [ ... ] の後ろに '=' があれば、要素への
+                 * 書き込み文 (式の要素読みと見分ける)。
+                 * ']' までを数えて先読みするだけ。2次元の
+                 * [ 行 ] [ 列 ] では、']' の後に '[' が続けば
+                 * もう一段数え直す (v23) */
                 int depth = 0;
                 char *p = cur;
-                while (*p != '\0') {
-                    if (*p == '[')
-                        depth++;
-                    else if (*p == ']') {
-                        depth--;
-                        if (depth == 0) {
-                            p++;
-                            break;
+                for (;;) {
+                    depth = 0;
+                    while (*p != '\0') {
+                        if (*p == '[')
+                            depth++;
+                        else if (*p == ']') {
+                            depth--;
+                            if (depth == 0) {
+                                p++;
+                                break;
+                            }
                         }
+                        p++;
                     }
-                    p++;
+                    if (depth != 0)
+                        break;
+                    while (*p == ' ' || *p == '\t')
+                        p++;
+                    if (*p != '[')
+                        break;
                 }
-                while (*p == ' ' || *p == '\t')
-                    p++;
                 is_index_store = (depth == 0 && *p == '=' &&
                                   p[1] != '=');
             }
@@ -1484,7 +1558,8 @@ static int parse_stmt_list(int in_brace) {
 }
 
 /* 宣言の文を読む (v21 で変数宣言を追加):
- *   型 名前 [ 大きさ ] ;   配列の宣言 (従来。要素は1バイト)
+ *   型 名前 [ 大きさ ] ;         配列の宣言 (要素の大きさは
+ *   型 名前 [ 行 ] [ 列 ] ;       型から決まる、v23。2次元も)
  *   型 名前 = 式 ;         初期化つきの変数宣言
  *   型 名前 ;              変数の宣言だけ (値は不定。グローバル
  *                          は静的領域で 0 始まり)
@@ -1508,7 +1583,7 @@ static int parse_decl_stmt(void) {
         name_buf[i] = ident_buf[i];
     skip_spaces();
     if (*cur == '[') {
-        /* 配列の宣言 */
+        /* 配列の宣言: [ 大きさ ] または [ 行 ] [ 列 ] (v23) */
         cur++;
         skip_spaces();
         int size = parse_number_value();
@@ -1520,9 +1595,29 @@ static int parse_decl_stmt(void) {
         }
         if (!expect_char(']', "配列の大きさの後には ] が必要です"))
             return -1;
+        int cols = 0;
+        skip_spaces();
+        if (*cur == '[') {
+            /* 2次元目: 列の数 */
+            cur++;
+            skip_spaces();
+            cols = parse_number_value();
+            if (cols < 0)
+                return -1;
+            if (cols < 1 || cols > 1024) {
+                errmsg = "配列の大きさは 1 から 1024 までです";
+                return -1;
+            }
+            if (!expect_char(']', "配列の大きさの後には ] が必要です"))
+                return -1;
+        }
         if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
             return -1;
-        int a = define_array(name_buf, name_len, size);
+        /* 要素の大きさ (v23): 型に * が付いていれば要素は
+         * ポインタなので 8 バイト。そうでなければ型の
+         * 基本の大きさ (char は 1、それ以外は 8) */
+        int esize = plevel >= 1 ? 8 : bsize;
+        int a = define_array(name_buf, name_len, size, cols, esize);
         if (a < 0)
             return -1;
         return new_node(NODE_DECL, a, 0, 0);
@@ -1853,13 +1948,56 @@ static int parse_stmt(void) {
     for (int i = 0; i < name_len; i++)
         name_buf[i] = ident_buf[i];
 
-    /* 名前の次が '[' なら、配列の要素への書き込み文:
-     * 名前 [ 添字の式 ] = 式 ; */
+    /* 名前の次が '[' なら、要素への書き込み文:
+     * 配列なら 名前 [ 添字 ] = 式 ; (2次元は [ 行 ] [ 列 ])、
+     * ポインタ変数なら 名前 [ 添字 ] = 式 ; (v23) */
     skip_spaces();
     if (*cur == '[') {
         int a = find_array(name_buf, name_len);
-        if (a < 0) {
-            errmsg = "添字 [ ] を付けられるのは配列だけです";
+        if (a >= 0) {
+            cur++;
+            int idx = parse_expr();
+            if (idx < 0)
+                return -1;
+            if (!expect_char(']', "添字の後には ] が必要です"))
+                return -1;
+            skip_spaces();
+            if (*cur == '[') {
+                /* 2次元の要素への書き込み (v23)。
+                 * 要素を表す式ノードを包んで文にする */
+                if (arr_cols[a] == 0) {
+                    errmsg = "1次元の配列に付けられる添字は1つだけです";
+                    return -1;
+                }
+                cur++;
+                int idx2 = parse_expr();
+                if (idx2 < 0)
+                    return -1;
+                if (!expect_char(']', "添字の後には ] が必要です"))
+                    return -1;
+                if (!expect_char('=', "要素への書き込みは 名前[行][列] = 式 ; の形です"))
+                    return -1;
+                int val = parse_expr();
+                if (val < 0)
+                    return -1;
+                if (!expect_char(';', "書き込み文の終わりには ; が必要です"))
+                    return -1;
+                int elem = new_node(NODE_INDEX2, a, idx, idx2);
+                return new_node(NODE_ELEM_STORE, 0, elem, val);
+            }
+            if (!expect_char('=', "配列への書き込みは 名前[添字] = 式 ; の形です"))
+                return -1;
+            int val = parse_expr();
+            if (val < 0)
+                return -1;
+            if (!expect_char(';', "書き込み文の終わりには ; が必要です"))
+                return -1;
+            return new_node(NODE_INDEX_STORE, a, idx, val);
+        }
+        /* ポインタの添字書き込み (v23) */
+        int var = find_var(name_buf, name_len);
+        if (var < 0 || var_plevel[var] < 1) {
+            errmsg = "添字 [ ] を付けられるのは配列かポインタだけです";
             return -1;
         }
         cur++;
@@ -1868,14 +2006,15 @@ static int parse_stmt(void) {
             return -1;
         if (!expect_char(']', "添字の後には ] が必要です"))
             return -1;
-        if (!expect_char('=', "配列への書き込みは 名前[添字] = 式 ; の形です"))
+        if (!expect_char('=', "要素への書き込みは 名前[添字] = 式 ; の形です"))
             return -1;
         int val = parse_expr();
         if (val < 0)
             return -1;
         if (!expect_char(';', "書き込み文の終わりには ; が必要です"))
             return -1;
-        return new_node(NODE_INDEX_STORE, a, idx, val);
+        int elem = new_node(NODE_PINDEX, var, 0, idx);
+        return new_node(NODE_ELEM_STORE, 0, elem, val);
     }
 
     /* 名前の次が '(' なら、関数の呼び出し文:

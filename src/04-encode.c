@@ -28,6 +28,14 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                ((unsigned int)rd << 7) | 0x13u;
     }
+    if (op == OP_SLLI) {
+        /* slli rd, rs1, shamt -- I 形式 (v23)。addi との
+         * 違いは funct3 が 1 で、imm がシフト量 (RV64 では
+         * 下位 6 ビット) なこと */
+        return ((unsigned int)(imm & 63) << 20) |
+               ((unsigned int)rs1 << 15) | (1u << 12) |
+               ((unsigned int)rd << 7) | 0x13u;
+    }
     if (op == OP_ADD) {
         /* add rd, rs1, rs2 -- R 形式 (レジスタ同士)
          * [ funct7(0) << 25 | rs2 << 20 | rs1 << 15

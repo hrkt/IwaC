@@ -40,6 +40,7 @@
 #   v20: 制御構文の完成 (for、break、continue、値なし早期 return)
 #   v21: 変数のメモリ化 (グローバル=静的領域、ローカル・引数=フレーム、宣言の文、単項 &)
 #   v22: 関数の完成 (引数4つ、戻り値、再帰、main の引数と決め打ち argv)
+#   v23: 配列の完成 (8バイト要素、2次元配列、ポインタの添字)
 set -e
 cd "$(dirname "$0")"
 
@@ -588,5 +589,27 @@ check_error 'int f(int a) { return a; } putc(f(1, 2));' "引数の数が合わ�
 set -- $(readelf -l "$TMP/v22k.elf" | awk '/LOAD/{getline; print $1, $2; exit}')
 [ $(( $2 - $1 )) -eq 48 ] || fail "v22: kosaba の argv 領域 (memsz - filesz) が 48 でない (filesz=$1 memsz=$2)"
 echo "ok: v22: kosaba の argv 領域 48 バイトが memsz に確保された"
+
+# --- v23: 配列の完成 ---
+"$IWAC" 'int a[4]; a[0] = 65; a[1] = 66; a[2] = 67; putc(a[0]); putc(a[1]); putc(a[2]);' > "$TMP/v23a.bin"
+check_tail "$TMP/v23a.bin" ABC "v23: int 配列 (要素8バイト、隣と重ならない)"
+"$IWAC" 'int a[4]; a[3] = 1000; putc(64 + (a[3] == 1000));' > "$TMP/v23b.bin"
+check_run "$TMP/v23b.bin" A "v23: int 配列に大きい値 (ld で読む)"
+"$IWAC" 'char t[2][3]; t[0][0] = 65; t[1][2] = 67; t[0][2] = 66; putc(t[0][0]); putc(t[0][2]); putc(t[1][2]);' > "$TMP/v23c.bin"
+check_tail "$TMP/v23c.bin" ABC "v23: 2次元 char 配列"
+"$IWAC" 'int m[3][4]; m[2][3] = 68; m[0][1] = 65; m[1][0] = 66; putc(m[0][1]); putc(m[1][0]); putc(m[2][3]);' > "$TMP/v23d.bin"
+check_tail "$TMP/v23d.bin" ABD "v23: 2次元 int 配列"
+"$IWAC" 'char t[2][4]; char *r; r = t[1]; r[0] = 69; r[1] = 70; putc(t[1][0]); putc(t[1][1]);' > "$TMP/v23e.bin"
+check_tail "$TMP/v23e.bin" EF "v23: 名前[行] は行の先頭アドレス"
+"$IWAC" 'char *s; s = "Hi"; putc(s[0]); putc(s[1]);' > "$TMP/v23f.bin"
+check_tail "$TMP/v23f.bin" Hi "v23: ポインタの添字 (char* は歩幅1)"
+"$IWAC" 'char buf[8]; char *p; p = buf; p[0] = 72; p[1] = 105; putc(buf[0]); putc(buf[1]);' > "$TMP/v23g.bin"
+check_tail "$TMP/v23g.bin" Hi "v23: ポインタの添字書き込み"
+"$IWAC" 'void show(char **pp) { putc(*pp[0]); putc(*pp[1]); } int main() { char *names[2]; names[0] = "A"; names[1] = "B"; show(names); }' > "$TMP/v23h.bin"
+check_tail "$TMP/v23h.bin" AB "v23: char** の添字は歩幅8 (argv の形)"
+"$IWAC" 'int a[4]; i = 2; a[i + 1] = 68; putc(a[3]);' > "$TMP/v23i.bin"
+check_run "$TMP/v23i.bin" D "v23: 添字が式"
+check_error 'char a[4]; putc(a[0][0]);' "1次元への二重添字"
+check_error 'x = 1; putc(x[0]);' "ポインタでない変数への添字"
 
 echo "PASS"

@@ -58,6 +58,9 @@ static int OP_OR = 23;   /* ビット OR (v19)。funct3=6 */
 static int OP_XOR = 24;  /* ビット XOR (v19)。funct3=4 */
 static int OP_REM = 25;  /* 剰余 (v19、M 拡張)。funct7=1、
                           * funct3=6。除数が 0 なら被除数が残る */
+static int OP_SLLI = 26; /* 左シフト即値 (v23)。I 形式、
+                          * funct3=1、imm はシフト量。
+                          * 添字の ×8 (要素の大きさ) に使う */
 static int OP_ECALL = 20; /* ecall (環境呼び出し)。KosabaOS
                            * ターゲットで OS のシステムコールを
                            * 呼ぶ命令。符号化は固定の1語 (v14) */
@@ -157,6 +160,39 @@ static void gen_load_addr(int reg, unsigned int addr) {
     asm_push(OP_ADDI, reg, reg, 0, (int)lo);
 }
 
+/* 小さな定数をレジスタに作る (v23): 2次元の列数や行の
+ * 歩幅のような、コンパイラだけが知っている定数専用。
+ * 2047 までは addi 1つ、それより大きいときは lui + addi
+ * の定石 (hi / lo の分け方は gen_load_addr と同じ考え方
+ * だが、こちらは住所でなく「値そのもの」を作るので
+ * auipc でなく lui を使う。対象は配列の大きさの範囲の
+ * 正の値だけ) */
+static void gen_load_const(int reg, int v) {
+    if (v <= 2047) {
+        asm_push(OP_ADDI, reg, REG_ZERO, 0, v);
+        return;
+    }
+    int hi = (v + 0x800) >> 12;
+    int lo = v - (hi << 12);
+    asm_push(OP_LUI, reg, 0, 0, hi);
+    asm_push(OP_ADDI, reg, reg, 0, lo);
+}
+
+/* 要素ノード (INDEX / INDEX2 / PINDEX / INDEX_STORE) が
+ * 指す要素の大きさ (v23)。配列なら宣言で決めた要素の
+ * 大きさ、ポインタなら「指す先の大きさ」: ポインタの
+ * ポインタ (段数 2 以上) が指す先はポインタなので 8、
+ * 段数 1 なら宣言の基本の大きさ (char* は 1、int* は 8) */
+static int elem_esize(int node) {
+    if (node_kind[node] == NODE_PINDEX) {
+        int var = node_val[node];
+        if (var_plevel[var] >= 2)
+            return 8;
+        return var_bsize[var];
+    }
+    return arr_esize[node_val[node]];
+}
+
 /* 変数の住所をレジスタに作る (v21) */
 static void gen_var_addr(int reg, int var) {
     if (var_owner[var] < 0)
@@ -234,6 +270,9 @@ static void gen_load_leaf(int reg, int leaf) {
 /* 呼び出しの引数を積む道具 (v22)。gen_expr と相互に使う */
 static int gen_call_args(int arg);
 
+/* 要素の住所を作る道具 (v23)。gen_expr と相互に使う */
+static int gen_elem_addr(int node);
+
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
  * 失敗したら 0 を返す (理由は errmsg)。
  *
@@ -258,15 +297,45 @@ static int gen_expr(int node) {
         asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
         return 1;
     }
-    if (node_kind[node] == NODE_INDEX) {
-        /* 配列の要素読み: 添字を t1 で計算し、先頭アドレス
-         * (t2) と足して、その場所から1バイト読む。
-         * 要素は1バイトなので、足し算はそのまま使える */
+    if (node_kind[node] == NODE_INDEX ||
+        node_kind[node] == NODE_INDEX2 ||
+        node_kind[node] == NODE_PINDEX) {
+        /* 要素読み (v23 で 2次元とポインタ添字も同じ道具に):
+         * 要素の住所を t2 に作り (gen_elem_addr)、要素の
+         * 大きさに合わせて読む。1バイトなら lbu、8バイト
+         * なら ld */
+        if (!gen_elem_addr(node))
+            return 0;
+        if (elem_esize(node) == 8)
+            asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
+        else
+            asm_push(OP_LBU, REG_T1, REG_T2, 0, 0);
+        return 1;
+    }
+    if (node_kind[node] == NODE_ROWADDR) {
+        /* 2次元配列の行の先頭アドレス (v23): 基底 +
+         * 行 × (列数 × 要素の大きさ)。歩幅は定数なので、
+         * 2の冪ならシフト、そうでなければ定数との掛け算 */
+        int a = node_val[node];
         if (!gen_expr(node_rhs[node]))
             return 0;
-        gen_load_addr(REG_T2, arr_addr[node_val[node]]);
+        int stride = arr_cols[a] * arr_esize[a];
+        if (stride > 1) {
+            int shift = 0;
+            int s = stride;
+            while ((s & 1) == 0) {
+                s >>= 1;
+                shift++;
+            }
+            if (s == 1) {
+                asm_push(OP_SLLI, REG_T1, REG_T1, 0, shift);
+            } else {
+                gen_load_const(REG_A0, stride);
+                asm_push(OP_MUL, REG_T1, REG_T1, REG_A0, 0);
+            }
+        }
+        gen_load_addr(REG_T2, arr_addr[a]);
         asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
-        asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
         return 1;
     }
     if (node_kind[node] == NODE_CALL) {
@@ -478,6 +547,66 @@ static int gen_call_args(int arg) {
     return 1;
 }
 
+/* 要素の住所を t2 に作る (v23): 読み (式) と書き込み
+ * (文) が共有する道具。相手の種類ごとに:
+ *   INDEX / INDEX_STORE: 配列の基底 + 添字 × 要素の大きさ
+ *   INDEX2:              基底 + (行 × 列数 + 列) × 要素の
+ *                        大きさ。行をスタックに退避して
+ *                        から列を計算する
+ *   PINDEX:              ポインタの値 + 添字 × 指す先の
+ *                        大きさ
+ * 要素の大きさが 8 のときの ×8 は slli 3 (左シフト3) */
+static int gen_elem_addr(int node) {
+    int k = node_kind[node];
+    if (k == NODE_INDEX2) {
+        int a = node_val[node];
+        if (!gen_expr(node_lhs[node]))
+            return 0;  /* 行 → t1 */
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+        if (!gen_expr(node_rhs[node])) {
+            return 0;  /* 列 → t1 */
+        }
+        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        if (arr_cols[a] > 1) {
+            gen_load_const(REG_A0, arr_cols[a]);
+            asm_push(OP_MUL, REG_T2, REG_T2, REG_A0, 0);
+        }
+        asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
+        /* t1 = 線形添字 (行 × 列数 + 列) */
+        if (arr_esize[a] == 8)
+            asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+        gen_load_addr(REG_T2, arr_addr[a]);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    if (k == NODE_PINDEX) {
+        /* ポインタの値 (住所) は t2 へ。添字を先に t1 で
+         * 計算する (変数の読みが t2 を使うため) */
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        if (elem_esize(node) == 8)
+            asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+        gen_load_var(REG_T2, node_val[node]);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    /* INDEX (添字は rhs) と INDEX_STORE (添字は lhs)。
+     * 形は違うが、住所の作り方は同じ */
+    {
+        int idx = (k == NODE_INDEX) ? node_rhs[node]
+                                    : node_lhs[node];
+        if (!gen_expr(idx))
+            return 0;
+        if (elem_esize(node) == 8)
+            asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+        gen_load_addr(REG_T2, arr_addr[node_val[node]]);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+}
+
 /* 文の AST から命令列を作る。失敗したら 0。
  *
  * while の作り方 (命令列の並びがループの形そのもの):
@@ -532,29 +661,36 @@ static int gen_stmt(int node) {
          * だけなので、実行時のコードは何も出ない */
         return 1;
     }
-    if (kind == NODE_INDEX_STORE) {
-        /* 配列の要素への書き込み: 先頭アドレス + 添字 の
-         * 場所へ、値の下1バイトを書く (sb)。
-         * 書く値が葉なら「住所を t2 → 値を t1 → sb」。
+    if (kind == NODE_INDEX_STORE || kind == NODE_ELEM_STORE) {
+        /* 要素への書き込み: 要素の住所を t2 に作り
+         * (gen_elem_addr)、そこへ値を書く。要素の大きさ
+         * が 1 なら sb、8 なら sd (v23)。
+         * 書く値が葉なら「住所を t2 → 値を t1 → 書く」。
          * 値も式なら、住所をスタックへ退避してから値を
-         * 計算する (値の計算が t2 を使うため) */
-        int a = node_val[node];
-        if (!gen_expr(node_lhs[node]))
+         * 計算する (値の計算が t2 を使うため)。
+         * INDEX_STORE はノード自体が住所の材料で、値は
+         * rhs。ELEM_STORE は lhs が要素を表す式ノードで、
+         * 値は同じく rhs */
+        int addr_node = (kind == NODE_INDEX_STORE) ? node
+                                                   : node_lhs[node];
+        int val_node = node_rhs[node];
+        if (!gen_elem_addr(addr_node))
             return 0;
-        gen_load_addr(REG_T2, arr_addr[a]);
-        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
-        if (is_leaf(node_rhs[node])) {
-            gen_load_leaf(REG_T1, node_rhs[node]);
-            asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
-            return 1;
+        int esize = elem_esize(addr_node);
+        if (!is_leaf(val_node)) {
+            asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+            asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+            if (!gen_expr(val_node))
+                return 0;
+            asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+            asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        } else {
+            gen_load_leaf(REG_T1, val_node);
         }
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
-        asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
-        if (!gen_expr(node_rhs[node]))
-            return 0;
-        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
-        asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+        if (esize == 8)
+            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
+        else
+            asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
         return 1;
     }
     if (kind == NODE_VDECL) {
@@ -869,6 +1005,11 @@ static int expr_needs_stack(int node) {
         return expr_needs_stack(node_lhs[node]);
     if (k == NODE_INDEX)
         return expr_needs_stack(node_rhs[node]);
+    if (k == NODE_INDEX2)
+        /* 2次元の住所作りは行をスタックに退避する (v23) */
+        return 1;
+    if (k == NODE_ROWADDR || k == NODE_PINDEX)
+        return expr_needs_stack(node_rhs[node]);
     return 0;
 }
 
@@ -906,6 +1047,13 @@ static int stmt_needs_stack(int node) {
         return expr_needs_stack(node_rhs[node]);
     if (k == NODE_INDEX_STORE)
         /* 値が葉でない書き込みは、住所の退避にスタックを使う */
+        return expr_needs_stack(node_lhs[node]) ||
+               !is_leaf(node_rhs[node]) ||
+               expr_needs_stack(node_rhs[node]);
+    if (k == NODE_ELEM_STORE)
+        /* lhs は要素を表す式ノード (式として数える)。
+         * 値が葉でない書き込みは住所の退避にスタックを
+         * 使う。2次元なら住所作り自体も退避する (v23) */
         return expr_needs_stack(node_lhs[node]) ||
                !is_leaf(node_rhs[node]) ||
                expr_needs_stack(node_rhs[node]);

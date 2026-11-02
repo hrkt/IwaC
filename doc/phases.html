@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v22 まで</title>
+<title>IwaC の歩み — v0 から v23 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v22 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v23 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -342,7 +342,8 @@
   <a class="done" href="#v19">v19 演算子の完成</a><span class="arrow">→</span>
   <a class="done" href="#v20">v20 制御構文の完成</a><span class="arrow">→</span>
   <a class="done" href="#v21">v21 変数のメモリ化</a><span class="arrow">→</span>
-  <a class="done" href="#v22">v22 関数の完成</a>
+  <a class="done" href="#v22">v22 関数の完成</a><span class="arrow">→</span>
+  <a class="done" href="#v23">v23 配列の完成</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1312,10 +1313,45 @@ putc(48 + fib(10) % 10);</pre>
   課題は、v22 の問題と切り分けて v24 に送りました。</p></div>
 </section>
 
+<!-- ================= v23 ================= -->
+<section class="phase" id="v23">
+  <div class="head"><span class="badge b-v4">v23</span><h2>配列の完成 — 大きさと次元とポインタ添字</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の8段目。配列を「C の配列」らしくすること。</b></p>
+  <p>要素の大きさが宣言の型で決まるようになりました（char は1バイト、
+  それ以外とポインタの配列は8バイト）。2次元配列が使え、
+  <code>名前[i]</code> だけなら行の先頭アドレスになります。
+  ポインタへの添字 <code>p[i]</code> は「p + i × 指す先の大きさ」の
+  意味になり、<code>char **argv</code> の <code>argv[i]</code> が
+  8バイト歩幅で読めるようになりました。要素の住所の計算は、
+  読みでも書きでも共通の1つの道具にまとめています。
+  ポインタの足し算（<code>p + 1</code>）の歩幅は今までどおり
+  バイト単位のままです（ここで変えるのは添字だけ、と区切りました）。</p>
+<pre class="code">int m[3][4];                    // 2次元、要素は8バイト
+m[2][3] = 68;
+
+char *names[2];                 // ポインタの配列 (要素8バイト)
+names[0] = "A";
+
+void show(char **pp) {
+  putc(*pp[0]);                 // argv[i] と同じ形で読める
+  putc(*pp[1]);
+}</pre>
+  <div class="chips">
+    <span class="chip">要素8バイト（ld / sd）</span><span class="chip">2次元配列</span>
+    <span class="chip">行の先頭アドレス</span><span class="chip">ポインタ添字</span>
+    <span class="chip">argv[i] の歩幅8</span><span class="chip">住所計算は共通の道具</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  実装でつまずいたのは生成ではなく解析の先読みでした。文の振り分けが
+  「] の後ろが = なら書き込み文」と1段だけ数えていたため、
+  <code>t[i][j] = 式;</code> が文として認識されなかったのです。
+  先読みのような「影の解析」は、本読みの文法が育つたびに追随が要ります。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v22 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v23 時点）</p>
 </footer>
 
 </div>
