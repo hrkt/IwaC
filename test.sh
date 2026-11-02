@@ -37,6 +37,7 @@
 #   v17: 複数ファイル入力 (順につないで1つのソースとして読む)
 #   v18: 条件付きコンパイル (#ifdef/#ifndef/#else/#endif、定義済みマクロ)
 #   v19: 演算子の完成 (<< >> | ^ %、単項 - !、&& || 短絡、前置/後置 ++ --)
+#   v20: 制御構文の完成 (for、break、continue、値なし早期 return)
 set -e
 cd "$(dirname "$0")"
 
@@ -506,5 +507,31 @@ check_run "$TMP/v19r.bin" 8 "v19: 優先順位 (加減がシフトより固い)"
 check_run "$TMP/v19s.bin" A "v19: 関係演算子と &&"
 check_error 'x = 1; putc(64 + (5++));' "数への後置 ++"
 check_error '++5;' "数への前置 ++"
+
+# --- v20: 制御構文の完成 ---
+"$IWAC" 'for (i = 0; i < 3; i++) { putc(65 + i); }' > "$TMP/v20a.bin"
+check_tail "$TMP/v20a.bin" ABC "v20: for の基本"
+"$IWAC" 'for (i = 0; i < 5; i++) { if (i == 2) { continue; } putc(65 + i); }' > "$TMP/v20b.bin"
+check_tail "$TMP/v20b.bin" ABDE "v20: for の continue (更新は飛ばさない)"
+"$IWAC" 'for (i = 0; i < 9; i++) { if (i == 2) { break; } putc(65 + i); }' > "$TMP/v20c.bin"
+check_tail "$TMP/v20c.bin" AB "v20: for の break"
+"$IWAC" 'i = 0; while (1) { if (i == 3) { break; } putc(65 + i); i++; }' > "$TMP/v20d.bin"
+check_tail "$TMP/v20d.bin" ABC "v20: while の break"
+"$IWAC" 'i = 0; while (i < 5) { i++; if (i == 2) { continue; } putc(64 + i); }' > "$TMP/v20e.bin"
+check_tail "$TMP/v20e.bin" ACDE "v20: while の continue"
+"$IWAC" 'for (i = 0; i < 3; i++) { for (j = 0; j < 3; j++) { if (j == 1) { break; } putc(65 + i); } }' > "$TMP/v20f.bin"
+check_tail "$TMP/v20f.bin" ABC "v20: 入れ子の break は内側だけ"
+"$IWAC" 'void f(int n) { while (n > 0) { if (n == 2) { return; } putc(64 + n); n = n - 1; } putc(88); } int main() { f(4); putc(46); }' > "$TMP/v20g.bin"
+check_tail "$TMP/v20g.bin" 'DC.' "v20: 早期 return (X は出ない)"
+"$IWAC" 'int main() { putc(65); return; putc(66); }' > "$TMP/v20h.bin"
+check_run "$TMP/v20h.bin" A "v20: main の中の return"
+"$IWAC" 'i = 10; for (;;) { putc(64 + i); break; }' > "$TMP/v20i.bin"
+check_run "$TMP/v20i.bin" J "v20: for (;;) と break"
+"$IWAC" 'for (i = 0; i < 3; i = i + 2) { putc(65 + i); }' > "$TMP/v20j.bin"
+check_tail "$TMP/v20j.bin" AC "v20: 更新が代入の for"
+check_error 'break;' "ループの外の break"
+check_error 'return;' "関数の外の return"
+check_error 'int main() { return 1; }' "戻り値つき return はまだ"
+check_error 'for (int i = 0; i < 3; i++) { }' "for の初期化での宣言はまだ"
 
 echo "PASS"

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v19 まで</title>
+<title>IwaC の歩み — v0 から v20 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v19 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v20 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -339,7 +339,8 @@
   <a class="done" href="#v16">v16 字句の完成</a><span class="arrow">→</span>
   <a class="done" href="#v17">v17 複数ファイル入力</a><span class="arrow">→</span>
   <a class="done" href="#v18">v18 条件付きコンパイル</a><span class="arrow">→</span>
-  <a class="done" href="#v19">v19 演算子の完成</a>
+  <a class="done" href="#v19">v19 演算子の完成</a><span class="arrow">→</span>
+  <a class="done" href="#v20">v20 制御構文の完成</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1203,10 +1204,42 @@ putc(64 + (100 % 7));    // 剰余</pre>
   式の中に制御が入る、というのは面白い境界です。</p></div>
 </section>
 
+<!-- ================= v20 ================= -->
+<section class="phase" id="v20">
+  <div class="head"><span class="badge b-v4">v20</span><h2>制御構文の完成 — for と脱出と早戻り</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の5段目。iwac.c のループと関数の流れを全部書けるようにすること。</b></p>
+  <p><code>for</code>、<code>break</code>、<code>continue</code>、値なしの早期 <code>return</code> が
+  入りました。<code>for</code> は新しい仕組みを作らず、<code>while</code> への読み替えで作っています
+  （初期化は前に1回、更新は本体の最後に繋ぐ）。ただし <code>continue</code> の飛び先だけは
+  更新の頭でなければならず、ここを間違えると「条件を満たすたびに更新が飛ばされて
+  永遠に終わらないループ」になります。<code>break</code> は入れ子の内側のループにだけ効きます。
+  飛び先は生成の時点では決まらないので、仮のジャンプを置いておき、ループや関数の
+  生成が終わったところでまとめて書き直す、という道具（パッチリスト）を作りました。</p>
+<pre class="code">for (i = 0; i &lt; 5; i++) {
+  if (i == 2) { continue; }   // 更新 (i++) は飛ばされない
+  if (i == 4) { break; }
+  putc(65 + i);               // A B D
+}
+
+void check(int n) {
+  if (n &lt; 0) { return; }      // 早期 return (値なし)
+  ...
+}</pre>
+  <div class="chips">
+    <span class="chip">for（while への読み替え）</span><span class="chip">break / continue</span>
+    <span class="chip">早期 return（値なし）</span><span class="chip">飛び先のパッチリスト</span>
+    <span class="chip">宣言つき for 初期化は v21</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「飛び先がまだ分からないジャンプを先に置いて、後で書き直す」という道具は、
+  while の頃から使っていた考え方の一般化でした。ループの深さごとに
+  書き直し待ちの名簿を持つと、入れ子の break も自然に「一番内側だけ」に効きます。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v19 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v20 時点）</p>
 </footer>
 
 </div>

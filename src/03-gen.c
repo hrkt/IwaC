@@ -378,6 +378,36 @@ static int gen_expr(int node) {
  * 本体を作り終えた時点の末尾の番号なので、beq は飛び先を
  * 後から書き直す (asm_imm の書換え)。アセンブラでラベルを
  * 使うのと同じことを、番号と書換えでやっている */
+/* ループの break / continue の飛び先を後から書き直すための
+ * 道具 (v20)。飛び先は「そのループの生成が終わるまで」
+ * 分からないので、jal を仮置きし、その命令番号をリストに
+ * 繋いでおく。リストは patch_next[] で命令同士を繋ぐ
+ * (命令番号がそのままリストの要素になる)。
+ * ループの入れ子には、深さごとの先頭で対応する */
+static int loop_depth;
+static int loop_break_head[32];
+static int loop_cont_head[32];
+static int patch_next[2048];
+
+/* 関数の return の飛び先 (出口は関数の生成の最後まで
+ * 分からない) も同じ道具で積む */
+static int return_patch_head;
+static int gen_in_func;  /* 関数の生成中なら 1 */
+
+/* 仮の jal を置き、番号をリストの先頭に繋ぐ */
+static void emit_patch_jump(int *head) {
+    int i = nasm;
+    asm_push(OP_JAL, 0, 0, 0, 0);
+    patch_next[i] = *head;
+    *head = i;
+}
+
+/* リストに積んだ jal 全部の飛び先を target に書き直す */
+static void apply_patches(int head, int target) {
+    for (int i = head; i != -1; i = patch_next[i])
+        asm_imm[i] = target;
+}
+
 static int gen_stmt(int node) {
     int kind = node_kind[node];
     if (kind == NODE_PREINC || kind == NODE_POSTINC ||
@@ -511,15 +541,106 @@ static int gen_stmt(int node) {
          * 仮に 0 を入れておき、下で書き直す */
         int beq_index = nasm;
         asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        if (loop_depth >= 32) {
+            errmsg = "ループの入れ子が深すぎます";
+            return 0;
+        }
+        loop_depth++;
+        loop_break_head[loop_depth] = -1;
+        loop_cont_head[loop_depth] = -1;
         int body = node_rhs[node];
         for (int s = body; s != -1; s = node_next[s]) {
             if (!gen_stmt(s))
                 return 0;
         }
+        /* continue の飛び先は条件判定。jal の直前が現在の
+         * 末尾なので、continue は「末尾へ飛ぶ = そのまま
+         * jal で戻る」の形でも同じだが、番号で揃える */
+        apply_patches(loop_cont_head[loop_depth], l_cond);
         /* jal zero, L_cond -- 条件の判定に戻る */
         asm_push(OP_JAL, 0, 0, 0, l_cond);
-        /* ここ (末尾) が L_end。beq の飛び先を書き直す */
+        /* ここ (末尾) が L_end。beq と break の飛び先を
+         * 書き直す */
         asm_imm[beq_index] = nasm;
+        apply_patches(loop_break_head[loop_depth], nasm);
+        loop_depth--;
+        return 1;
+    }
+    if (kind == NODE_FOR) {
+        /* for の作り方 (while への読み替え):
+         *   初期化の文 (あれば)
+         * L_cond: 条件を計算 (t1)
+         *         beq t1, zero, L_end
+         *         本体の文...
+         * L_step: 更新の文 (あれば。本体の並びの最後に
+         *         NODE_FORSTEP で包んで繋いである)
+         *         jal zero, L_cond
+         * L_end:
+         * continue の飛び先は L_step (更新を飛ばすと
+         * 終わらないループになるため) */
+        if (node_val[node] >= 0) {
+            if (!gen_stmt(node_val[node]))
+                return 0;
+        }
+        int l_cond = nasm;
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        int beq_index = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        if (loop_depth >= 32) {
+            errmsg = "ループの入れ子が深すぎます";
+            return 0;
+        }
+        loop_depth++;
+        loop_break_head[loop_depth] = -1;
+        loop_cont_head[loop_depth] = -1;
+        int cont_done = 0;
+        int body = node_rhs[node];
+        for (int s = body; s != -1; s = node_next[s]) {
+            if (node_kind[s] == NODE_FORSTEP) {
+                apply_patches(loop_cont_head[loop_depth], nasm);
+                cont_done = 1;
+                if (!gen_stmt(node_val[s]))
+                    return 0;
+            } else {
+                if (!gen_stmt(s))
+                    return 0;
+            }
+        }
+        if (!cont_done)
+            /* 更新が無い for: continue は条件判定へ直行 */
+            apply_patches(loop_cont_head[loop_depth], l_cond);
+        asm_push(OP_JAL, 0, 0, 0, l_cond);
+        asm_imm[beq_index] = nasm;
+        apply_patches(loop_break_head[loop_depth], nasm);
+        loop_depth--;
+        return 1;
+    }
+    if (kind == NODE_BREAK) {
+        /* 脱出: 飛び先はループの生成の最後に書き直す */
+        if (loop_depth == 0) {
+            errmsg = "break はループの中でだけ使えます";
+            return 0;
+        }
+        emit_patch_jump(&loop_break_head[loop_depth]);
+        return 1;
+    }
+    if (kind == NODE_CONTINUE) {
+        if (loop_depth == 0) {
+            errmsg = "continue はループの中でだけ使えます";
+            return 0;
+        }
+        emit_patch_jump(&loop_cont_head[loop_depth]);
+        return 1;
+    }
+    if (kind == NODE_RETURN) {
+        /* 早期 return: 関数の出口 (後始末) へのジャンプ。
+         * 出口の番号は関数の生成の最後に書き直す */
+        if (!gen_in_func) {
+            errmsg = "return は関数の中でだけ使えます";
+            return 0;
+        }
+        emit_patch_jump(&return_patch_head);
         return 1;
     }
     errmsg = "内部エラー: 知らない種類の文です";
@@ -548,10 +669,15 @@ static int gen_func(int f) {
         /* addi 引数の変数, a0, 0 -- 引数を受け取る */
         asm_push(OP_ADDI, var_reg(func_param_var[f]), REG_A0, 0, 0);
     }
+    return_patch_head = -1;
+    gen_in_func = 1;
     for (int s = func_body[f]; s != -1; s = node_next[s]) {
         if (!gen_stmt(s))
             return 0;
     }
+    gen_in_func = 0;
+    /* 早期 return の飛び先はここ (後始末の頭) */
+    apply_patches(return_patch_head, nasm);
     /* ld ra, 8(sp) / addi sp, sp, 16 / jalr zero, ra, 0 */
     asm_push(OP_LD, REG_RA, REG_SP, 0, 8);
     asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
@@ -610,6 +736,14 @@ static int stmt_needs_stack(int node) {
     if (k == NODE_CALL)
         return node_lhs[node] >= 0 &&
                expr_needs_stack(node_lhs[node]);
+    if (k == NODE_FOR)
+        /* 初期化・更新は文、本体は文の並び、条件は式 */
+        return (node_val[node] >= 0 &&
+                stmt_needs_stack(node_val[node])) ||
+               expr_needs_stack(node_lhs[node]) ||
+               list_needs_stack(node_rhs[node]);
+    if (k == NODE_FORSTEP)
+        return stmt_needs_stack(node_val[node]);
     if (k == NODE_STORE)
         return expr_needs_stack(node_rhs[node]);
     if (k == NODE_INDEX_STORE)
@@ -637,6 +771,8 @@ static int list_needs_stack(int head) {
  * 書き直す。失敗したら 0 */
 static int gen_all(void) {
     nasm = 0;
+    loop_depth = 0;    /* 2パス生成のたびに数え直す (v20) */
+    gen_in_func = 0;
     if (!target_kosaba) {
         /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る
          * (KosabaOS ターゲットでは UART を直接触らないので不要) */

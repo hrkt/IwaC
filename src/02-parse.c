@@ -62,6 +62,17 @@ static int NODE_PREINC = 34;  /* 前置 ++。node_val = 変数番号 (v19) */
 static int NODE_POSTINC = 35; /* 後置 ++。node_val = 変数番号 (v19) */
 static int NODE_PREDEC = 36;  /* 前置 --。node_val = 変数番号 (v19) */
 static int NODE_POSTDEC = 37; /* 後置 --。node_val = 変数番号 (v19) */
+static int NODE_FOR = 38;   /* for 文 (v20)。node_val = 初期化の文
+                             * (無ければ -1)、node_lhs = 条件の式
+                             * (空なら数の 1)、node_rhs = 本体の
+                             * 文の並び (更新があれば、最後に
+                             * NODE_FORSTEP で包んで繋ぐ) */
+static int NODE_BREAK = 39;    /* break 文 (v20) */
+static int NODE_CONTINUE = 40; /* continue 文 (v20) */
+static int NODE_RETURN = 41;   /* return 文 (値なし、v20) */
+static int NODE_FORSTEP = 42;  /* for の更新部 (v20)。node_val =
+                             * 更新の文。for の本体リストの最後に
+                             * だけ現れる (continue の飛び先) */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
                              * node_val = 配列番号、node_lhs = 添字の式、
                              * node_rhs = 書く値の式 */
@@ -973,6 +984,11 @@ static int expect_char(char c, char *msg) {
 static int parse_stmt(void);
 static int parse_stmt_list(int in_brace);
 
+/* parse の状態 (v20): break / continue が許される深さと、
+ * return が許される場所を parse の時点で確かめるために持つ */
+static int parse_loop_depth;  /* while / for の本体の中なら 1 以上 */
+static int parse_in_func;     /* 関数の本体の中なら 1 */
+
 /* 型を1つ読む: [ const ] 型の言葉 { 型の言葉 } { * }
  * 型は今は読み捨てるので、形だけ確かめて進む。
  * 単語が型でなければ 0 を返す */
@@ -1102,7 +1118,10 @@ static int parse_funcdef(void) {
     }
     if (!expect_char('{', "関数の本体は { で始めます"))
         return 0;
+    int save_in_func = parse_in_func;
+    parse_in_func = 1;
     int body = parse_stmt_list(1);
+    parse_in_func = save_in_func;
     if (body == -2)
         return 0;
     func_body[f] = body;
@@ -1186,7 +1205,9 @@ static int parse_stmt_list(int in_brace) {
             if (!parse_ident())
                 return -2;
             int is_keyword = ident_is("while") || ident_is("putc") ||
-                             ident_is("if");
+                             ident_is("if") || ident_is("for") ||
+                             ident_is("break") || ident_is("continue") ||
+                             ident_is("return");
             int is_type = is_type_word() || ident_is("const");
             if (is_type) {
                 /* 型で始まるのは、関数定義か配列の宣言。
@@ -1323,6 +1344,63 @@ static int parse_array_decl(void) {
     return new_node(NODE_DECL, a, 0, 0);
 }
 
+/* for の更新部を読む (v20): ')' の手前まで。
+ * 無ければ -1、エラーは -2、読めたら文のノードを返す。
+ * 形は「代入」か「++/--」だけ (カンマ区切りは対象外) */
+static int parse_for_step(void) {
+    skip_spaces();
+    if (*cur == ')')
+        return -1;  /* 更新なし */
+    if ((cur[0] == '+' && cur[1] == '+') ||
+        (cur[0] == '-' && cur[1] == '-')) {
+        int e = parse_unary_expr();
+        if (e < 0)
+            return -2;
+        return e;  /* 前置の増減 */
+    }
+    if (!is_ident_start(*cur)) {
+        errmsg = "for の更新は 代入 か ++/-- で書きます";
+        return -2;
+    }
+    if (!parse_ident())
+        return -2;
+    char name_buf[32];
+    int name_len = ident_len;
+    for (int i = 0; i < name_len; i++)
+        name_buf[i] = ident_buf[i];
+    skip_spaces();
+    if ((cur[0] == '+' && cur[1] == '+') ||
+        (cur[0] == '-' && cur[1] == '-')) {
+        int var = find_var(name_buf, name_len);
+        if (var < 0) {
+            errmsg = "代入されていない変数が使われました";
+            return -2;
+        }
+        int kind = cur[0] == '+' ? NODE_POSTINC : NODE_POSTDEC;
+        cur += 2;
+        int n = new_node(kind, var, 0, 0);
+        if (n < 0)
+            return -2;
+        return n;
+    }
+    if (*cur == '=' && cur[1] != '=') {
+        /* 代入: 右辺を読んでから名簿に載せる (代入文と同じ) */
+        cur++;
+        int expr = parse_expr();
+        if (expr < 0)
+            return -2;
+        int var = define_var(name_buf, name_len);
+        if (var < 0)
+            return -2;
+        int n = new_node(NODE_ASSIGN, var, expr, 0);
+        if (n < 0)
+            return -2;
+        return n;
+    }
+    errmsg = "for の更新は 代入 か ++/-- で書きます";
+    return -2;
+}
+
 /* 文を1つ読み、その AST ノードを返す。失敗したら -1。
  * 呼び出し時点でカーソルは文の頭にあること */
 static int parse_stmt(void) {
@@ -1386,7 +1464,9 @@ static int parse_stmt(void) {
             return -1;
         if (!expect_char('{', "while の後には { が必要です"))
             return -1;
+        parse_loop_depth++;
         int body = parse_stmt_list(1);
+        parse_loop_depth--;
         if (body == -2)
             return -1;
         return new_node(NODE_WHILE, 0, cond, body);
@@ -1448,6 +1528,110 @@ static int parse_stmt(void) {
             cur = save;  /* else ではなかった */
         }
         return new_node(NODE_IF, else_body, cond, then_body);
+    }
+
+    if (ident_is("for")) {
+        /* for ( 初期化 ; 条件 ; 更新 ) { 本体 } (v20)。
+         * while への読み替えで作る: 初期化は for の前に1回、
+         * 更新は本体の最後に (NODE_FORSTEP で包んで) 繋ぐ。
+         * 条件が空なら「数の 1」(= 常に成り立つ) にする */
+        if (!expect_char('(', "for の後には ( が必要です"))
+            return -1;
+        int init = -1;
+        skip_spaces();
+        if (*cur == ';') {
+            cur++;  /* 初期化なし */
+        } else {
+            /* 型で始まる初期化 = 宣言つき (for (int i = 0;)
+             * は、局所変数の宣言が要るので v21 の領分 */
+            char *save = cur;
+            if (is_ident_start(*cur) && parse_ident() &&
+                is_type_word()) {
+                errmsg = "for の初期化での宣言はまだです (v21 で対応)";
+                return -1;
+            }
+            cur = save;
+            init = parse_stmt();  /* ';' まで読む (代入文など) */
+            if (init < 0)
+                return -1;
+        }
+        int cond;
+        skip_spaces();
+        if (*cur == ';') {
+            cond = new_node(NODE_NUM, 1, 0, 0);
+            if (cond < 0)
+                return -1;
+            cur++;  /* 条件なし = 常に成り立つ */
+        } else {
+            cond = parse_expr();
+            if (cond < 0)
+                return -1;
+            if (!expect_char(';', "for の条件の後には ; が必要です"))
+                return -1;
+        }
+        int step = parse_for_step();
+        if (step == -2)
+            return -1;
+        if (!expect_char(')', "for の後には ) が必要です"))
+            return -1;
+        if (!expect_char('{', "for の後には { が必要です"))
+            return -1;
+        parse_loop_depth++;
+        int body = parse_stmt_list(1);
+        parse_loop_depth--;
+        if (body == -2)
+            return -1;
+        if (step >= 0) {
+            /* 更新は本体の最後に繋ぐ。continue の飛び先が
+             * この文の頭になる (生成側の約束) */
+            int wrap = new_node(NODE_FORSTEP, step, 0, 0);
+            if (wrap < 0)
+                return -1;
+            if (body < 0)
+                body = wrap;
+            else {
+                int tail = body;
+                while (node_next[tail] >= 0)
+                    tail = node_next[tail];
+                node_next[tail] = wrap;
+            }
+        }
+        return new_node(NODE_FOR, init, cond, body);
+    }
+
+    if (ident_is("break")) {
+        if (parse_loop_depth == 0) {
+            errmsg = "break はループの中でだけ使えます";
+            return -1;
+        }
+        if (!expect_char(';', "break の後には ; が必要です"))
+            return -1;
+        return new_node(NODE_BREAK, 0, 0, 0);
+    }
+
+    if (ident_is("continue")) {
+        if (parse_loop_depth == 0) {
+            errmsg = "continue はループの中でだけ使えます";
+            return -1;
+        }
+        if (!expect_char(';', "continue の後には ; が必要です"))
+            return -1;
+        return new_node(NODE_CONTINUE, 0, 0, 0);
+    }
+
+    if (ident_is("return")) {
+        /* 値なしの早期 return (v20)。戻り値つきは v22 */
+        if (!parse_in_func) {
+            errmsg = "return は関数の中でだけ使えます";
+            return -1;
+        }
+        skip_spaces();
+        if (*cur != ';') {
+            errmsg = "戻り値つきの return はまだです (v22 で対応)";
+            return -1;
+        }
+        cur++;
+        return new_node(NODE_RETURN, 0, 0, 0);
     }
 
     char name_buf[32];
