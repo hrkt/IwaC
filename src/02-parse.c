@@ -31,8 +31,10 @@ static int NODE_ASSIGN = 6; /* 代入文。node_val = 変数番号、
 static int NODE_PUTC = 7;   /* 出力文。node_lhs = 出す式 */
 static int NODE_WHILE = 8;  /* 繰り返し文。node_lhs = 条件の式、
                              * node_rhs = 本体の文の並びの先頭 */
-static int NODE_CALL = 9;   /* 呼び出し文。node_val = 関数番号、
-                             * node_lhs = 引数の式 (無ければ -1) */
+static int NODE_CALL = 9;   /* 関数呼び出し。node_val = 関数番号、
+                             * node_lhs = 引数の式の並び (node_next
+                             * で繋ぐ。無ければ -1)。文としても
+                             * 式としても使える (v22 で式になった) */
 static int NODE_EQ = 10;    /* 比較 (==)。結果は 1 か 0 */
 static int NODE_NE = 11;    /* 比較 (!=)。結果は 1 か 0 */
 static int NODE_AND = 12;   /* ビット演算 (&) */
@@ -69,7 +71,8 @@ static int NODE_FOR = 38;   /* for 文 (v20)。node_val = 初期化の文
                              * NODE_FORSTEP で包んで繋ぐ) */
 static int NODE_BREAK = 39;    /* break 文 (v20) */
 static int NODE_CONTINUE = 40; /* continue 文 (v20) */
-static int NODE_RETURN = 41;   /* return 文 (値なし、v20) */
+static int NODE_RETURN = 41;   /* return 文 (v20)。node_lhs =
+                             * 戻り値の式 (値なしなら -1、v22) */
 static int NODE_FORSTEP = 42;  /* for の更新部 (v20)。node_val =
                              * 更新の文。for の本体リストの最後に
                              * だけ現れる (continue の飛び先) */
@@ -222,16 +225,16 @@ static int prog_main;
 /* --- 関数の名簿 ---
  * 関数も変数と同じく名簿で管理する。関数 i 番について:
  *   func_names[i]     : 名前
- *   func_has_param[i] : 引数があるか
- *   func_param_var[i] : 引数の変数番号 (引数があれば)
+ *   func_nparams[i]   : 引数の数 (0〜4、v22 で複数になった)
+ *   func_param_var[i] : 引数の変数番号の並び [引数の数]
  *   func_body[i]      : 本体の文の並びの先頭ノード
  *   func_entry[i]     : 命令列の中での入口の命令番号
  *                       (第2層が生成のたびに決める)
  * 関数は最大16個まで */
 static char func_names[16][32];
 static int func_name_len[16];
-static int func_has_param[16];
-static int func_param_var[16];
+static int func_nparams[16];
+static int func_param_var[16][4];
 static int func_body[16];
 static int func_entry[16];
 /* func_nlocals[16] : フレームの枠数 (引数を含む、v21)。
@@ -543,6 +546,58 @@ static int parse_rel_expr(void);  /* eq の段から呼ばれる (v11) */
 static int parse_unary_expr(void); /* 単項の段 (v19)。文からも使う */
 static int expect_char(char c, char *msg);
 
+/* 呼び出しの引数リストを読む (v22): 「(」は消費済みの前提で、
+ * 引数の式をカンマ区切りで読み、「)」まで消費する。
+ * 結果は node_next で繋いだ式の並びで、先頭を *head_out へ
+ * 置く (引数なしは -1)。個数は関数の定義と照合する。
+ * 引数は最大4つ (a0〜a3 で渡す呼び出し規約のため)。
+ * 式の材料 (parse_primary_node) からも、呼び出し文
+ * (parse_stmt) からも使う共通の道具。成功 1、失敗 0 */
+static int parse_call_list(int f, int *head_out) {
+    int head = -1;
+    int tail = -1;
+    int n = 0;
+    skip_spaces();
+    if (*cur == ')') {
+        cur++;
+        if (func_nparams[f] != 0) {
+            errmsg = "引数の数が関数の定義と合いません";
+            return 0;
+        }
+        *head_out = -1;
+        return 1;
+    }
+    for (;;) {
+        if (n >= 4) {
+            errmsg = "引数は4つまでです";
+            return 0;
+        }
+        int arg = parse_expr();
+        if (arg < 0)
+            return 0;
+        if (head < 0)
+            head = arg;
+        else
+            node_next[tail] = arg;
+        tail = arg;
+        n++;
+        skip_spaces();
+        if (*cur == ',') {
+            cur++;
+            continue;
+        }
+        break;
+    }
+    if (!expect_char(')', "呼び出しの後には ) が必要です"))
+        return 0;
+    if (n != func_nparams[f]) {
+        errmsg = "引数の数が関数の定義と合いません";
+        return 0;
+    }
+    *head_out = head;
+    return 1;
+}
+
 /* 式の材料 (primary) を1つ読む: 数、変数、文字列、
  * かっこで囲んだ式、または *材料 (ポインタの先の1バイト)。
  * 変数は名簿にあるものだけが使える。代入されていない変数を
@@ -616,6 +671,20 @@ static int parse_primary_node(void) {
     if (is_ident_start(*cur)) {
         if (!parse_ident())
             return -1;
+        /* 関数の名前で、次が '(' なら呼び出し (v22 で式に
+         * なった)。戻り値が式の材料になる。呼べるのは
+         * 定義済みの関数だけ (「使う前に定義」の約束) */
+        int f = find_func(ident_buf, ident_len);
+        if (f >= 0) {
+            skip_spaces();
+            if (*cur == '(') {
+                cur++;
+                int args;
+                if (!parse_call_list(f, &args))
+                    return -1;
+                return new_node(NODE_CALL, f, args, 0);
+            }
+        }
         /* 配列の名前なら、要素読みか「先頭アドレス」か */
         int arr = find_array(ident_buf, ident_len);
         if (arr >= 0) {
@@ -1127,10 +1196,10 @@ static int parse_type(void) {
     return 1;
 }
 
-/* 関数定義を読む: 型 名前 ( [引数] ) { 文の並び }
+/* 関数定義を読む: 型 名前 ( [引数の並び] ) { 文の並び }
  * 成功したら 1、失敗したら 0。関数は本体を読む前に名簿へ
  * 載せるので、自分自身を呼ぶ (再帰の) 形も読める。
- * 引数は今は1つまで。引数の名前は変数として名簿に載る */
+ * 引数は4つまで (v22)。引数の名前は変数として名簿に載る */
 static int parse_funcdef(void) {
     if (!parse_type()) {
         errmsg = "関数は 型 名前 ( 引数 ) { } の形で書きます";
@@ -1157,8 +1226,7 @@ static int parse_funcdef(void) {
     for (int i = 0; i < name_len; i++)
         func_names[f][i] = name_buf[i];
     func_name_len[f] = name_len;
-    func_has_param[f] = 0;
-    func_param_var[f] = -1;
+    func_nparams[f] = 0;
     func_body[f] = -1;
     func_nlocals[f] = 0;
     /* 引数と本体の解析の間は、この関数が「今いる場所」
@@ -1172,44 +1240,54 @@ static int parse_funcdef(void) {
     if (*cur == ')') {
         cur++;  /* 引数なし */
     } else {
-        /* 引数: 型 名前 (名前が変数として登録される) */
-        if (!parse_type()) {
-            errmsg = "引数は 型 名前 の形で書きます";
-            return 0;
-        }
-        skip_spaces();
-        if (!parse_ident()) {
-            errmsg = "引数の名前が必要です";
-            return 0;
-        }
-        char pname[32];
-        int plen = ident_len;
-        for (int i = 0; i < plen; i++)
-            pname[i] = ident_buf[i];
-        /* 引数は宣言なので、型の情報を持って登録する */
-        int var = define_var_typed(pname, plen, parse_type_bsize,
-                                   parse_type_plevel, 1);
-        if (var < 0)
-            return 0;
-        func_has_param[f] = 1;
-        func_param_var[f] = var;
-        skip_spaces();
-        if (*cur == ',') {
-            errmsg = "引数は今は1つまでです";
-            return 0;
+        /* 引数の並び: 型 名前 (, 型 名前)* (v22 で複数に)。
+         * 名前は引数の変数として登録される */
+        for (;;) {
+            if (func_nparams[f] >= 4) {
+                errmsg = "引数は4つまでです";
+                return 0;
+            }
+            skip_spaces();  /* カンマの後の空白 (parse_type は
+                             * 空白を飛ばして始まらないため) */
+            if (!parse_type()) {
+                errmsg = "引数は 型 名前 の形で書きます";
+                return 0;
+            }
+            skip_spaces();
+            if (!parse_ident()) {
+                errmsg = "引数の名前が必要です";
+                return 0;
+            }
+            char pname[32];
+            int plen = ident_len;
+            for (int i = 0; i < plen; i++)
+                pname[i] = ident_buf[i];
+            /* 引数は宣言なので、型の情報を持って登録する */
+            int var = define_var_typed(pname, plen,
+                                       parse_type_bsize,
+                                       parse_type_plevel, 1);
+            if (var < 0)
+                return 0;
+            func_param_var[f][func_nparams[f]] = var;
+            func_nparams[f]++;
+            skip_spaces();
+            if (*cur == ',') {
+                cur++;
+                continue;
+            }
+            break;
         }
         if (!expect_char(')', "引数の後には ) が必要です"))
             return 0;
     }
     /* main という名前の関数は特別扱い (v12): プログラムの
-     * 入口になる。引数は持てない。入口そのものの生成は
-     * gen_all が行う (main を呼び出す jal を置く) */
+     * 入口になる。入口そのものの生成は gen_all が行う
+     * (main を呼び出す jal を置く)。v22 からは main も
+     * 引数を持てる: KosabaOS ターゲットでは入口が決め打ち
+     * の argv を a0 / a1 に渡す (gen_all の説明参照)。
+     * ベアメタルでは引数は用意されない (値は不定) */
     if (name_len == 4 && name_buf[0] == 'm' && name_buf[1] == 'a' &&
         name_buf[2] == 'i' && name_buf[3] == 'n') {
-        if (func_has_param[f]) {
-            errmsg = "main に引数は書けません";
-            return 0;
-        }
         prog_main = f;
     }
     if (!expect_char('{', "関数の本体は { で始めます"))
@@ -1751,18 +1829,23 @@ static int parse_stmt(void) {
     }
 
     if (ident_is("return")) {
-        /* 値なしの早期 return (v20)。戻り値つきは v22 */
+        /* return (v20 で値なし、v22 で戻り値つきも)。
+         * 値があれば NODE_RETURN の node_lhs に式を置く */
         if (!parse_in_func) {
             errmsg = "return は関数の中でだけ使えます";
             return -1;
         }
         skip_spaces();
-        if (*cur != ';') {
-            errmsg = "戻り値つきの return はまだです (v22 で対応)";
-            return -1;
+        if (*cur == ';') {
+            cur++;
+            return new_node(NODE_RETURN, 0, -1, 0);
         }
-        cur++;
-        return new_node(NODE_RETURN, 0, 0, 0);
+        int val = parse_expr();
+        if (val < 0)
+            return -1;
+        if (!expect_char(';', "return の後には ; が必要です"))
+            return -1;
+        return new_node(NODE_RETURN, 0, val, 0);
     }
 
     char name_buf[32];
@@ -1796,8 +1879,10 @@ static int parse_stmt(void) {
     }
 
     /* 名前の次が '(' なら、関数の呼び出し文:
-     * 名前 ( [式] ) ; 。関数は定義済みのものだけ呼べる
-     * (「使う前に定義」の約束は関数も同じ) */
+     * 名前 ( [式の並び] ) ; 。作るノードは式としての
+     * 呼び出し (parse_primary_node) と同じ NODE_CALL で、
+     * 文の位置では戻り値を捨てる。関数は定義済みのもの
+     * だけ呼べる (「使う前に定義」の約束は関数も同じ) */
     if (*cur == '(') {
         int f = find_func(name_buf, name_len);
         if (f < 0) {
@@ -1805,22 +1890,12 @@ static int parse_stmt(void) {
             return -1;
         }
         cur++;
-        skip_spaces();
-        int arg = -1;
-        if (*cur != ')') {
-            arg = parse_expr();
-            if (arg < 0)
-                return -1;
-        }
-        if (!expect_char(')', "呼び出しの後には ) が必要です"))
+        int args;
+        if (!parse_call_list(f, &args))
             return -1;
         if (!expect_char(';', "呼び出し文の終わりには ; が必要です"))
             return -1;
-        if ((arg >= 0) != func_has_param[f]) {
-            errmsg = "引数の数が関数の定義と合いません";
-            return -1;
-        }
-        return new_node(NODE_CALL, f, arg, 0);
+        return new_node(NODE_CALL, f, args, 0);
     }
 
     /* 名前の次が ++ / -- なら、後置の増減文 (v19):

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v21 まで</title>
+<title>IwaC の歩み — v0 から v22 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v21 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v22 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -341,7 +341,8 @@
   <a class="done" href="#v18">v18 条件付きコンパイル</a><span class="arrow">→</span>
   <a class="done" href="#v19">v19 演算子の完成</a><span class="arrow">→</span>
   <a class="done" href="#v20">v20 制御構文の完成</a><span class="arrow">→</span>
-  <a class="done" href="#v21">v21 変数のメモリ化</a>
+  <a class="done" href="#v21">v21 変数のメモリ化</a><span class="arrow">→</span>
+  <a class="done" href="#v22">v22 関数の完成</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1276,10 +1277,45 @@ void out(int c) {
   「代入がフレームでなく静的領域へ書いている」ことを見つけて行いました。</p></div>
 </section>
 
+<!-- ================= v22 ================= -->
+<section class="phase" id="v22">
+  <div class="head"><span class="badge b-v4">v22</span><h2>関数の完成 — 引数4つ、戻り値、再帰</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の7段目。関数を「本物の C の関数」の形にすること。</b></p>
+  <p>引数は4つまで（a0〜a3）になり、戻り値が付いて、呼び出しが式の材料に
+  なりました。呼び出し側は引数を右から評価してスタックに積み、
+  全部終わってから a0〜a3 へ移します。この順番のおかげで、引数の式の中に
+  別の呼び出し（<code>f(g(x))</code>）があっても、受け渡しが壊れません。
+  フレームが呼び出しごとに独立している（v21）ので、再帰もそのまま動きます。
+  <code>main</code> も引数を持てるようになり、KosabaOS 向けでは入口が
+  決め打ちの argv（<code>{"iwac", "--kosaba", "hello.c"}</code>）を渡します。
+  ただし OS 上での実走確認は、静的データを書ける領域に分ける作業（v24）と
+  一緒に行う予定です。</p>
+<pre class="code">int fib(int n) {
+  if (n &lt; 2) { return n; }
+  return fib(n - 1) + fib(n - 2);   // 再帰。両辺とも呼び出し
+}
+
+int add4(int a, int b, int c, int d) { return a + b + c + d; }
+
+putc(48 + fib(10) / 10);            // 画面に 55 と出る
+putc(48 + fib(10) % 10);</pre>
+  <div class="chips">
+    <span class="chip">引数4つ（a0〜a3）</span><span class="chip">戻り値は a0</span>
+    <span class="chip">呼び出しは式</span><span class="chip">再帰</span>
+    <span class="chip">main の引数</span><span class="chip">引数は右から評価</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「引数を右から評価してスタックに積み、a レジスタへは最後にまとめて移す」
+  と決めると、ネストした呼び出しの退避問題が消えます。評価の途中では
+  a0〜a3 を一切使わないのが肝心です。あわせて、OS 上で初めて見つかった
+  「静的データが読み取り専用の領域に載っていて書けない」という既存の
+  課題は、v22 の問題と切り分けて v24 に送りました。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v21 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v22 時点）</p>
 </footer>
 
 </div>

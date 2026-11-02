@@ -39,6 +39,7 @@
 #   v19: 演算子の完成 (<< >> | ^ %、単項 - !、&& || 短絡、前置/後置 ++ --)
 #   v20: 制御構文の完成 (for、break、continue、値なし早期 return)
 #   v21: 変数のメモリ化 (グローバル=静的領域、ローカル・引数=フレーム、宣言の文、単項 &)
+#   v22: 関数の完成 (引数4つ、戻り値、再帰、main の引数と決め打ち argv)
 set -e
 cd "$(dirname "$0")"
 
@@ -336,7 +337,7 @@ check_tail "$TMP/v12a.bin" 'AB' "v12: main のみ"
 check_tail "$TMP/v12b.bin" 'main!' "v12: main から関数を呼ぶ"
 
 check_error 'int main() { putc(65); } putc(66);' "main と外の文の混ぜ書き"
-check_error 'int main(int x) { putc(65); }' "main の引数"
+# main の引数は v22 から許可 (v12 時点ではエラーだった)
 
 # --- v11: 関係演算子 ---
 "$IWAC" 'i = 0; while (i < 3) { putc(65); i = i + 1; }' > "$TMP/v11a.bin"
@@ -533,7 +534,6 @@ check_run "$TMP/v20i.bin" J "v20: for (;;) と break"
 check_tail "$TMP/v20j.bin" AC "v20: 更新が代入の for"
 check_error 'break;' "ループの外の break"
 check_error 'return;' "関数の外の return"
-check_error 'int main() { return 1; }' "戻り値つき return はまだ"
 
 # --- v21: 変数のメモリ化 ---
 "$IWAC" 'for (int i = 0; i < 3; i++) { putc(65 + i); }' > "$TMP/v21a.bin"
@@ -555,5 +555,38 @@ check_run "$TMP/v21h.bin" F "v21: ローカル宣言とフレーム"
 "$IWAC" 'void out(int c) { int b; b = c; putc(*&b); } int main() { out(65); }' > "$TMP/v21i.bin"
 check_run "$TMP/v21i.bin" A "v21: 単項 & (ローカルの住所)"
 check_error 'putc(&5);' "数への &"
+
+# --- v22: 関数の完成 ---
+"$IWAC" 'int fib(int n) { if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); } putc(48 + fib(10) / 10); putc(48 + fib(10) % 10);' > "$TMP/v22a.bin"
+check_tail "$TMP/v22a.bin" 55 "v22: 再帰 (fib 10、両辺が呼び出し)"
+"$IWAC" 'int add4(int a, int b, int c, int d) { return a + b + c + d; } putc(64 + add4(1, 2, 3, 4));' > "$TMP/v22b.bin"
+check_run "$TMP/v22b.bin" J "v22: 引数4つ (a0〜a3)"
+"$IWAC" 'int add4(int a, int b, int c, int d) { return a + b + c + d; } putc(64 + add4(1 + 1, 2 * 2, 9 - 3, 8 / 4));' > "$TMP/v22c.bin"
+check_run "$TMP/v22c.bin" N "v22: 引数が式"
+"$IWAC" 'int inc(int x) { return x + 1; } putc(64 + inc(inc(inc(0))));' > "$TMP/v22d.bin"
+check_run "$TMP/v22d.bin" C "v22: 入れ子の呼び出し (引数の中の呼び出し)"
+"$IWAC" 'int f(int x) { return x - 3; } i = 0; while (f(i) < 0) { i = i + 1; } putc(48 + i);' > "$TMP/v22e.bin"
+check_run "$TMP/v22e.bin" 3 "v22: 条件の中の呼び出し"
+"$IWAC" 'int g; int bump(int d) { g = g + d; return g; } int add2(int a, int b) { return a * 10 + b; } g = 0; putc(48 + add2(bump(1), bump(2)));' > "$TMP/v22f.bin"
+check_run "$TMP/v22f.bin" P "v22: 引数は右から評価 (副作用の順序で確認)"
+"$IWAC" 'int sq(int x) { return x * x; } y = sq(9); putc(y);' > "$TMP/v22g.bin"
+check_run "$TMP/v22g.bin" Q "v22: 戻り値を代入に使う"
+"$IWAC" 'int f() { return 66; } int main() { putc(f()); return 0; }' > "$TMP/v22h.bin"
+check_run "$TMP/v22h.bin" B "v22: 戻り値つき return (v20 ではエラーだった)"
+check_error 'int f(int a, int b, int c, int d, int e) { return a; }' "引数5つの定義"
+check_error 'int f(int a) { return a; } putc(f(1, 2));' "引数の数が合わない呼び出し"
+
+# --- v22: KosabaOS 向けの main 引数 (決め打ち argv) ---
+# ELF の memsz が filesz より 48 バイト大きいことで、argv の
+# 置き場所 (文字列 24 + ポインタ配列 24) が確保されている
+# ことを確かめる。OS 上での実行確認は、静的データへの書き
+# 込みが要るため、ELF のデータセグメント分離 (v24) の後に
+# なる (現行の1セグメント構成では静的データが OS のコード
+# 領域 (読み・実行のみ) に載る既存課題。v21 のグローバル
+# 書き込みでも OS 上では同じくフォルトになることを確認済み)
+"$IWAC" --kosaba 'int main(int argc, char **argv) { putc(64 + argc); }' > "$TMP/v22k.elf"
+set -- $(readelf -l "$TMP/v22k.elf" | awk '/LOAD/{getline; print $1, $2; exit}')
+[ $(( $2 - $1 )) -eq 48 ] || fail "v22: kosaba の argv 領域 (memsz - filesz) が 48 でない (filesz=$1 memsz=$2)"
+echo "ok: v22: kosaba の argv 領域 48 バイトが memsz に確保された"
 
 echo "PASS"

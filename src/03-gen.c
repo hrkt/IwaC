@@ -231,6 +231,9 @@ static void gen_load_leaf(int reg, int leaf) {
     }
 }
 
+/* 呼び出しの引数を積む道具 (v22)。gen_expr と相互に使う */
+static int gen_call_args(int arg);
+
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
  * 失敗したら 0 を返す (理由は errmsg)。
  *
@@ -264,6 +267,31 @@ static int gen_expr(int node) {
         gen_load_addr(REG_T2, arr_addr[node_val[node]]);
         asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
         asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
+        return 1;
+    }
+    if (node_kind[node] == NODE_CALL) {
+        /* 関数呼び出し (v22 で式になった):
+         *   引数を右から評価してスタックに積む
+         *   積んだものを a0〜a3 へ順に移し、スタックを戻す
+         *   jal ra, 関数 (飛び先は生成の最後に書き直す)
+         *   addi t1, a0, 0 (戻り値を式の値の場所 t1 へ)
+         * a0〜a3 へ移すのは全引数の評価が終わった後なので、
+         * 引数の式の中に別の呼び出し (f(g(x)) の形) が
+         * あっても、a レジスタの受け渡しが壊れない。
+         * だから a レジスタの退避は要らない */
+        int nargs = 0;
+        for (int a = node_lhs[node]; a != -1; a = node_next[a])
+            nargs++;
+        if (!gen_call_args(node_lhs[node]))
+            return 0;
+        if (nargs > 0) {
+            for (int k = 0; k < nargs; k++)
+                /* a0〜a3 は番号が連番 (10〜13) */
+                asm_push(OP_LD, REG_A0 + k, REG_SP, 0, k * 16);
+            asm_push(OP_ADDI, REG_SP, REG_SP, 0, nargs * 16);
+        }
+        asm_push(OP_JAL, REG_RA, 0, 0, -(node_val[node] + 1));
+        asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
         return 1;
     }
     if (node_kind[node] == NODE_LAND) {
@@ -432,6 +460,24 @@ static int gen_expr(int node) {
     return 1;
 }
 
+/* 呼び出しの引数をスタックに積む (v22): リストの後ろ
+ * (右の引数) から先に評価して積む。再帰で「残りを先に」
+ * 処理するので、右の引数ほど先に積まれ、スタックの上
+ * (sp の近く) には左の引数が来る並びになる。取り出す
+ * 側は sp + k*16 を a(k) へ読めば、左から順に対応する。
+ * 1つ積むごとに 16 バイト (式の評価の退避と同じ単位) */
+static int gen_call_args(int arg) {
+    if (arg < 0)
+        return 1;  /* 積み終わり */
+    if (!gen_call_args(node_next[arg]))
+        return 0;
+    if (!gen_expr(arg))
+        return 0;
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+    asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+    return 1;
+}
+
 /* 文の AST から命令列を作る。失敗したら 0。
  *
  * while の作り方 (命令列の並びがループの形そのもの):
@@ -556,16 +602,9 @@ static int gen_stmt(int node) {
         return 1;
     }
     if (kind == NODE_CALL) {
-        /* 呼び出し: 引数があれば式を t1 で計算して a0 へ写し、
-         * jal ra で関数へ飛ぶ。飛び先は生成の最後に直すので、
-         * ここでは関数番号を負数の印で入れておく */
-        if (node_lhs[node] >= 0) {
-            if (!gen_expr(node_lhs[node]))
-                return 0;
-            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
-        }
-        asm_push(OP_JAL, REG_RA, 0, 0, -(node_val[node] + 1));
-        return 1;
+        /* 呼び出し文: 式として生成し、戻り値 (t1) は
+         * 捨てる (v22 で呼び出しが式になったための形) */
+        return gen_expr(node);
     }
     if (kind == NODE_IF) {
         /* if の作り方:
@@ -705,11 +744,18 @@ static int gen_stmt(int node) {
         return 1;
     }
     if (kind == NODE_RETURN) {
-        /* 早期 return: 関数の出口 (後始末) へのジャンプ。
-         * 出口の番号は関数の生成の最後に書き直す */
+        /* return: 値があれば式を計算して a0 (戻り値の
+         * 場所) へ置き、関数の出口 (後始末) へ跳ぶ。
+         * 出口の番号は関数の生成の最後に書き直す (v20)。
+         * 戻り値つきは v22 */
         if (!gen_in_func) {
             errmsg = "return は関数の中でだけ使えます";
             return 0;
+        }
+        if (node_lhs[node] >= 0) {
+            if (!gen_expr(node_lhs[node]))
+                return 0;
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
         }
         emit_patch_jump(&return_patch_head);
         return 1;
@@ -721,6 +767,22 @@ static int gen_stmt(int node) {
 /* スタックの天井の住所 (第2層が2パス間で確定させる)。
  * スタックはバイナリの後ろの空き地に置き、下へ伸ばす */
 static unsigned int stack_top_addr;
+
+/* main の決め打ち argv の置き場所 (v22): KosabaOS
+ * ターゲットで main が引数を持つときだけ使う。OS は
+ * argv を渡す仕組みを持っていないので、kosaba/ の crt
+ * と同じ {"iwac", "--kosaba", "hello.c"} を入口の
+ * 生成コードが実行時に組み立てる (文字列のバイト列と
+ * ポインタ配列の置き場所だけ、グローバルの後ろに確保)。
+ * 文字列は合計 22 バイト ("iwac" 5 + "--kosaba" 9 +
+ * "hello.c" 8、末尾の 0 込み)、ポインタ配列はその後ろの
+ * 8 バイト境界から 3 つ分 (24 バイト) */
+static int need_argv;
+static int argv_used;  /* argv 領域の大きさ (使うとき 48、
+                        * 使わないとき 0)。encode が ELF の
+                        * memsz に足すために持つ */
+static unsigned int argv_str_addr;
+static unsigned int argv_arr_addr;
 
 /* 関数1つ分の命令列を作る: 入口の決まり文句 (プロローグ)
  * → 本体 → 出口の決まり文句 (エピローグ)。
@@ -744,11 +806,10 @@ static int gen_func(int f) {
     asm_push(OP_SD, 0, REG_SP, REG_RA, frame - 8);
     asm_push(OP_SD, 0, REG_SP, REG_FP, frame - 16);
     asm_push(OP_ADDI, REG_FP, REG_SP, 0, frame);
-    if (func_has_param[f]) {
-        /* 引数を受け取る: a0 を引数の枠へ書く */
-        asm_push(OP_SD, 0, REG_FP, REG_A0,
-                 var_frame_off(func_param_var[f]));
-    }
+    /* 引数を受け取る: a0〜a3 を引数の枠へ順に書く (v22) */
+    for (int k = 0; k < func_nparams[f]; k++)
+        asm_push(OP_SD, 0, REG_FP, REG_A0 + k,
+                 var_frame_off(func_param_var[f][k]));
     return_patch_head = -1;
     gen_in_func = 1;
     for (int s = func_body[f]; s != -1; s = node_next[s]) {
@@ -796,6 +857,14 @@ static int expr_needs_stack(int node) {
                expr_needs_stack(node_rhs[node]);
     if (k == NODE_NOT || k == NODE_NEG || k == NODE_ADDR)
         return expr_needs_stack(node_lhs[node]);
+    if (k == NODE_CALL) {
+        /* 呼び出しの引数の式が退避を要するか (v22) */
+        for (int a = node_lhs[node]; a != -1; a = node_next[a]) {
+            if (expr_needs_stack(a))
+                return 1;
+        }
+        return 0;
+    }
     if (k == NODE_DEREF)
         return expr_needs_stack(node_lhs[node]);
     if (k == NODE_INDEX)
@@ -817,9 +886,14 @@ static int stmt_needs_stack(int node) {
                list_needs_stack(node_rhs[node]) ||
                (node_val[node] >= 0 &&
                 list_needs_stack(node_val[node]));
-    if (k == NODE_CALL)
-        return node_lhs[node] >= 0 &&
-               expr_needs_stack(node_lhs[node]);
+    if (k == NODE_CALL) {
+        /* 引数の式の並びのどれかが退避を要するか (v22) */
+        for (int a = node_lhs[node]; a != -1; a = node_next[a]) {
+            if (expr_needs_stack(a))
+                return 1;
+        }
+        return 0;
+    }
     if (k == NODE_FOR)
         /* 初期化・更新は文、本体は文の並び、条件は式 */
         return (node_val[node] >= 0 &&
@@ -894,6 +968,40 @@ static int gen_all(void) {
          * main の入口では、戻り先が ra に入っているのを
          * 通常の関数と同じく退避するので、呼び出しの作法
          * そのままで動く */
+        if (need_argv) {
+            /* main が引数を持つ KosabaOS 版 (v22): 決め打ち
+             * の argv を静的領域に組み立ててから呼ぶ。
+             * kosaba/ の crt と同じ {"iwac", "--kosaba",
+             * "hello.c"}。文字列は1バイトずつ sb で書き、
+             * ポインタ配列は住所を作って sd する。バイナリ
+             * のイメージにデータとして埋めるのではなく
+             * 実行時に作るので、ELF の filesz には何も
+             * 要らない (memsz の範囲にゼロ埋めで置ける) */
+            char bytes[22];
+            bytes[0] = 'i'; bytes[1] = 'w'; bytes[2] = 'a';
+            bytes[3] = 'c'; bytes[4] = 0;
+            bytes[5] = '-'; bytes[6] = '-'; bytes[7] = 'k';
+            bytes[8] = 'o'; bytes[9] = 's'; bytes[10] = 'a';
+            bytes[11] = 'b'; bytes[12] = 'a'; bytes[13] = 0;
+            bytes[14] = 'h'; bytes[15] = 'e'; bytes[16] = 'l';
+            bytes[17] = 'l'; bytes[18] = 'o'; bytes[19] = '.';
+            bytes[20] = 'c'; bytes[21] = 0;
+            gen_load_addr(REG_T2, argv_str_addr);
+            for (int i = 0; i < 22; i++) {
+                asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, bytes[i]);
+                asm_push(OP_SB, 0, REG_T2, REG_T1, i);
+            }
+            gen_load_addr(REG_T2, argv_arr_addr);
+            gen_load_addr(REG_T1, argv_str_addr);
+            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
+            gen_load_addr(REG_T1, argv_str_addr + 5);
+            asm_push(OP_SD, 0, REG_T2, REG_T1, 8);
+            gen_load_addr(REG_T1, argv_str_addr + 14);
+            asm_push(OP_SD, 0, REG_T2, REG_T1, 16);
+            /* argc = 3、argv = 配列の住所を a0 / a1 へ */
+            asm_push(OP_ADDI, REG_A0, REG_ZERO, 0, 3);
+            gen_load_addr(REG_A1, argv_arr_addr);
+        }
         asm_push(OP_JAL, REG_RA, 0, 0, -(prog_main + 1));
     }
     if (target_kosaba) {
@@ -935,6 +1043,12 @@ static int gen_program(void) {
         stack_needed = list_needs_stack(func_body[f]);
     stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */
     globals_base = LOAD_BASE;    /* 同上 (グローバルの住所) */
+    /* argv が要るかどうかは住所に依存しないので、1回目の
+     * 生成の前に決める (入口の命令数が2回で揃うため、v22) */
+    need_argv = target_kosaba && prog_main >= 0 &&
+                func_nparams[prog_main] > 0;
+    argv_str_addr = LOAD_BASE;   /* 1回目は仮の値 (個数は同じ) */
+    argv_arr_addr = LOAD_BASE;
     for (int i = 0; i < narr; i++)
         arr_addr[i] = LOAD_BASE;  /* 同上 (配列の住所も仮置き) */
     if (!gen_all())
@@ -956,12 +1070,26 @@ static int gen_program(void) {
     globals_base = LOAD_BASE + (unsigned int)nasm * 4u +
                    (unsigned int)str_used +
                    (unsigned int)arr_used;
-    /* スタックは「コード + 文字列 + 配列 + グローバル」の
-     * 後ろ 4KB 先から下へ伸ばす。16 バイト単位に切り上げ
-     * ておく (置き場所の約束) */
-    stack_top_addr = globals_base +
-                     (unsigned int)var_nglobal * 8u + 4096u;
-    stack_top_addr = (stack_top_addr + 15u) & ~15u;
+    /* main の決め打ち argv はグローバルの後ろ (v22)。
+     * 要るのは KosabaOS ターゲットで main が引数を
+     * 持つときだけ。その間 encode 側の memsz は、この
+     * 分も含めて確保する (下の argv_used 参照) */
+    need_argv = target_kosaba && prog_main >= 0 &&
+                func_nparams[prog_main] > 0;
+    argv_used = need_argv ? 48 : 0;
+    argv_str_addr = globals_base + (unsigned int)var_nglobal * 8u;
+    argv_arr_addr = argv_str_addr + 24u;  /* 文字列分を
+                        * 8 バイト境界に切り上げた位置 */
+    {
+        unsigned int tail = globals_base +
+                            (unsigned int)var_nglobal * 8u;
+        if (need_argv)
+            tail = argv_arr_addr + 24u;
+        /* スタックは静的領域の後ろ 4KB 先から下へ伸ばす。
+         * 16 バイト単位に切り上げておく (置き場所の約束) */
+        stack_top_addr = tail + 4096u;
+        stack_top_addr = (stack_top_addr + 15u) & ~15u;
+    }
     if (!gen_all())
         return 0;
     return 1;
