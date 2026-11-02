@@ -364,8 +364,9 @@ iwac.c が使っていないので不要（% はついでに入れる）。
 - v26 セルフコンパイル: OS 用ランタイムを iwac の
   言語で書いた kosaba_rt.c（syscall を呼ぶ組み込み
   `syscall3` を追加し、write/open/read/close を実装）
-  と iwac.c をつないだものを、iwac 自身でコンパイル
-  する。検証は固定点で行う: gcc 製 iwac が作る
+  と iwac 本体（src/ の断片群）を複数ファイル入力で
+  渡し、iwac 自身でコンパイルする。検証は固定点で
+  行う: gcc 製 iwac が作る
   iwac2.elf と、iwac2 が作る iwac3.elf がバイト一致
   すればセルフホスト成立
 

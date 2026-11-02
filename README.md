@@ -153,11 +153,17 @@ iwac hello.c > hello.bin
 
 ## ビルドと実行
 
-ビルド（最初はホストの gcc で。将来のセルフホストは夢として置く）:
+ビルド（ホストの gcc で）:
 
 ```sh
-gcc -std=c11 -Wall -Wextra -O2 -o iwac iwac.c
+./build.sh
 ```
+
+本体は `src/` の7断片（01-head.c 〜 07-main.c）に分かれて
+いて、build.sh が番号順に連結した `iwac_all.c` を gcc で
+コンパイルする（`#include` を使わない約束のための形。
+手でやるなら `cat src/0*.c > iwac_all.c` してから
+`gcc -std=c11 -Wall -Wextra -O2 -o iwac iwac_all.c`）。
 
 コンパイルと実行:
 

@@ -1,0 +1,628 @@
+/* ================================================================
+ * 第2層 gen: AST → 命令列
+ *
+ * 「命令列」は機械語の一歩手前の形。命令を、種類と
+ * レジスタ番号と即値の組として配列に並べたもの:
+ *   asm_op[i]  : 命令の種類 (OP_LUI など)
+ *   asm_rd[i]  : 行き先レジスタ番号 (使わない命令では 0)
+ *   asm_rs1[i] : 元レジスタ1 (同上)
+ *   asm_rs2[i] : 元レジスタ2 (同上)
+ *   asm_imm[i] : 即値 (同上)
+ * この層はビット列のことは何も知らない。「lui する」
+ * 「add する」という言葉だけで考える。ビット列への
+ * 変換は第3層の仕事。
+ *
+ * 容量の約束: ノード上限 512 に対し命令は最大でも
+ * ノード数 x2 + 文の数 + 3 個程度 (演算ノード1つが
+ * addi + add/sub の2命令、代入文1つが余分に移し替え1命令)。
+ * 2048 あれば解析が成功した後は生成があふれることはない。
+ * ================================================================ */
+
+static int OP_LUI = 0;
+static int OP_ADDI = 1;
+static int OP_ADD = 2;
+static int OP_SUB = 3;
+static int OP_SB = 4;
+static int OP_WFI = 5;
+static int OP_LBU = 6;  /* メモリから1バイト読む (符号なし) */
+static int OP_AUIPC = 7; /* 自分の住所 + 即値 (PC 相対) */
+static int OP_BEQ = 8;   /* 2つのレジスタが等しければ飛ぶ。
+                          * asm_imm には「飛び先の命令番号」を
+                          * 入れる (バイト数ではない)。
+                          * バイト単位の距離への変換は第3層 */
+static int OP_JAL = 9;   /* 無条件に飛ぶ。asm_imm は同上、
+                          * asm_rd は 0 (戻り先は保存しない)。
+                          * 関数呼び出しでは asm_rd を ra (1) にし、
+                          * asm_imm には関数番号を負数で入れる
+                          * (-(関数番号+1))。生成の最後に、
+                          * 関数の入口番号へ書き直す */
+static int OP_SD = 10;   /* メモリへ8バイト書く (ra の退避用) */
+static int OP_LD = 11;   /* メモリから8バイト読む (ra の復帰用) */
+static int OP_JALR = 12; /* レジスタの指す住所へ飛ぶ (関数からの
+                          * 戻り。rd=0, rs1=ra, imm=0) */
+static int OP_SLTU = 13; /* 符号なし比較: rs1 < rs2 なら 1
+                          * (0 と比べれば「0 でないか」になる) */
+static int OP_SLTIU = 14;/* 即値との符号なし比較
+                          * (1 と比べれば「0 かどうか」になる) */
+static int OP_AND = 15;  /* ビットごとの AND (両方 1 の桁だけ 1) */
+static int OP_MUL = 16;  /* 掛け算 (M 拡張。RV64G 前提) */
+static int OP_DIV = 17;  /* 割り算 (符号付き、M 拡張) */
+static int OP_SLT = 18;  /* 符号付き比較: rs1 < rs2 なら 1
+                          * (関係演算子用。SLTU と funct3 だけ違う) */
+static int OP_XORI = 19; /* 即値との XOR。1 との XOR は
+                          * 「1か0の反転」に使える */
+static int OP_ECALL = 20; /* ecall (環境呼び出し)。KosabaOS
+                           * ターゲットで OS のシステムコールを
+                           * 呼ぶ命令。符号化は固定の1語 (v14) */
+
+static int asm_op[2048];
+static int asm_rd[2048];
+static int asm_rs1[2048];
+static int asm_rs2[2048];
+static int asm_imm[2048];
+static int nasm;  /* 並べた命令の数 */
+
+/* 命令を1つ、命令列の末尾に積む */
+static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
+    int i = nasm++;
+    asm_op[i] = op;
+    asm_rd[i] = rd;
+    asm_rs1[i] = rs1;
+    asm_rs2[i] = rs2;
+    asm_imm[i] = imm;
+}
+
+/* 変数番号から、その変数の住むレジスタ番号を出す */
+static int var_reg(int var) {
+    return REG_VAR_BASE + var;
+}
+
+/* 葉かどうか: 式の中で「そのまま値として使える材料」は
+ * 数・変数・文字列 (住所)・ポインタ読みの4種。ただし
+ * ポインタ読みは、相手 (住所) が材料そのもののときだけ
+ * 葉扱いする。相手が計算式の場合は、住所の計算に t1 を
+ * 使うので、葉としては扱えない (gen_expr で別に処理する) */
+static int is_leaf(int node) {
+    int k = node_kind[node];
+    if (k == NODE_NUM || k == NODE_VAR || k == NODE_STR ||
+        k == NODE_ARRAY)
+        return 1;
+    if (k == NODE_DEREF) {
+        int ok = node_kind[node_lhs[node]];
+        return ok == NODE_NUM || ok == NODE_VAR || ok == NODE_STR ||
+               ok == NODE_ARRAY;
+    }
+    return 0;
+}
+
+/* 文字列の住所をレジスタに作る命令 (2つ) を積む。
+ *
+ * 最初は lui + addi (絶対アドレス) で作ろうとして失敗した:
+ * RV64 の lui は、作った32ビットの値を符号拡張して64ビット
+ * にする。0x8020001c のような住所は32ビット目が立っている
+ * ため、0xffffffff8020001c という「変な住所」になり、
+ * lbu が例外 (load fault) になった (QEMU の例外ログで確認)。
+ *
+ * そこで auipc (PC 相対) を使う。「今いる命令の住所 + 差分」
+ * で住所を作るので、差分は小さく、符号拡張に邪魔されない。
+ * KosabaOS の C 版が -mcmodel=medany で auipc を使うのも
+ * 同じ理由である。
+ *   auipc reg, hi   -- reg = 自分の住所 + (hi << 12)
+ *   addi  reg, reg, lo
+ * 差分の分け方は addi の符号付き即値に合わせる定石:
+ * hi = (差分 + 0x800) >> 12、lo = 差分 - (hi << 12) */
+static unsigned int LOAD_BASE = 0x80200000u;  /* 配置先頭 (下記) */
+static int code_insts;  /* 1回目の生成で数えた命令の総数 */
+
+/* 出力ターゲット (v14): 0 = ベアメタル (QEMU の -kernel 用。
+ * 配置 0x80200000、出力は UART 直書き、終わりは wfi)、
+ * 1 = KosabaOS のユーザープログラム (ELF、配置 0x40000000、
+ * 出力は putc システムコール、終わりは exit システムコール。
+ * スタックは OS が用意するので自分では用意しない)。
+ * main が --kosaba の指定で切り替える */
+static int target_kosaba;
+
+static void gen_load_addr(int reg, unsigned int addr) {
+    /* この auipc 命令自身が置かれる住所 (命令列の今の末尾) */
+    unsigned int pc = LOAD_BASE + (unsigned int)nasm * 4u;
+    long diff = (long)addr - (long)pc;
+    long hi = (diff + 0x800) >> 12;
+    long lo = diff - (hi << 12);
+    asm_push(OP_AUIPC, reg, 0, 0, (int)hi);
+    asm_push(OP_ADDI, reg, reg, 0, (int)lo);
+}
+
+/* 葉を、指定レジスタへ読み出す命令を積む。
+ *   数:       小さければ即値で入れる。大きければ (16進の
+ *             アドレスなど) 住所の材料と同じ作り方で作る
+ *   変数:     そのレジスタからの写し (addi rd, 相手, 0 = mv)
+ *   文字列:   その住所を作る (auipc + addi の2命令)
+ *   ポインタ読み: 住所から1バイト読む (lbu)。住所は、
+ *             変数ならその値、数なら絶対アドレスそのもの */
+static void gen_load_leaf(int reg, int leaf) {
+    int k = node_kind[leaf];
+    if (k == NODE_NUM) {
+        if ((unsigned int)node_val[leaf] <= 2047u)
+            asm_push(OP_ADDI, reg, REG_ZERO, 0, node_val[leaf]);
+        else
+            gen_load_addr(reg, (unsigned int)node_val[leaf]);
+    } else if (k == NODE_VAR)
+        asm_push(OP_ADDI, reg, var_reg(node_val[leaf]), 0, 0);
+    else if (k == NODE_STR)
+        gen_load_addr(reg, str_addr[node_val[leaf]]);
+    else if (k == NODE_ARRAY)
+        /* 配列の名前の「値」は先頭アドレス */
+        gen_load_addr(reg, arr_addr[node_val[leaf]]);
+    else { /* NODE_DEREF: lhs が住所を表すノード */
+        int operand = node_lhs[leaf];
+        if (node_kind[operand] == NODE_VAR) {
+            /* 変数の持つ住所から読む (従来の形) */
+            asm_push(OP_LBU, reg, var_reg(node_val[operand]), 0, 0);
+        } else {
+            /* 絶対アドレス読み: 住所を reg に作ってから読む。
+             * 住所の材料は auipc 相対なので、0x10000005 の
+             * ようなデバイスの住所でも壊れない */
+            if (node_kind[operand] == NODE_NUM)
+                gen_load_addr(reg, (unsigned int)node_val[operand]);
+            else if (node_kind[operand] == NODE_ARRAY)
+                gen_load_addr(reg, arr_addr[node_val[operand]]);
+            else /* NODE_STR: 文字列の住所から読む */
+                gen_load_addr(reg, str_addr[node_val[operand]]);
+            asm_push(OP_LBU, reg, reg, 0, 0);
+        }
+    }
+}
+
+/* 式の AST から命令列を作る。結果は t1 に残る約束。
+ * 失敗したら 0 を返す (理由は errmsg)。
+ *
+ * 作り方: 左の子を先に生成する (結果は t1)。右の子が葉
+ * なら t2 に入れて演算する。右の子も式 (木) の場合は、
+ * 左の結果をスタックに退避してから右を計算し、t2 へ
+ * 写して左を戻す (v7 で入れた一般形の評価)。
+ * スタックが要るプログラムでは、gen_all が先に sp を
+ * 用意する (関数のあるプログラムと同じ仕組み) */
+static int gen_expr(int node) {
+    if (is_leaf(node)) {
+        /* 葉: t1 にその値 (変数なら今の値、文字列なら住所、
+         * ポインタ読みなら指された先の1バイト) が入る */
+        gen_load_leaf(REG_T1, node);
+        return 1;
+    }
+    if (node_kind[node] == NODE_DEREF) {
+        /* 相手が計算式のポインタ読み: 住所を t1 で計算し、
+         * その住所から1バイト読む */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
+        return 1;
+    }
+    if (node_kind[node] == NODE_INDEX) {
+        /* 配列の要素読み: 添字を t1 で計算し、先頭アドレス
+         * (t2) と足して、その場所から1バイト読む。
+         * 要素は1バイトなので、足し算はそのまま使える */
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        gen_load_addr(REG_T2, arr_addr[node_val[node]]);
+        asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
+        asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
+        return 1;
+    }
+    /* 二項演算: まず左を t1 に */
+    if (!gen_expr(node_lhs[node]))
+        return 0;
+    int rhs = node_rhs[node];
+    if (is_leaf(rhs)) {
+        /* 右が葉: そのまま t2 に入れる */
+        gen_load_leaf(REG_T2, rhs);
+    } else {
+        /* 右も式: 左の結果 (t1) をスタックへ退避し、右を
+         * 計算して t2 へ写し、左を t1 へ戻す */
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+        if (!gen_expr(rhs))
+            return 0;
+        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        asm_push(OP_LD, REG_T1, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+    }
+    if (node_kind[node] == NODE_ADD)
+        asm_push(OP_ADD, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_SUB)
+        asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_AND)
+        asm_push(OP_AND, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_MUL)
+        asm_push(OP_MUL, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_DIV)
+        asm_push(OP_DIV, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_LT)
+        /* slt: 左 (t1) < 右 (t2) なら 1 (符号付き比較) */
+        asm_push(OP_SLT, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_GT)
+        /* > は両辺を入れ替えた < 。slt の両辺を逆に置く */
+        asm_push(OP_SLT, REG_T1, REG_T2, REG_T1, 0);
+    else if (node_kind[node] == NODE_LE ||
+             node_kind[node] == NODE_GE) {
+        /* <= は「> でない」、>= は「< でない」。
+         * 反対の比較をしてから 1 と XOR して反転する
+         * (値は 1 か 0 なので、XOR 1 がちょうど反転になる) */
+        if (node_kind[node] == NODE_LE)
+            asm_push(OP_SLT, REG_T1, REG_T2, REG_T1, 0);
+        else
+            asm_push(OP_SLT, REG_T1, REG_T1, REG_T2, 0);
+        asm_push(OP_XORI, REG_T1, REG_T1, 0, 1);
+    }
+    else {
+        /* 比較 (== / !=): まず引き算して「差」にする。
+         * 差が 0 なら等しい。あとは差を見て 1 か 0 を作る:
+         *   != : sltu t1, zero, t1  (差が 0 でない = 1)
+         *   == : sltiu t1, t1, 1    (差が 1 未満 = 差 0 = 1) */
+        asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
+        if (node_kind[node] == NODE_NE)
+            asm_push(OP_SLTU, REG_T1, REG_ZERO, REG_T1, 0);
+        else
+            asm_push(OP_SLTIU, REG_T1, REG_T1, 0, 1);
+    }
+    return 1;
+}
+
+/* 文の AST から命令列を作る。失敗したら 0。
+ *
+ * while の作り方 (命令列の並びがループの形そのもの):
+ *   L_cond: 条件を計算 (結果は t1)
+ *           beq t1, zero, L_end   (0 なら繰り返しを抜ける)
+ *           本体の文...
+ *           jal zero, L_cond      (条件の判定に戻る)
+ *   L_end:
+ * 飛び先 (L_cond / L_end) は「命令の番号」で表す。L_end は
+ * 本体を作り終えた時点の末尾の番号なので、beq は飛び先を
+ * 後から書き直す (asm_imm の書換え)。アセンブラでラベルを
+ * 使うのと同じことを、番号と書換えでやっている */
+static int gen_stmt(int node) {
+    int kind = node_kind[node];
+    if (kind == NODE_DECL) {
+        /* 配列の宣言: 置き場所はコンパイラが静的に確保する
+         * だけなので、実行時のコードは何も出ない */
+        return 1;
+    }
+    if (kind == NODE_INDEX_STORE) {
+        /* 配列の要素への書き込み: 先頭アドレス + 添字 の
+         * 場所へ、値の下1バイトを書く (sb)。
+         * 書く値が葉なら「住所を t2 → 値を t1 → sb」。
+         * 値も式なら、住所をスタックへ退避してから値を
+         * 計算する (値の計算が t2 を使うため) */
+        int a = node_val[node];
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        gen_load_addr(REG_T2, arr_addr[a]);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        if (is_leaf(node_rhs[node])) {
+            gen_load_leaf(REG_T1, node_rhs[node]);
+            asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+            return 1;
+        }
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    if (kind == NODE_ASSIGN) {
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        /* addi 変数レジスタ, t1, 0 -- 結果を変数へ写す (代入) */
+        asm_push(OP_ADDI, var_reg(node_val[node]), REG_T1, 0, 0);
+        return 1;
+    }
+    if (kind == NODE_PUTC) {
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        if (target_kosaba) {
+            /* KosabaOS では U モードから UART のレジスタを
+             * 触れないので、putc システムコール (番号 1) で
+             * 出す。a0 = 文字、a7 = 1、ecall */
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
+            asm_push(OP_ADDI, REG_A7, REG_ZERO, 0, 1);
+            asm_push(OP_ECALL, 0, 0, 0, 0);
+            return 1;
+        }
+        /* sb t1, 0(t0) -- 式の値の下1バイトを UART へ */
+        asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+        return 1;
+    }
+    if (kind == NODE_STORE) {
+        /* メモリ書き込み: 先に「書く値」を t1 で計算し、
+         * 次に「書き込み先の住所」を t2 に作って sb する。
+         * この順番なのは、住所作りが t1 を壊さないため
+         * (値の計算は t2 を下書きに使うことがある) */
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        int addr = node_lhs[node];
+        if (node_kind[addr] == NODE_NUM)
+            gen_load_addr(REG_T2, (unsigned int)node_val[addr]);
+        else /* NODE_VAR: 変数の値そのものが住所 (ポインタ) */
+            asm_push(OP_ADDI, REG_T2, var_reg(node_val[addr]), 0, 0);
+        /* sb t1, 0(t2) -- 値の下1バイトを住所へ書く */
+        asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    if (kind == NODE_CALL) {
+        /* 呼び出し: 引数があれば式を t1 で計算して a0 へ写し、
+         * jal ra で関数へ飛ぶ。飛び先は生成の最後に直すので、
+         * ここでは関数番号を負数の印で入れておく */
+        if (node_lhs[node] >= 0) {
+            if (!gen_expr(node_lhs[node]))
+                return 0;
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
+        }
+        asm_push(OP_JAL, REG_RA, 0, 0, -(node_val[node] + 1));
+        return 1;
+    }
+    if (kind == NODE_IF) {
+        /* if の作り方:
+         *   条件を計算 (結果は t1)
+         *   beq t1, zero, L_else (または L_end)  (0 なら飛ぶ)
+         *   成り立つときの文...
+         *   (else がある場合) jal zero, L_end
+         * L_else:
+         *   else の文...
+         * L_end:
+         * 飛び先の書き直しは while と同じやり方 */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        int beq_index = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int then_body = node_rhs[node];
+        for (int s = then_body; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+        int else_body = node_val[node];
+        if (else_body < 0) {
+            /* else 無し: ここが L_end */
+            asm_imm[beq_index] = nasm;
+            return 1;
+        }
+        /* else あり: 本体を飛び越えるジャンプを置き、
+         * beq の飛び先 (else の頭) を確定させる */
+        int jal_index = nasm;
+        asm_push(OP_JAL, 0, 0, 0, 0);
+        asm_imm[beq_index] = nasm;
+        for (int s = else_body; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+        asm_imm[jal_index] = nasm;
+        return 1;
+    }
+    if (kind == NODE_WHILE) {
+        int l_cond = nasm;  /* 条件判定の命令番号 */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        /* beq t1, zero, L_end -- 飛び先はまだ分からないので
+         * 仮に 0 を入れておき、下で書き直す */
+        int beq_index = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int body = node_rhs[node];
+        for (int s = body; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+        /* jal zero, L_cond -- 条件の判定に戻る */
+        asm_push(OP_JAL, 0, 0, 0, l_cond);
+        /* ここ (末尾) が L_end。beq の飛び先を書き直す */
+        asm_imm[beq_index] = nasm;
+        return 1;
+    }
+    errmsg = "内部エラー: 知らない種類の文です";
+    return 0;
+}
+
+/* スタックの天井の住所 (第2層が2パス間で確定させる)。
+ * スタックはバイナリの後ろの空き地に置き、下へ伸ばす */
+static unsigned int stack_top_addr;
+
+/* 関数1つ分の命令列を作る: 入口の決まり文句 (プロローグ)
+ * → 本体 → 出口の決まり文句 (エピローグ)。
+ *   プロローグ: スタックに場所を取り、戻り先 ra を退避。
+ *               引数があれば a0 から引数の変数へ写す
+ *   エピローグ: ra をスタックから戻し、場所を返して、
+ *               jalr で呼び出し側へ戻る
+ * ra を退避するのが肝心で、これがあるから関数の中で
+ * さらに別の関数を呼んでも (ra が上書きされても)
+ * 自分の戻り先を失わない。失敗したら 0 */
+static int gen_func(int f) {
+    func_entry[f] = nasm;
+    /* addi sp, sp, -16 / sd ra, 8(sp) */
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+    asm_push(OP_SD, 0, REG_SP, REG_RA, 8);
+    if (func_has_param[f]) {
+        /* addi 引数の変数, a0, 0 -- 引数を受け取る */
+        asm_push(OP_ADDI, var_reg(func_param_var[f]), REG_A0, 0, 0);
+    }
+    for (int s = func_body[f]; s != -1; s = node_next[s]) {
+        if (!gen_stmt(s))
+            return 0;
+    }
+    /* ld ra, 8(sp) / addi sp, sp, 16 / jalr zero, ra, 0 */
+    asm_push(OP_LD, REG_RA, REG_SP, 0, 8);
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+    asm_push(OP_JALR, 0, REG_RA, 0, 0);
+    return 1;
+}
+
+/* スタックが要るかどうかを、AST を歩いて先に調べる。
+ * 要るのは「関数がある」か「右の子が葉でない二項演算が
+ * ある (評価に退避が要る)」場合。その場合だけ gen_all が
+ * sp の用意を出すので、要らないプログラムの出力は
+ * 従来と1バイトも変わらない */
+static int stack_needed;
+
+static int expr_needs_stack(int node) {
+    int k = node_kind[node];
+    if (k == NODE_ADD || k == NODE_SUB || k == NODE_AND ||
+        k == NODE_EQ || k == NODE_NE || k == NODE_MUL ||
+        k == NODE_DIV || k == NODE_LT || k == NODE_GT ||
+        k == NODE_LE || k == NODE_GE) {
+        if (!is_leaf(node_rhs[node]))
+            return 1;
+        return expr_needs_stack(node_lhs[node]) ||
+               expr_needs_stack(node_rhs[node]);
+    }
+    if (k == NODE_DEREF)
+        return expr_needs_stack(node_lhs[node]);
+    if (k == NODE_INDEX)
+        return expr_needs_stack(node_rhs[node]);
+    return 0;
+}
+
+static int list_needs_stack(int head);  /* 相互に使うので先行宣言 */
+
+static int stmt_needs_stack(int node) {
+    int k = node_kind[node];
+    if (k == NODE_ASSIGN || k == NODE_PUTC)
+        return expr_needs_stack(node_lhs[node]);
+    if (k == NODE_WHILE)
+        return expr_needs_stack(node_lhs[node]) ||
+               list_needs_stack(node_rhs[node]);
+    if (k == NODE_IF)
+        return expr_needs_stack(node_lhs[node]) ||
+               list_needs_stack(node_rhs[node]) ||
+               (node_val[node] >= 0 &&
+                list_needs_stack(node_val[node]));
+    if (k == NODE_CALL)
+        return node_lhs[node] >= 0 &&
+               expr_needs_stack(node_lhs[node]);
+    if (k == NODE_STORE)
+        return expr_needs_stack(node_rhs[node]);
+    if (k == NODE_INDEX_STORE)
+        /* 値が葉でない書き込みは、住所の退避にスタックを使う */
+        return expr_needs_stack(node_lhs[node]) ||
+               !is_leaf(node_rhs[node]) ||
+               expr_needs_stack(node_rhs[node]);
+    return 0;
+}
+
+static int list_needs_stack(int head) {
+    for (int s = head; s != -1; s = node_next[s]) {
+        if (stmt_needs_stack(s))
+            return 1;
+    }
+    return 0;
+}
+
+/* 命令列を全部作る (1回分): 土台 (UART の住所) → (関数が
+ * あれば) スタックの用意 → 文の並び → 最後の式 (あれば) →
+ * UART へ書く → 止まる → その後に関数の本体を並べる。
+ * 関数の本体は「止まる」の後ろに置くので、上から実行して
+ * 関数の中に落ちてくることはない (関数は呼び出しでのみ入る)。
+ * 最後に、呼び出しの飛び先 (負数の印) を関数の入口番号へ
+ * 書き直す。失敗したら 0 */
+static int gen_all(void) {
+    nasm = 0;
+    if (!target_kosaba) {
+        /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る
+         * (KosabaOS ターゲットでは UART を直接触らないので不要) */
+        asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
+    }
+    if (stack_needed && !target_kosaba) {
+        /* スタックの用意: 天井の住所を sp に作る
+         * (要らないプログラムでは出さない。昔のプログラムの
+         * 出力が変わらないようにするため。KosabaOS では
+         * スタックは OS が用意するので、これも出さない) */
+        gen_load_addr(REG_SP, stack_top_addr);
+    }
+    for (int s = prog_stmts; s != -1; s = node_next[s]) {
+        if (!gen_stmt(s))
+            return 0;
+    }
+    if (prog_has_final) {
+        if (!gen_expr(prog_final))
+            return 0;
+        if (target_kosaba) {
+            /* 最後の式の出力も putc システムコールで */
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
+            asm_push(OP_ADDI, REG_A7, REG_ZERO, 0, 1);
+            asm_push(OP_ECALL, 0, 0, 0, 0);
+        } else {
+            /* sb t1, 0(t0) -- 最後の式の下1バイトを UART へ */
+            asm_push(OP_SB, 0, REG_T0, REG_T1, 0);
+        }
+    }
+    if (prog_main >= 0) {
+        /* main の形 (v12): 入口として main を呼ぶ。
+         * 飛び先は通常の呼び出しと同じ印 (-(番号+1)) で置き、
+         * この後の一括書き直しで確定する。main から戻ると
+         * ra の指す次の命令 = 終わりの命令に落ちる。
+         * main の入口では、戻り先が ra に入っているのを
+         * 通常の関数と同じく退避するので、呼び出しの作法
+         * そのままで動く */
+        asm_push(OP_JAL, REG_RA, 0, 0, -(prog_main + 1));
+    }
+    if (target_kosaba) {
+        /* KosabaOS: exit システムコール (番号 3) で終わる。
+         * 戻ってくることはない。シェルから起動された場合は
+         * シェルへ、'u' で起動された場合はカーネルへ戻る */
+        asm_push(OP_ADDI, REG_A7, REG_ZERO, 0, 3);
+        asm_push(OP_ECALL, 0, 0, 0, 0);
+    } else {
+        /* wfi -- 止まる */
+        asm_push(OP_WFI, 0, 0, 0, 0);
+    }
+    for (int f = 0; f < nfunc; f++) {
+        if (!gen_func(f))
+            return 0;
+    }
+    /* 呼び出しの飛び先を書き直す (印: -(関数番号+1)) */
+    for (int i = 0; i < nasm; i++) {
+        if (asm_op[i] == OP_JAL && asm_imm[i] < 0)
+            asm_imm[i] = func_entry[-asm_imm[i] - 1];
+    }
+    return 1;
+}
+
+/* プログラム全体の生成。文字列の住所を確定させるため、
+ * 生成を2回行う (2パス生成):
+ *   1回目: 命令の個数を数えることが目的。この時点では
+ *          文字列の住所は仮の値だが、住所を作る命令の
+ *          個数 (lui + addi) は本物と同じになる
+ *   住所の確定: 文字列はコードの後ろに並ぶので、
+ *          住所 = LOAD_BASE + 命令数 x 4 + プール内の位置
+ *   2回目: 確定した住所で作り直す。これが最終成果になる */
+static int gen_program(void) {
+    code_insts = 0;
+    /* スタックが要るかは生成の前に AST から決める */
+    stack_needed = nfunc > 0 || list_needs_stack(prog_stmts) ||
+                   (prog_has_final && expr_needs_stack(prog_final));
+    for (int f = 0; f < nfunc && !stack_needed; f++)
+        stack_needed = list_needs_stack(func_body[f]);
+    stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */
+    for (int i = 0; i < narr; i++)
+        arr_addr[i] = LOAD_BASE;  /* 同上 (配列の住所も仮置き) */
+    if (!gen_all())
+        return 0;
+    code_insts = nasm;
+    for (int i = 0; i < nstr; i++)
+        str_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
+                      (unsigned int)str_off[i];
+    /* 配列の領域は文字列の後ろに置く */
+    for (int i = 0; i < narr; i++)
+        arr_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
+                      (unsigned int)str_used +
+                      (unsigned int)arr_off[i];
+    /* スタックは「コード + 文字列 + 配列」の後ろ 4KB 先から
+     * 下へ伸ばす。16 バイト単位に切り上げておく
+     * (置き場所の約束) */
+    stack_top_addr = LOAD_BASE + (unsigned int)nasm * 4u +
+                     (unsigned int)str_used +
+                     (unsigned int)arr_used + 4096u;
+    stack_top_addr = (stack_top_addr + 15u) & ~15u;
+    if (!gen_all())
+        return 0;
+    return 1;
+}
+

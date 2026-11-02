@@ -2,7 +2,8 @@
 # build-kosaba.sh -- iwac 自体を KosabaOS のユーザープログラム
 # (iwac.elf) としてビルドする (v15)
 #
-# iwac.c には手を入れない。横に置く3つのファイルで舞台を変える:
+# iwac 本体 (../src/ の断片) には手を入れない。横に置く
+# 3つのファイルで舞台を変える:
 #   kosaba_crt.S  入口 _start。決め打ちの argv
 #                 { "iwac", "--kosaba", "hello.c" } を合成して
 #                 main を呼び、最後に exit システムコールで帰る
@@ -36,9 +37,13 @@ fi
 CC=${CC:-riscv64-linux-gnu-gcc}
 echo "build-kosaba: CC=$CC"
 
+# 本体は src/ の断片を番号順に連結して1つの翻訳単位にする
+# (ホスト版の build.sh と同じ約束)
+cat ../src/0*.c > iwac_all.c
+
 # -mcmodel=medany / -ffreestanding / -nostdlib は OS の
 # ユーザープログラムと同じ決め事 (0x40000000 に置かれるため)
 "$CC" -march=rv64gc -mabi=lp64 -mcmodel=medany -ffreestanding \
     -nostdlib -no-pie -Wl,--build-id=none -O2 \
-    -T kosaba.ld -o iwac.elf ../iwac.c kosaba_lib.c kosaba_crt.S
+    -T kosaba.ld -o iwac.elf iwac_all.c kosaba_lib.c kosaba_crt.S
 echo "build-kosaba: iwac.elf を作りました"

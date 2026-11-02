@@ -46,17 +46,19 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 echo "build: CC=$CC"
-"$CC" -std=c11 -Wall -Wextra -O2 -o "$TMP/iwac" iwac.c
+cat src/0*.c > "$TMP/iwac_all.c"
+"$CC" -std=c11 -Wall -Wextra -O2 -o "$TMP/iwac" "$TMP/iwac_all.c"
 IWAC="$TMP/iwac"
 
-# 約束の確認: iwac.c にプリプロセッサ行 (#include や #define
-# など、行頭の #) が無いこと。「まだ作っていないものを
-# 使って作らない」という決まり (doc/design.md 6章)
-if grep -q '^[[:space:]]*#' iwac.c; then
-    echo "FAIL: iwac.c にプリプロセッサ行がある" >&2
+# 約束の確認: iwac 本体 (src/ の断片) にプリプロセッサ行
+# (#include や #define など、行頭の #) が無いこと。
+# 「まだ作っていないものを使って作らない」という決まり
+# (doc/design.md 6章)
+if grep -q '^[[:space:]]*#' src/0*.c; then
+    echo "FAIL: iwac 本体 (src/) にプリプロセッサ行がある" >&2
     exit 1
 fi
-echo "ok: iwac.c にプリプロセッサ行が無い"
+echo "ok: iwac 本体 (src/) にプリプロセッサ行が無い"
 
 fail() {
     echo "FAIL: $1" >&2
