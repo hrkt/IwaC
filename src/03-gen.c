@@ -1178,12 +1178,25 @@ static int gen_all(void) {
  * 生成を2回行う (2パス生成):
  *   1回目: 命令の個数を数えることが目的。この時点では
  *          文字列の住所は仮の値だが、住所を作る命令の
- *          個数 (lui + addi) は本物と同じになる
- *   住所の確定: 文字列はコードの後ろに並ぶので、
- *          住所 = LOAD_BASE + 命令数 x 4 + プール内の位置
+ *          個数 (auipc + addi) は本物と同じになる
+ *   住所の確定: 静的データの先頭 (data_base) を決める。
+ *          ベアメタルではコードの後ろ (LOAD_BASE +
+ *          命令数 x 4)、KosabaOS ではデータ領域
+ *          0x40200000 (v24)。文字列・配列・グローバル・
+ *          argv は data_base からの並びで住所が決まる
  *   2回目: 確定した住所で作り直す。これが最終成果になる */
 static int gen_program(void) {
     code_insts = 0;
+    /* 宣言だけで定義のない関数が呼ばれていたら、ここで
+     * 止める (v24)。行き先のない呼び出しは作れない。
+     * 外部の関数は、ソースの連結で定義が一緒に入って
+     * くる形でのみ解決する (v26 のランタイム結合) */
+    for (int f = 0; f < nfunc; f++) {
+        if (func_called[f] && !func_has_body[f]) {
+            errmsg = "定義のない関数が呼ばれています (宣言だけの関数です)";
+            return 0;
+        }
+    }
     /* スタックが要るかは生成の前に AST から決める */
     stack_needed = nfunc > 0 || list_needs_stack(prog_stmts) ||
                    (prog_has_final && expr_needs_stack(prog_final));
@@ -1202,21 +1215,33 @@ static int gen_program(void) {
     if (!gen_all())
         return 0;
     code_insts = nasm;
+    /* 静的データ (文字列 → 配列 → グローバル → argv) の
+     * 置き場所の先頭 (v24 でターゲット別になった):
+     *   ベアメタル: コードの後ろ (従来どおり連続配置)
+     *   KosabaOS  : OS のデータ領域 0x40200000。コード
+     *               領域 (0x40000000、読み・実行のみ) と
+     *               分けることで、静的データへの書き
+     *               込みが OS 上でもできるようになる
+     *               (ELF は PT_LOAD 2本で申告する) */
+    unsigned int data_base;
+    if (target_kosaba)
+        data_base = 0x40200000u;
+    else
+        data_base = LOAD_BASE + (unsigned int)nasm * 4u;
     for (int i = 0; i < nstr; i++)
-        str_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
-                      (unsigned int)str_off[i];
+        str_addr[i] = data_base + (unsigned int)str_off[i];
     /* 配列の領域は文字列の後ろに置く */
     for (int i = 0; i < narr; i++)
-        arr_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
-                      (unsigned int)str_used +
+        arr_addr[i] = data_base + (unsigned int)str_used +
                       (unsigned int)arr_off[i];
     /* グローバル変数の領域は配列の後ろ (v21)。
-     * 8 バイトずつ、初期値は 0 (バイナリには含めず、
-     * kosaba では memsz の差分としてゼロ埋めさせる。
-     * ベアメタルでは RAM の更地なので 0 とは限らない
-     * が、プログラムは代入してから使う約束) */
-    globals_base = LOAD_BASE + (unsigned int)nasm * 4u +
-                   (unsigned int)str_used +
+     * 8 バイトずつ。初期値のあるものは encode が初期
+     * イメージとして埋め、無いものは 0 で始まる
+     * (kosaba では memsz の差分としてゼロ埋めされる。
+     * ベアメタルでは初期イメージが無い場合、RAM の
+     * 更地なので 0 とは限らない。プログラムは代入
+     * してから使う約束) */
+    globals_base = data_base + (unsigned int)str_used +
                    (unsigned int)arr_used;
     /* main の決め打ち argv はグローバルの後ろ (v22)。
      * 要るのは KosabaOS ターゲットで main が引数を

@@ -139,6 +139,15 @@ static int var_owner[256];
 static int var_slot[256];
 static int var_bsize[256];
 static int var_plevel[256];
+/* グローバル変数の初期値 (v24): ファイル範囲の宣言の
+ * 初期化子を定数として記録し、静的領域の初期イメージ
+ * としてバイナリに埋めるための情報。
+ *   var_init_kind[i]: 0 = 初期値なし、1 = 数値、
+ *                     2 = 文字列 (値はその住所になる)
+ *   var_init_val[i] : 数値そのもの、または文字列番号 */
+static int var_init_kind[256];
+static long var_init_val[256];
+static int has_var_inits;  /* 初期値つきグローバルがあるか */
 static int nvar;       /* 登録された変数の数 (全スコープ合計) */
 static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
 static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
@@ -210,6 +219,7 @@ static int define_var_typed(char *name, int len, int bsize,
     var_owner[i] = parse_cur_func;
     var_bsize[i] = bsize;
     var_plevel[i] = plevel;
+    var_init_kind[i] = 0;  /* 初期値は宣言側が後で付ける */
     if (parse_cur_func >= 0)
         var_slot[i] = func_nlocals[parse_cur_func]++;
     else
@@ -252,6 +262,13 @@ static int func_nparams[16];
 static int func_param_var[16][4];
 static int func_body[16];
 static int func_entry[16];
+/* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
+ *   func_has_body[i]: 本体まで読めたら 1
+ *   func_called[i]  : 呼び出しが現れたら 1。最後まで
+ *                     本体が無い関数が呼ばれていたら、
+ *                     生成の入口でエラーにする */
+static int func_has_body[16];
+static int func_called[16];
 /* func_nlocals[16] : フレームの枠数 (引数を含む、v21)。
  * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
@@ -623,6 +640,7 @@ static int parse_call_list(int f, int *head_out) {
         errmsg = "引数の数が関数の定義と合いません";
         return 0;
     }
+    func_called[f] = 1;  /* 呼ばれた印 (未定義検査用、v24) */
     *head_out = head;
     return 1;
 }
@@ -1261,10 +1279,15 @@ static int parse_type(void) {
     return 1;
 }
 
-/* 関数定義を読む: 型 名前 ( [引数の並び] ) { 文の並び }
+/* 関数定義、またはプロトタイプ (宣言) を読む:
+ *   型 名前 ( [引数の並び] ) { 文の並び }   定義
+ *   型 名前 ( [引数の並び] ) ;              宣言だけ (v24)
  * 成功したら 1、失敗したら 0。関数は本体を読む前に名簿へ
  * 載せるので、自分自身を呼ぶ (再帰の) 形も読める。
- * 引数は4つまで (v22)。引数の名前は変数として名簿に載る */
+ * 宣言が先にあれば、定義はその名簿の続きとして読む。
+ * 相互再帰 (互いを呼び合う関数) は宣言で可能になる。
+ * 引数は4つまで (v22)。定義では引数の名前が変数として
+ * 名簿に載る。宣言では名前は省略でき、あっても捨てる */
 static int parse_funcdef(void) {
     if (!parse_type()) {
         errmsg = "関数は 型 名前 ( 引数 ) { } の形で書きます";
@@ -1279,36 +1302,49 @@ static int parse_funcdef(void) {
     int name_len = ident_len;
     for (int i = 0; i < name_len; i++)
         name_buf[i] = ident_buf[i];
-    if (find_func(name_buf, name_len) >= 0) {
-        errmsg = "同じ名前の関数が二つあります";
-        return 0;
+    /* 名簿にあれば、その関数の続き (宣言済みなら定義が
+     * 来たことになる、v24)。本体が既にあれば二重定義 */
+    int f = find_func(name_buf, name_len);
+    int is_new = 0;
+    if (f >= 0) {
+        if (func_has_body[f]) {
+            errmsg = "同じ名前の関数が二つあります";
+            return 0;
+        }
+    } else {
+        if (nfunc >= 16) {
+            errmsg = "関数は16個までです";
+            return 0;
+        }
+        f = nfunc++;
+        is_new = 1;
+        for (int i = 0; i < name_len; i++)
+            func_names[f][i] = name_buf[i];
+        func_name_len[f] = name_len;
+        func_nparams[f] = 0;
+        func_body[f] = -1;
+        func_nlocals[f] = 0;
+        func_has_body[f] = 0;
+        func_called[f] = 0;
     }
-    if (nfunc >= 16) {
-        errmsg = "関数は16個までです";
-        return 0;
-    }
-    int f = nfunc++;
-    for (int i = 0; i < name_len; i++)
-        func_names[f][i] = name_buf[i];
-    func_name_len[f] = name_len;
-    func_nparams[f] = 0;
-    func_body[f] = -1;
-    func_nlocals[f] = 0;
-    /* 引数と本体の解析の間は、この関数が「今いる場所」
-     * になる (ローカル変数の持ち主、v21) */
-    int save_cur_func = parse_cur_func;
-    parse_cur_func = f;
-
     if (!expect_char('(', "関数名の後には ( が必要です"))
         return 0;
+    /* 引数はまず「型と名前」を集めるだけにする。変数
+     * としての登録は、本体のある定義だと分かった後で
+     * 行う (宣言だけのプロトタイプでは、引数の名前は
+     * 意味を持たないため。名前の省略も宣言では許す) */
+    char pnames[4][32];
+    int plens[4];
+    int pbs[4];
+    int ppl[4];
+    int np = 0;
     skip_spaces();
     if (*cur == ')') {
         cur++;  /* 引数なし */
     } else {
-        /* 引数の並び: 型 名前 (, 型 名前)* (v22 で複数に)。
-         * 名前は引数の変数として登録される */
+        /* 引数の並び: 型 [名前] (, 型 [名前])* (v22 で複数) */
         for (;;) {
-            if (func_nparams[f] >= 4) {
+            if (np >= 4) {
                 errmsg = "引数は4つまでです";
                 return 0;
             }
@@ -1318,23 +1354,18 @@ static int parse_funcdef(void) {
                 errmsg = "引数は 型 名前 の形で書きます";
                 return 0;
             }
+            pbs[np] = parse_type_bsize;
+            ppl[np] = parse_type_plevel;
+            plens[np] = 0;
             skip_spaces();
-            if (!parse_ident()) {
-                errmsg = "引数の名前が必要です";
-                return 0;
+            if (is_ident_start(*cur)) {
+                if (!parse_ident())
+                    return 0;
+                plens[np] = ident_len;
+                for (int i = 0; i < ident_len; i++)
+                    pnames[np][i] = ident_buf[i];
             }
-            char pname[32];
-            int plen = ident_len;
-            for (int i = 0; i < plen; i++)
-                pname[i] = ident_buf[i];
-            /* 引数は宣言なので、型の情報を持って登録する */
-            int var = define_var_typed(pname, plen,
-                                       parse_type_bsize,
-                                       parse_type_plevel, 1);
-            if (var < 0)
-                return 0;
-            func_param_var[f][func_nparams[f]] = var;
-            func_nparams[f]++;
+            np++;
             skip_spaces();
             if (*cur == ',') {
                 cur++;
@@ -1344,6 +1375,35 @@ static int parse_funcdef(void) {
         }
         if (!expect_char(')', "引数の後には ) が必要です"))
             return 0;
+    }
+    if (!is_new && func_nparams[f] != np) {
+        errmsg = "宣言と定義で引数の数が合いません";
+        return 0;
+    }
+    func_nparams[f] = np;
+    skip_spaces();
+    if (*cur == ';') {
+        /* プロトタイプ (宣言だけ、v24)。本体は後から
+         * 定義されてもよいし、最後まで無ければ外部の
+         * 関数として、呼び出しが残れば生成でエラー */
+        cur++;
+        return 1;
+    }
+    if (!expect_char('{', "関数の本体は { で始めるか、宣言は ; で終えます"))
+        return 0;
+    /* 定義: 引数の変数を登録する (名前が必須) */
+    int save_cur_func = parse_cur_func;
+    parse_cur_func = f;
+    for (int k = 0; k < np; k++) {
+        if (plens[k] == 0) {
+            errmsg = "引数の名前が必要です";
+            return 0;
+        }
+        int var = define_var_typed(pnames[k], plens[k], pbs[k],
+                                   ppl[k], 1);
+        if (var < 0)
+            return 0;
+        func_param_var[f][k] = var;
     }
     /* main という名前の関数は特別扱い (v12): プログラムの
      * 入口になる。入口そのものの生成は gen_all が行う
@@ -1355,8 +1415,6 @@ static int parse_funcdef(void) {
         name_buf[2] == 'i' && name_buf[3] == 'n') {
         prog_main = f;
     }
-    if (!expect_char('{', "関数の本体は { で始めます"))
-        return 0;
     int save_in_func = parse_in_func;
     parse_in_func = 1;
     int body = parse_stmt_list(1);
@@ -1365,6 +1423,7 @@ static int parse_funcdef(void) {
     if (body == -2)
         return 0;
     func_body[f] = body;
+    func_has_body[f] = 1;
     return 1;
 }
 
@@ -1470,6 +1529,14 @@ static int parse_stmt_list(int in_brace) {
                     int stmt = parse_stmt();
                     if (stmt < 0)
                         return -2;
+                    if (!in_brace) {
+                        /* トップレベルの宣言は実行文では
+                         * ないので、文の並びには入れない
+                         * (v24)。これで宣言と main が
+                         * 混在できる。初期化の値は初期
+                         * イメージに記録済み */
+                        continue;
+                    }
                     if (head < 0)
                         head = stmt;
                     else
@@ -1557,6 +1624,71 @@ static int parse_stmt_list(int in_brace) {
     }
 }
 
+/* 定数式を評価する (v24): ファイル範囲の初期化子の値を、
+ * コンパイルの時点で計算するための小さな評価器。扱える
+ * のは数、文字列、単項 - !、二項の算術・ビット演算だけ
+ * (変数や呼び出しは定数ではない)。戻り値: 1 = 数値定数
+ * (*out に値)、2 = 文字列 (*out に文字列番号。実際の値は
+ * 文字列の住所で、生成のときに決まる)、0 = 定数でない */
+static int eval_const(int node, long *out) {
+    int k = node_kind[node];
+    if (k == NODE_NUM) {
+        *out = node_val[node];
+        return 1;
+    }
+    if (k == NODE_STR) {
+        *out = node_val[node];
+        return 2;
+    }
+    if (k == NODE_NEG) {
+        if (eval_const(node_lhs[node], out) != 1)
+            return 0;
+        *out = -*out;
+        return 1;
+    }
+    if (k == NODE_NOT) {
+        if (eval_const(node_lhs[node], out) != 1)
+            return 0;
+        *out = *out == 0 ? 1 : 0;
+        return 1;
+    }
+    if (k == NODE_ADD || k == NODE_SUB || k == NODE_MUL ||
+        k == NODE_DIV || k == NODE_MOD || k == NODE_SHL ||
+        k == NODE_SHR || k == NODE_AND || k == NODE_OR ||
+        k == NODE_XOR) {
+        long l, r;
+        if (eval_const(node_lhs[node], &l) != 1 ||
+            eval_const(node_rhs[node], &r) != 1)
+            return 0;
+        if (k == NODE_ADD)
+            *out = l + r;
+        else if (k == NODE_SUB)
+            *out = l - r;
+        else if (k == NODE_MUL)
+            *out = l * r;
+        else if (k == NODE_DIV) {
+            if (r == 0)
+                return 0;
+            *out = l / r;
+        } else if (k == NODE_MOD) {
+            if (r == 0)
+                return 0;
+            *out = l % r;
+        } else if (k == NODE_SHL)
+            *out = l << r;
+        else if (k == NODE_SHR)
+            *out = l >> r;
+        else if (k == NODE_AND)
+            *out = l & r;
+        else if (k == NODE_OR)
+            *out = l | r;
+        else
+            *out = l ^ r;
+        return 1;
+    }
+    return 0;
+}
+
 /* 宣言の文を読む (v21 で変数宣言を追加):
  *   型 名前 [ 大きさ ] ;         配列の宣言 (要素の大きさは
  *   型 名前 [ 行 ] [ 列 ] ;       型から決まる、v23。2次元も)
@@ -1634,6 +1766,22 @@ static int parse_decl_stmt(void) {
             return -1;
         if (!expect_char(';', "宣言の終わりには ; が必要です"))
             return -1;
+        if (parse_cur_func < 0) {
+            /* ファイル範囲の初期化 (v24): 値は実行コード
+             * ではなく、静的領域の初期イメージに埋める。
+             * 埋められるのは定数だけ (C の作法と同じ)。
+             * ノードは「何もしない」宣言として返す */
+            long v;
+            int kind = eval_const(expr, &v);
+            if (kind == 0) {
+                errmsg = "ファイル範囲の初期化子は定数 (数や文字列) だけです";
+                return -1;
+            }
+            var_init_kind[var] = kind;
+            var_init_val[var] = v;
+            has_var_inits = 1;
+            return new_node(NODE_VDECL, var, 0, 0);
+        }
         return new_node(NODE_ASSIGN, var, expr, 0);
     }
     if (*cur == ';') {
@@ -2088,6 +2236,7 @@ static int parse_program(char *program) {
     prog_final = -1;
     prog_has_final = 0;
     prog_main = -1;
+    has_var_inits = 0;
     lex_failed = 0;
     skip_spaces();
 

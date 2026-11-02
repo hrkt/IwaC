@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v23 まで</title>
+<title>IwaC の歩み — v0 から v24 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v23 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v24 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -343,7 +343,8 @@
   <a class="done" href="#v20">v20 制御構文の完成</a><span class="arrow">→</span>
   <a class="done" href="#v21">v21 変数のメモリ化</a><span class="arrow">→</span>
   <a class="done" href="#v22">v22 関数の完成</a><span class="arrow">→</span>
-  <a class="done" href="#v23">v23 配列の完成</a>
+  <a class="done" href="#v23">v23 配列の完成</a><span class="arrow">→</span>
+  <a class="done" href="#v24">v24 グローバル宣言とプロトタイプ</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1348,10 +1349,49 @@ void show(char **pp) {
   先読みのような「影の解析」は、本読みの文法が育つたびに追随が要ります。</p></div>
 </section>
 
+<!-- ================= v24 ================= -->
+<section class="phase" id="v24">
+  <div class="head"><span class="badge b-v4">v24</span><h2>グローバル宣言とプロトタイプ — 宣言の置き場所と、ELFの2分割</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の9段目。ファイルの頭に宣言を並べる C の普通の形を通すこと。</b></p>
+  <p>ファイル範囲の変数宣言が <code>main</code> と並べて書けるようになりました。
+  初期化子は定数だけを受け、コンパイルの時点で値を計算して、プログラムの
+  静的領域の「初期イメージ」としてバイナリに埋めます（実行時の代入コードには
+  なりません）。関数の宣言だけ（プロトタイプ）を先に書くこともでき、
+  互いを呼び合う関数（相互再帰）が書けるようになりました。宣言の引数は
+  型だけでもよく、定義の無い関数を呼んでいたら、生成の入口でエラーにします。</p>
+<pre class="code">int g = 60 + 5;                  // 定数式の初期化 → 65 が埋まる
+char *s = "Hi";                  // 文字列の住所が埋まる
+
+int is_odd(int n);               // 宣言だけ先に
+int is_even(int n) {
+  if (n == 0) { return 1; }
+  return is_odd(n - 1);          // 相互再帰
+}</pre>
+  <p>あわせて、KosabaOS 用の ELF を2つのセグメントに分けました。
+  コード（0x40000000、読み＋実行）とデータ（0x40200000、読み＋書き）です。
+  これまで静的データはコードと一緒の領域に載っていて、OS の上では
+  「読み取り専用の場所に書こうとして止まる」状態でした。分けたことで、
+  v22 で先送りにしていた確認が OS の上でできるようになり、
+  シェルから実行して <code>main</code> の引数（argc / argv）とグローバル
+  変数への書き込みが動くことを確かめました。</p>
+  <div class="chips">
+    <span class="chip">初期化子は定数だけ</span><span class="chip">初期イメージ</span>
+    <span class="chip">プロトタイプ</span><span class="chip">相互再帰</span>
+    <span class="chip">ELF は PT_LOAD 2本</span><span class="chip">データ領域 0x40200000</span>
+    <span class="chip">OS 実走で確認済み</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「宣言」は実行する文ではありません。文の並びから外す、という小さな
+  仕分けの変更だけで、宣言と main の混在が解けました。初期値も同じで、
+  「プログラムが始まる前に置かれている値」としてファイルに書いておけば、
+  実行コードで代入する必要はないのです。置き場所（メモリの領域）と
+  権限（読み書き可否）を分けて考えることが、OS との境目では効いてきます。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v23 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v24 時点）</p>
 </footer>
 
 </div>

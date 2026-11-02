@@ -41,6 +41,7 @@
 #   v21: 変数のメモリ化 (グローバル=静的領域、ローカル・引数=フレーム、宣言の文、単項 &)
 #   v22: 関数の完成 (引数4つ、戻り値、再帰、main の引数と決め打ち argv)
 #   v23: 配列の完成 (8バイト要素、2次元配列、ポインタの添字)
+#   v24: グローバル宣言とプロトタイプ (初期化子は初期イメージ、宣言だけの関数、ELF のデータセグメント分離)
 set -e
 cd "$(dirname "$0")"
 
@@ -578,15 +579,14 @@ check_error 'int f(int a, int b, int c, int d, int e) { return a; }' "引数5つ
 check_error 'int f(int a) { return a; } putc(f(1, 2));' "引数の数が合わない呼び出し"
 
 # --- v22: KosabaOS 向けの main 引数 (決め打ち argv) ---
-# ELF の memsz が filesz より 48 バイト大きいことで、argv の
+# ELF のデータセグメント (v24 で分離。2本目の LOAD) の
+# memsz が filesz より 48 バイト大きいことで、argv の
 # 置き場所 (文字列 24 + ポインタ配列 24) が確保されている
-# ことを確かめる。OS 上での実行確認は、静的データへの書き
-# 込みが要るため、ELF のデータセグメント分離 (v24) の後に
-# なる (現行の1セグメント構成では静的データが OS のコード
-# 領域 (読み・実行のみ) に載る既存課題。v21 のグローバル
-# 書き込みでも OS 上では同じくフォルトになることを確認済み)
+# ことを確かめる。OS 上での実行確認は v24 で済んだ
+# (データセグメント分離の後、Nish から run して argc と
+# グローバル書き込みが動くことを確認)
 "$IWAC" --kosaba 'int main(int argc, char **argv) { putc(64 + argc); }' > "$TMP/v22k.elf"
-set -- $(readelf -l "$TMP/v22k.elf" | awk '/LOAD/{getline; print $1, $2; exit}')
+set -- $(readelf -l "$TMP/v22k.elf" | awk '/LOAD/{n++; if (n == 2) {getline; print $1, $2; exit}}')
 [ $(( $2 - $1 )) -eq 48 ] || fail "v22: kosaba の argv 領域 (memsz - filesz) が 48 でない (filesz=$1 memsz=$2)"
 echo "ok: v22: kosaba の argv 領域 48 バイトが memsz に確保された"
 
@@ -611,5 +611,35 @@ check_tail "$TMP/v23h.bin" AB "v23: char** の添字は歩幅8 (argv の形)"
 check_run "$TMP/v23i.bin" D "v23: 添字が式"
 check_error 'char a[4]; putc(a[0][0]);' "1次元への二重添字"
 check_error 'x = 1; putc(x[0]);' "ポインタでない変数への添字"
+
+# --- v24: グローバル宣言とプロトタイプ ---
+"$IWAC" 'int g = 65; int main() { putc(g); }' > "$TMP/v24a.bin"
+check_run "$TMP/v24a.bin" A "v24: ファイル範囲の初期化つき宣言 (main と混在)"
+"$IWAC" 'int g = 60 + 5; int main() { putc(g); }' > "$TMP/v24b.bin"
+check_run "$TMP/v24b.bin" A "v24: 初期化子は定数式 (60 + 5)"
+"$IWAC" 'char *s = "Hi"; int main() { putc(*s); putc(*(s + 1)); }' > "$TMP/v24c.bin"
+check_tail "$TMP/v24c.bin" Hi "v24: 文字列の初期化 (値はその住所)"
+"$IWAC" 'int g = 65; int h = 66; int main() { putc(g); putc(h); g = 67; putc(g); }' > "$TMP/v24d.bin"
+check_tail "$TMP/v24d.bin" ABC "v24: 初期値つきが並び、後から書き換えもできる"
+"$IWAC" 'int is_odd(int n); int is_even(int n) { if (n == 0) { return 1; } return is_odd(n - 1); } int is_odd(int n) { if (n == 0) { return 0; } return is_even(n - 1); } int main() { putc(64 + is_even(10)); putc(64 + is_odd(7)); }' > "$TMP/v24e.bin"
+check_tail "$TMP/v24e.bin" AA "v24: プロトタイプで相互再帰"
+"$IWAC" 'int f(int); int f(int x) { return x + 1; } int main() { putc(f(64)); }' > "$TMP/v24f.bin"
+check_run "$TMP/v24f.bin" A "v24: 宣言の引数は名前なしでもよい"
+check_error 'int f(int x); int main() { putc(f(1)); }' "定義のない関数の呼び出し"
+check_error 'int g = 1; int h = g + 1; int main() { putc(65); }' "非定数のファイル範囲初期化子"
+check_error 'int f(int a, int b); int f(int a) { return a; }' "宣言と定義で引数の数が違う"
+
+# --- v24: KosabaOS の ELF は PT_LOAD 2本 (コードとデータ) ---
+"$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v24k.elf"
+[ "$(readelf -l "$TMP/v24k.elf" | grep -c 'LOAD')" -eq 2 ] || fail "v24: PT_LOAD が2本でない"
+readelf -l "$TMP/v24k.elf" | awk '/LOAD/{n++; getline; if (n == 1) code_ok = ($3 == "R" && $4 == "E"); if (n == 2) data_ok = ($3 == "RW")} END{exit !(code_ok && data_ok)}' || fail "v24: 1本目は R E、2本目は RW のはず"
+set -- $(readelf -l "$TMP/v24k.elf" | awk '/LOAD/{n++; if (n == 2) print $3; }')
+[ "$1" = "0x0000000040200000" ] || fail "v24: データセグメントの vaddr が 0x40200000 でない ($1)"
+echo "ok: v24: kosaba ELF は PT_LOAD 2本 (コード R+X / データ 0x40200000 R+W)"
+# 初期値つきグローバルの初期イメージがデータ側の実体に入る
+"$IWAC" --kosaba 'int g = 72; int main() { putc(g); }' > "$TMP/v24k2.elf"
+set -- $(readelf -l "$TMP/v24k2.elf" | awk '/LOAD/{n++; if (n == 2) {getline; print $1, $2; exit}}')
+[ $(( $1 )) -eq 8 ] || fail "v24: 初期イメージ (グローバル1個=8バイト) が filesz に無い (filesz=$1)"
+echo "ok: v24: 初期イメージがデータセグメントの実体に入った"
 
 echo "PASS"
