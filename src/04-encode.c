@@ -101,6 +101,38 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
                (7u << 12) | ((unsigned int)rd << 7) | 0x33u;
     }
+    if (op == OP_SLL) {
+        /* sll rd, rs1, rs2 -- R 形式 (v19)。funct3 が 1。
+         * シフト量は rs2 の下6ビット (RV64) */
+        return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (1u << 12) | ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_SRA) {
+        /* sra rd, rs1, rs2 -- R 形式 (v19)。funct7 が 0x20 で
+         * funct3 が 5。空いた上のビットには符号ビットが
+         * 入る (算術シフト)。論理シフト srl は funct7 が 0 */
+        return (0x20u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (5u << 12) |
+               ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_OR) {
+        /* or rd, rs1, rs2 -- R 形式 (v19)。funct3 が 6 */
+        return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (6u << 12) | ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_XOR) {
+        /* xor rd, rs1, rs2 -- R 形式 (v19)。funct3 が 4 */
+        return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (4u << 12) | ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_REM) {
+        /* rem rd, rs1, rs2 -- R 形式 (v19、M 拡張)。
+         * funct7 が 1 で funct3 が 6。除数が 0 のときは
+         * 被除数がそのまま残る (div と対の決まり) */
+        return (1u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (6u << 12) |
+               ((unsigned int)rd << 7) | 0x33u;
+    }
     if (op == OP_SLT) {
         /* slt rd, rs1, rs2 -- R 形式。sltu との違いは
          * funct3 が 2 (符号付きで比べる) */

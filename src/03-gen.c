@@ -51,6 +51,13 @@ static int OP_SLT = 18;  /* 符号付き比較: rs1 < rs2 なら 1
                           * (関係演算子用。SLTU と funct3 だけ違う) */
 static int OP_XORI = 19; /* 即値との XOR。1 との XOR は
                           * 「1か0の反転」に使える */
+static int OP_SLL = 21;  /* 左シフト (v19)。R 形式 funct3=1 */
+static int OP_SRA = 22;  /* 算術右シフト (v19)。funct3=5、
+                          * funct7=0x20 (符号を保つ) */
+static int OP_OR = 23;   /* ビット OR (v19)。funct3=6 */
+static int OP_XOR = 24;  /* ビット XOR (v19)。funct3=4 */
+static int OP_REM = 25;  /* 剰余 (v19、M 拡張)。funct7=1、
+                          * funct3=6。除数が 0 なら被除数が残る */
 static int OP_ECALL = 20; /* ecall (環境呼び出し)。KosabaOS
                            * ターゲットで OS のシステムコールを
                            * 呼ぶ命令。符号化は固定の1語 (v14) */
@@ -208,6 +215,87 @@ static int gen_expr(int node) {
         asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
         return 1;
     }
+    if (node_kind[node] == NODE_LAND) {
+        /* && (短絡評価): 左が 0 なら右は評価しない。
+         *   左を計算 (t1)
+         *   beq t1, zero, L_false (右を飛ばす)
+         *   右を計算 (t1)
+         *   sltu t1, zero, t1 (右の値を 1 か 0 に直す)
+         *   jal zero, L_end
+         * L_false: addi t1, zero, 0
+         * L_end:
+         * 左の値は分岐で消費されるので、退避は要らない */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        int f_jump = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        asm_push(OP_SLTU, REG_T1, REG_ZERO, REG_T1, 0);
+        int e_jump = nasm;
+        asm_push(OP_JAL, 0, 0, 0, 0);
+        asm_imm[f_jump] = nasm;
+        asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, 0);
+        asm_imm[e_jump] = nasm;
+        return 1;
+    }
+    if (node_kind[node] == NODE_LOR) {
+        /* || (短絡評価): 左が 0 でなければ右は評価しない。
+         *   左を計算 (t1)
+         *   beq t1, zero, L_rhs (右の評価へ)
+         *   addi t1, zero, 1
+         *   jal zero, L_end
+         * L_rhs: 右を計算 (t1)
+         *        sltu t1, zero, t1 (1 か 0 に直す)
+         * L_end: */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        int r_jump = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, 1);
+        int e_jump = nasm;
+        asm_push(OP_JAL, 0, 0, 0, 0);
+        asm_imm[r_jump] = nasm;
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        asm_push(OP_SLTU, REG_T1, REG_ZERO, REG_T1, 0);
+        asm_imm[e_jump] = nasm;
+        return 1;
+    }
+    if (node_kind[node] == NODE_NOT) {
+        /* !x: x が 0 のときだけ 1。sltiu t1, t1, 1 が
+         * 「1 未満か (符号なし)」=「0 か」になる */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_SLTIU, REG_T1, REG_T1, 0, 1);
+        return 1;
+    }
+    if (node_kind[node] == NODE_NEG) {
+        /* -x: 0 から引く (sub t1, zero, t1) */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_SUB, REG_T1, REG_ZERO, REG_T1, 0);
+        return 1;
+    }
+    if (node_kind[node] == NODE_PREINC ||
+        node_kind[node] == NODE_POSTINC ||
+        node_kind[node] == NODE_PREDEC ||
+        node_kind[node] == NODE_POSTDEC) {
+        /* ++ / --: 変数のレジスタを 1 つ増減させる。
+         * 前置は「増減させてから、その値」、後置は「今の
+         * 値を残してから増減」。結果はどちらも t1 に置く */
+        int reg = var_reg(node_val[node]);
+        int delta = (node_kind[node] == NODE_PREINC ||
+                     node_kind[node] == NODE_POSTINC) ? 1 : -1;
+        int pre = (node_kind[node] == NODE_PREINC ||
+                   node_kind[node] == NODE_PREDEC);
+        if (!pre)
+            asm_push(OP_ADDI, REG_T1, reg, 0, 0);
+        asm_push(OP_ADDI, reg, reg, 0, delta);
+        if (pre)
+            asm_push(OP_ADDI, REG_T1, reg, 0, 0);
+        return 1;
+    }
     /* 二項演算: まず左を t1 に */
     if (!gen_expr(node_lhs[node]))
         return 0;
@@ -236,6 +324,17 @@ static int gen_expr(int node) {
         asm_push(OP_MUL, REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_DIV)
         asm_push(OP_DIV, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_MOD)
+        asm_push(OP_REM, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_SHL)
+        asm_push(OP_SLL, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_SHR)
+        /* >> は算術シフト (符号を保つ) */
+        asm_push(OP_SRA, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_OR)
+        asm_push(OP_OR, REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_XOR)
+        asm_push(OP_XOR, REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_LT)
         /* slt: 左 (t1) < 右 (t2) なら 1 (符号付き比較) */
         asm_push(OP_SLT, REG_T1, REG_T1, REG_T2, 0);
@@ -281,6 +380,11 @@ static int gen_expr(int node) {
  * 使うのと同じことを、番号と書換えでやっている */
 static int gen_stmt(int node) {
     int kind = node_kind[node];
+    if (kind == NODE_PREINC || kind == NODE_POSTINC ||
+        kind == NODE_PREDEC || kind == NODE_POSTDEC) {
+        /* 増減文: 式として生成し、結果 (t1) は捨てる (v19) */
+        return gen_expr(node);
+    }
     if (kind == NODE_DECL) {
         /* 配列の宣言: 置き場所はコンパイラが静的に確保する
          * だけなので、実行時のコードは何も出ない */
@@ -467,12 +571,21 @@ static int expr_needs_stack(int node) {
     if (k == NODE_ADD || k == NODE_SUB || k == NODE_AND ||
         k == NODE_EQ || k == NODE_NE || k == NODE_MUL ||
         k == NODE_DIV || k == NODE_LT || k == NODE_GT ||
-        k == NODE_LE || k == NODE_GE) {
+        k == NODE_LE || k == NODE_GE || k == NODE_MOD ||
+        k == NODE_SHL || k == NODE_SHR || k == NODE_OR ||
+        k == NODE_XOR) {
         if (!is_leaf(node_rhs[node]))
             return 1;
         return expr_needs_stack(node_lhs[node]) ||
                expr_needs_stack(node_rhs[node]);
     }
+    if (k == NODE_LAND || k == NODE_LOR)
+        /* 短絡評価は左を退避しないが、中の式が退避を
+         * 要することはある */
+        return expr_needs_stack(node_lhs[node]) ||
+               expr_needs_stack(node_rhs[node]);
+    if (k == NODE_NOT || k == NODE_NEG)
+        return expr_needs_stack(node_lhs[node]);
     if (k == NODE_DEREF)
         return expr_needs_stack(node_lhs[node]);
     if (k == NODE_INDEX)

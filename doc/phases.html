@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v18 まで</title>
+<title>IwaC の歩み — v0 から v19 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v18 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v19 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -338,7 +338,8 @@
   <a class="done" href="#v15">v15 OS で動く iwac</a><span class="arr">→</span>
   <a class="done" href="#v16">v16 字句の完成</a><span class="arrow">→</span>
   <a class="done" href="#v17">v17 複数ファイル入力</a><span class="arrow">→</span>
-  <a class="done" href="#v18">v18 条件付きコンパイル</a>
+  <a class="done" href="#v18">v18 条件付きコンパイル</a><span class="arrow">→</span>
+  <a class="done" href="#v19">v19 演算子の完成</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1167,10 +1168,45 @@ $ iwac kosaba_rt.c iwac.c          ← 将来のセルフコンパイルの形</
   保ちます。</p></div>
 </section>
 
+<!-- ================= v19 ================= -->
+<section class="phase" id="v19">
+  <div class="head"><span class="badge b-v4">v19</span><h2>演算子の完成 — C の顔ぶれが揃う</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の4段目。iwac.c が使う演算子を全部使えるようにすること。</b></p>
+  <p><code>&lt;&lt;</code> <code>&gt;&gt;</code>、<code>|</code> <code>^</code>、<code>%</code>、
+  単項の <code>-</code> と <code>!</code>、<code>&amp;&amp;</code> <code>||</code>、
+  前置/後置の <code>++</code> <code>--</code> が入りました。
+  優先順位の段も C の全順序に揃え直しました
+  （<code>||</code> → <code>&amp;&amp;</code> → <code>|</code> → <code>^</code> → <code>&amp;</code> →
+  <code>==</code>/<code>!=</code> → 関係 → シフト → 加減 → 乗除・剰余 → 単項 → 後置 → 材料）。
+  <code>&amp;&amp;</code> と <code>||</code> は短絡評価です： 左が決め手になれば、右は評価されません
+  （<code>p &amp;&amp; *p</code> のような「まず確かめてから触る」書き方が安全に動きます）。
+  <code>&gt;&gt;</code> は算術シフトで、負の数をずらしても符号が保たれます。
+  <code>*p++</code> は <code>*(p++)</code> と読まれ、文字列を歩く書き方がそのまま通ります。</p>
+<pre class="code">s = "AB";
+putc(*s++);              // *(s++) — 読んでから進む
+i = 0;
+while (i &lt; 3 &amp;&amp; i != 1) {   // 短絡評価と後置 ++
+  putc(65 + i);
+  i++;
+}
+x = -1;                  // 単項マイナス
+putc(64 + (100 % 7));    // 剰余</pre>
+  <div class="chips">
+    <span class="chip">&lt;&lt; &gt;&gt; | ^ %</span><span class="chip">- !（単項）</span>
+    <span class="chip">&amp;&amp; || は短絡評価</span><span class="chip">++ --（文でも式でも）</span>
+    <span class="chip">優先順位は C の全順序</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  演算子を足す作業は、parse の段を増やすことと、生成の道具を増やすことの
+  2つに分かれます。<code>&amp;&amp;</code> だけは例外で、二項演算の形（両辺を計算してから
+  組み合わせる）では作れず、分岐で右側を飛ばす「制御の仕組み」で作りました。
+  式の中に制御が入る、というのは面白い境界です。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-02（v18 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v19 時点）</p>
 </footer>
 
 </div>

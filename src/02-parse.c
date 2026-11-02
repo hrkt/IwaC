@@ -48,6 +48,20 @@ static int NODE_LT = 21;    /* 関係演算子 (左 < 右)。結果は 1 か 0 *
 static int NODE_GT = 22;    /* 関係演算子 (左 > 右)。結果は 1 か 0 */
 static int NODE_LE = 23;    /* 関係演算子 (左 <= 右)。結果は 1 か 0 */
 static int NODE_GE = 24;    /* 関係演算子 (左 >= 右)。結果は 1 か 0 */
+static int NODE_SHL = 25;   /* 左シフト (<<) (v19) */
+static int NODE_SHR = 26;   /* 右シフト (>>)。符号付き (算術) (v19) */
+static int NODE_OR = 27;    /* ビット OR (|) (v19) */
+static int NODE_XOR = 28;   /* ビット XOR (^) (v19) */
+static int NODE_MOD = 29;   /* 剰余 (%) (v19) */
+static int NODE_NOT = 30;   /* 論理 NOT (!)。0 なら 1、それ以外は 0。
+                             * node_lhs = 相手の式 (v19) */
+static int NODE_NEG = 31;   /* 単項マイナス (-)。node_lhs = 相手 (v19) */
+static int NODE_LAND = 32;  /* 論理 AND (&&)。短絡評価で 1 か 0 (v19) */
+static int NODE_LOR = 33;   /* 論理 OR (||)。短絡評価で 1 か 0 (v19) */
+static int NODE_PREINC = 34;  /* 前置 ++。node_val = 変数番号 (v19) */
+static int NODE_POSTINC = 35; /* 後置 ++。node_val = 変数番号 (v19) */
+static int NODE_PREDEC = 36;  /* 前置 --。node_val = 変数番号 (v19) */
+static int NODE_POSTDEC = 37; /* 後置 --。node_val = 変数番号 (v19) */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
                              * node_val = 配列番号、node_lhs = 添字の式、
                              * node_rhs = 書く値の式 */
@@ -454,6 +468,7 @@ static int parse_string_node(void) {
  * expect_char も下で定義する道具の先行宣言 */
 static int parse_expr(void);
 static int parse_rel_expr(void);  /* eq の段から呼ばれる (v11) */
+static int parse_unary_expr(void); /* 単項の段 (v19)。文からも使う */
 static int expect_char(char c, char *msg);
 
 /* 式の材料 (primary) を1つ読む: 数、変数、文字列、
@@ -523,25 +538,9 @@ static int parse_primary_node(void) {
             return -1;
         return inner;
     }
-    if (*cur == '*') {
-        /* ポインタ読み: * の次は「住所を表すもの」。
-         * 変数なら、その変数が持つ住所 (ポインタ)。
-         * 数なら、その数そのものが住所になる (絶対アドレス
-         * 読み)。デバイスのレジスタは決まった住所にあるので、
-         * *0x10000005 と書けば LSR が読める (MMIO)。
-         * かっこで囲んだ式 (住所の計算結果) も相手にできる。
-         * * を重ねる (**) 形はまだ扱わない */
-        cur++;
-        skip_spaces();
-        int operand = parse_primary_node();
-        if (operand < 0)
-            return -1;
-        if (node_kind[operand] == NODE_DEREF) {
-            errmsg = "* を重ねる形 (**) はまだ扱えません";
-            return -1;
-        }
-        return new_node(NODE_DEREF, 0, operand, 0);
-    }
+    /* ポインタ読み (*) は v19 から単項の段 (parse_unary_expr)
+     * の仕事になった ( *p++ のような形を通すため)。
+     * ここ (材料) には演算子は来ない */
     if (is_ident_start(*cur)) {
         if (!parse_ident())
             return -1;
@@ -574,15 +573,114 @@ static int parse_primary_node(void) {
     return -1;
 }
 
-/* --- 式の優先順位 (v7 で C に合わせた) ---
+/* 後置の段 (v19): 材料の後ろに ++ / -- が付いたら包む。
+ * 相手は変数だけ (今のところ)。*p++ の p や、添字の中の
+ * i++ がここで読まれる */
+static int parse_postfix_expr(void) {
+    int node = parse_primary_node();
+    if (node < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        int kind;
+        if (cur[0] == '+' && cur[1] == '+')
+            kind = NODE_POSTINC;
+        else if (cur[0] == '-' && cur[1] == '-')
+            kind = NODE_POSTDEC;
+        else
+            return node;
+        if (node_kind[node] != NODE_VAR) {
+            errmsg = "++ / -- の相手は変数だけです";
+            return -1;
+        }
+        cur += 2;
+        node = new_node(kind, node_val[node], 0, 0);
+        if (node < 0)
+            return -1;
+    }
+}
+
+/* 単項の段 (v19): 頭に付く演算子。右結合 (相手も単項の段
+ * で読む) なので、- -x や !*p のような重なりが自然に読める。
+ *   ++x / --x   前置。相手は変数だけ
+ *   -x          符号の反転
+ *   !x          論理 NOT (0 なら 1、それ以外は 0)
+ *   *x          ポインタ読み (材料の段から引っ越してきた。
+ *               *p++ を「*(p++)」と読むため)。** はまだ扱わない */
+static int parse_unary_expr(void) {
+    skip_spaces();
+    if (cur[0] == '+' && cur[1] == '+') {
+        cur += 2;
+        int operand = parse_unary_expr();
+        if (operand < 0)
+            return -1;
+        if (node_kind[operand] != NODE_VAR) {
+            errmsg = "++ / -- の相手は変数だけです";
+            return -1;
+        }
+        return new_node(NODE_PREINC, node_val[operand], 0, 0);
+    }
+    if (cur[0] == '-' && cur[1] == '-') {
+        cur += 2;
+        int operand = parse_unary_expr();
+        if (operand < 0)
+            return -1;
+        if (node_kind[operand] != NODE_VAR) {
+            errmsg = "++ / -- の相手は変数だけです";
+            return -1;
+        }
+        return new_node(NODE_PREDEC, node_val[operand], 0, 0);
+    }
+    if (*cur == '-') {
+        cur++;
+        int operand = parse_unary_expr();
+        if (operand < 0)
+            return -1;
+        return new_node(NODE_NEG, 0, operand, 0);
+    }
+    if (*cur == '!' && cur[1] != '=') {
+        cur++;
+        int operand = parse_unary_expr();
+        if (operand < 0)
+            return -1;
+        return new_node(NODE_NOT, 0, operand, 0);
+    }
+    if (*cur == '*') {
+        /* ポインタ読み: * の次は「住所を表すもの」。
+         * 変数なら、その変数が持つ住所 (ポインタ)。
+         * 数なら、その数そのものが住所になる (絶対アドレス
+         * 読み)。デバイスのレジスタは決まった住所にあるので、
+         * *0x10000005 と書けば LSR が読める (MMIO)。
+         * かっこで囲んだ式 (住所の計算結果) も相手にできる */
+        cur++;
+        int operand = parse_unary_expr();
+        if (operand < 0)
+            return -1;
+        if (node_kind[operand] == NODE_DEREF) {
+            errmsg = "* を重ねる形 (**) はまだ扱えません";
+            return -1;
+        }
+        return new_node(NODE_DEREF, 0, operand, 0);
+    }
+    return parse_postfix_expr();
+}
+
+/* --- 式の優先順位 (v7 で C に合わせ、v19 で全段を揃えた) ---
  *
  * 演算子の結びの固さは C と同じ順にした。固い順に:
- *   * (ポインタ読み) と かっこ   … parse_primary_node
- *   * / (掛け算・割り算)        … parse_term_expr
- *   + -                         … parse_add_expr
- *   < > <= >=                   … parse_rel_expr (v11)
- *   == !=                       … parse_eq_expr
- *   &                           … parse_expr (一番外側)
+ *   材料 (数・変数・文字列・かっこ)  … parse_primary_node
+ *   後置 ++ --                     … parse_postfix_expr (v19)
+ *   単項 - ! * と前置 ++ --         … parse_unary_expr (v19)
+ *   * / % (掛け算・割り算・剰余)    … parse_term_expr
+ *   + -                            … parse_add_expr
+ *   << >> (シフト)                  … parse_shift_expr (v19)
+ *   < > <= >=                      … parse_rel_expr (v11)
+ *   == !=                          … parse_eq_expr
+ *   &                              … parse_bitand_expr (v19)
+ *   ^                              … parse_bitxor_expr (v19)
+ *   |                              … parse_bitor_expr (v19)
+ *   &&                             … parse_land_expr (v19)
+ *   ||                             … parse_expr (一番外側、v19)
  * 「固い」ほど先に (深く) 計算される。読み方は各段とも
  * 左結合: 演算子が来たら「今の木全体を左の子、新しい材料を
  * 右の子とする新しい根」を作る。"50+10+5" は ((50+10)+5)。
@@ -593,11 +691,12 @@ static int parse_primary_node(void) {
  * (v6 では、かっこが無い代わりに & を固くしていた。
  *  かっこが入ったので C の順に戻した) */
 
-/* 掛け算・割り算の段 (term) を読む。相手は材料 (primary)。
- * 演算子の * は、材料の頭に来る * (ポインタ読み) とは
- * 場所で見分ける: 材料を読んだ直後の * は掛け算 */
+/* 掛け算・割り算・剰余の段 (term) を読む。相手は単項の段。
+ * 演算子の * は、単項の頭に来る * (ポインタ読み) とは
+ * 場所で見分ける: 材料を読んだ直後の * は掛け算。
+ * % は剰余 (v19 で追加) */
 static int parse_term_expr(void) {
-    int lhs = parse_primary_node();
+    int lhs = parse_unary_expr();
     if (lhs < 0)
         return -1;
     for (;;) {
@@ -607,11 +706,13 @@ static int parse_term_expr(void) {
             kind = NODE_MUL;
         else if (*cur == '/')
             kind = NODE_DIV;
+        else if (*cur == '%')
+            kind = NODE_MOD;
         else
             return lhs;
         cur++;
         skip_spaces();
-        int rhs = parse_primary_node();
+        int rhs = parse_unary_expr();
         if (rhs < 0)
             return -1;
         lhs = new_node(kind, 0, lhs, rhs);
@@ -671,14 +772,41 @@ static int parse_eq_expr(void) {
     }
 }
 
+/* シフトの段 (v19): << >> を読む。足し算よりゆるく、
+ * 関係演算子より固い (C の順)。>> は符号付きの算術
+ * シフトとして生成する */
+static int parse_shift_expr(void) {
+    int lhs = parse_add_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        int kind;
+        if (cur[0] == '<' && cur[1] == '<')
+            kind = NODE_SHL;
+        else if (cur[0] == '>' && cur[1] == '>')
+            kind = NODE_SHR;
+        else
+            return lhs;
+        cur += 2;
+        skip_spaces();
+        int rhs = parse_add_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(kind, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
 /* 関係演算子の段 (v11): < > <= >= を読む。
- * C の優先順位では、足し算よりゆるく、== != より固い。
+ * C の優先順位では、シフトよりゆるく、== != より固い。
  * 例: "i + 1 < 10" は <(+(i, 1), 10)、"a < b == c" は
  * ==(<(a, b), c) という木になる (C と同じ読み)。
  * <= と >= は2文字で読む (< の次が = でも、代入や
  * == と取り違えないよう、ここでまとめて処理する) */
 static int parse_rel_expr(void) {
-    int lhs = parse_add_expr();
+    int lhs = parse_shift_expr();
     if (lhs < 0)
         return -1;
     for (;;) {
@@ -701,7 +829,7 @@ static int parse_rel_expr(void) {
             return lhs;
         cur += len;
         skip_spaces();
-        int rhs = parse_add_expr();
+        int rhs = parse_shift_expr();
         if (rhs < 0)
             return -1;
         lhs = new_node(kind, 0, lhs, rhs);
@@ -710,28 +838,108 @@ static int parse_rel_expr(void) {
     }
 }
 
-/* 式全体を読む。一番外側はビット演算 & の段 (C の
- * 優先順位で、iwac にある演算子の中では一番ゆるい)。
- * 例: "*s != 0" は !=(*s, 0)、"*p & 32 == 0" は
- * &(*p, ==(32, 0)) という木になる (C と同じ読み) */
-static int parse_expr(void) {
+/* ビット AND の段 (v19 で独立した段になった)。
+ * 例: "*p & 32 == 0" は &(*p, ==(32, 0)) という木になる
+ * (C と同じ読み)。&& は上の段 (論理 AND) の担当なので、
+ * ここでは手をつけずに返す */
+static int parse_bitand_expr(void) {
     int lhs = parse_eq_expr();
     if (lhs < 0)
         return -1;
     for (;;) {
         skip_spaces();
-        if (*cur != '&')
+        if (*cur != '&' || cur[1] == '&')
             return lhs;
-        if (cur[1] == '&') {
-            errmsg = "&& はまだありません (& は1つで書きます)";
-            return -1;
-        }
         cur++;
         skip_spaces();
         int rhs = parse_eq_expr();
         if (rhs < 0)
             return -1;
         lhs = new_node(NODE_AND, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* ビット XOR の段 (v19): & よりゆるく、| より固い */
+static int parse_bitxor_expr(void) {
+    int lhs = parse_bitand_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        if (*cur != '^')
+            return lhs;
+        cur++;
+        skip_spaces();
+        int rhs = parse_bitand_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(NODE_XOR, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* ビット OR の段 (v19): ^ よりゆるく、&& より固い。
+ * || は上の段 (論理 OR) の担当なので、手をつけない */
+static int parse_bitor_expr(void) {
+    int lhs = parse_bitxor_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        if (*cur != '|' || cur[1] == '|')
+            return lhs;
+        cur++;
+        skip_spaces();
+        int rhs = parse_bitxor_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(NODE_OR, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* 論理 AND の段 (v19): && は短絡評価 (左が 0 なら右を
+ * 評価しない) で、結果は 1 か 0 */
+static int parse_land_expr(void) {
+    int lhs = parse_bitor_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        if (cur[0] != '&' || cur[1] != '&')
+            return lhs;
+        cur += 2;
+        skip_spaces();
+        int rhs = parse_bitor_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(NODE_LAND, 0, lhs, rhs);
+        if (lhs < 0)
+            return -1;
+    }
+}
+
+/* 式全体を読む。一番外側は論理 OR の段 (v19)。
+ * 例: "*s != 0" は !=(*s, 0)、"a || b && c" は
+ * ||(a, &&(b, c)) という木になる (C と同じ読み) */
+static int parse_expr(void) {
+    int lhs = parse_land_expr();
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        skip_spaces();
+        if (cur[0] != '|' || cur[1] != '|')
+            return lhs;
+        cur += 2;
+        skip_spaces();
+        int rhs = parse_land_expr();
+        if (rhs < 0)
+            return -1;
+        lhs = new_node(NODE_LOR, 0, lhs, rhs);
         if (lhs < 0)
             return -1;
     }
@@ -957,6 +1165,19 @@ static int parse_stmt_list(int in_brace) {
             }
             /* 式だった。先読みを巻き戻して下へ進む */
         }
+        /* ++ / -- で始まる文 (前置の増減文、v19) */
+        if ((cur[0] == '+' && cur[1] == '+') ||
+            (cur[0] == '-' && cur[1] == '-')) {
+            int stmt = parse_stmt();
+            if (stmt < 0)
+                return -2;
+            if (head < 0)
+                head = stmt;
+            else
+                node_next[tail] = stmt;
+            tail = stmt;
+            continue;
+        }
         /* 文の始まりかどうかを先読みする: 識別子で始まる場合、
          * 名前とその次第で「代入文・while・putc」のどれか、
          * それ以外 (式の始まり) もありうる */
@@ -1004,6 +1225,8 @@ static int parse_stmt_list(int in_brace) {
             skip_spaces();
             int is_assign = (*cur == '=' && cur[1] != '=');
             int is_call = (*cur == '(');
+            int is_incdec = (cur[0] == '+' && cur[1] == '+') ||
+                            (cur[0] == '-' && cur[1] == '-');
             int is_index_store = 0;
             if (*cur == '[') {
                 /* 名前 [ ... ] の後ろに '=' があれば、配列の
@@ -1028,7 +1251,8 @@ static int parse_stmt_list(int in_brace) {
                 is_index_store = (depth == 0 && *p == '=' &&
                                   p[1] != '=');
             }
-            if (is_keyword || is_assign || is_call || is_index_store) {
+            if (is_keyword || is_assign || is_call || is_index_store ||
+                is_incdec) {
                 cur = save;  /* parse_stmt に頭から読ませる */
                 int stmt = parse_stmt();
                 if (stmt < 0)
@@ -1137,6 +1361,16 @@ static int parse_stmt(void) {
         if (!expect_char(';', "書き込み文の終わりには ; が必要です"))
             return -1;
         return new_node(NODE_STORE, 0, addr, val);
+    }
+    if ((cur[0] == '+' && cur[1] == '+') ||
+        (cur[0] == '-' && cur[1] == '-')) {
+        /* 前置の増減文: ++ 名前 ; / -- 名前 ; (v19) */
+        int e = parse_unary_expr();
+        if (e < 0)
+            return -1;
+        if (!expect_char(';', "文の終わりには ; が必要です"))
+            return -1;
+        return e;
     }
     if (!parse_ident())
         return -1;
@@ -1272,6 +1506,23 @@ static int parse_stmt(void) {
             return -1;
         }
         return new_node(NODE_CALL, f, arg, 0);
+    }
+
+    /* 名前の次が ++ / -- なら、後置の増減文 (v19):
+     * 名前 ++ ; / 名前 -- ; */
+    skip_spaces();
+    if ((cur[0] == '+' && cur[1] == '+') ||
+        (cur[0] == '-' && cur[1] == '-')) {
+        int var = find_var(name_buf, name_len);
+        if (var < 0) {
+            errmsg = "代入されていない変数が使われました";
+            return -1;
+        }
+        int kind = cur[0] == '+' ? NODE_POSTINC : NODE_POSTDEC;
+        cur += 2;
+        if (!expect_char(';', "文の終わりには ; が必要です"))
+            return -1;
+        return new_node(kind, var, 0, 0);
     }
 
     /* 残る形は代入文: 名前 = 式 ;

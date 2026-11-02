@@ -36,6 +36,7 @@
 #   v16: 字句の完成 (ブロックコメント/文字リテラル/型の語彙)
 #   v17: 複数ファイル入力 (順につないで1つのソースとして読む)
 #   v18: 条件付きコンパイル (#ifdef/#ifndef/#else/#endif、定義済みマクロ)
+#   v19: 演算子の完成 (<< >> | ^ %、単項 - !、&& || 短絡、前置/後置 ++ --)
 set -e
 cd "$(dirname "$0")"
 
@@ -225,7 +226,8 @@ check_tail "$TMP/v6d.bin" 'A' "v6: 16進数リテラル"
 "$IWAC" 'p = 0x10000000; *p = 88;' > "$TMP/v6e.bin"
 check_tail "$TMP/v6e.bin" 'X' "v6: ポインタ変数経由の書き込み"
 
-check_error 'x = 5 && 3;' "&& は未対応"
+"$IWAC" 'x = 5 && 3; putc(64 + x);' > "$TMP/v19and.bin"
+check_run "$TMP/v19and.bin" A "v19: && が使える (v6 当時は未対応だった)"
 check_error '*0x = 65;' "0x の後ろに数字が無い"
 
 # --- v7: 優先順位を C に合わせる (かっこ・乗除・スタック評価) ---
@@ -462,5 +464,47 @@ putc(65);' "#endif が無い"
 check_error "putc('');" "空の文字リテラル"
 check_error '/* 終わらない' "閉じないブロックコメント"
 check_error "putc('AB');" "2文字の文字リテラル"
+
+# --- v19: 演算子の完成 ---
+"$IWAC" 'putc(64 + (1 << 2));' > "$TMP/v19a.bin"
+check_run "$TMP/v19a.bin" D "v19: 左シフト << (64 + (1<<2) = 68)"
+"$IWAC" 'putc((256 >> 2) + 1);' > "$TMP/v19b.bin"
+check_run "$TMP/v19b.bin" A "v19: 右シフト >>"
+"$IWAC" 'x = 0 - 8; putc(72 + (x >> 2));' > "$TMP/v19c.bin"
+check_run "$TMP/v19c.bin" F "v19: >> は算術シフト (負でも符号が保たれる)"
+"$IWAC" 'putc(64 | 1);' > "$TMP/v19d.bin"
+check_run "$TMP/v19d.bin" A "v19: ビット OR |"
+"$IWAC" 'putc(127 ^ 62);' > "$TMP/v19e.bin"
+check_run "$TMP/v19e.bin" A "v19: ビット XOR ^"
+"$IWAC" 'putc(48 + (100 % 7) + 15);' > "$TMP/v19f.bin"
+check_run "$TMP/v19f.bin" A "v19: 剰余 %"
+"$IWAC" 'putc(65 + !0);' > "$TMP/v19g.bin"
+check_run "$TMP/v19g.bin" B "v19: 論理 NOT (!0 = 1)"
+"$IWAC" 'putc(65 + !5);' > "$TMP/v19h.bin"
+check_run "$TMP/v19h.bin" A "v19: 論理 NOT (!5 = 0)"
+"$IWAC" 'x = 5; putc(70 + -x);' > "$TMP/v19i.bin"
+check_run "$TMP/v19i.bin" A "v19: 単項マイナス"
+"$IWAC" 'x = 0 - 1; putc(66 + x);' > "$TMP/v19j.bin"
+check_run "$TMP/v19j.bin" A "v19: 負の数の代入"
+"$IWAC" 'i = 0; while (i < 3) { putc(65 + i); i++; }' > "$TMP/v19k.bin"
+check_tail "$TMP/v19k.bin" ABC "v19: 後置 ++ 文"
+"$IWAC" 'i = 0; while (i < 3) { putc(65 + i); ++i; }' > "$TMP/v19l.bin"
+check_tail "$TMP/v19l.bin" ABC "v19: 前置 ++ 文"
+"$IWAC" 'i = 5; putc(60 + i++); putc(60 + i);' > "$TMP/v19m.bin"
+check_tail "$TMP/v19m.bin" AB "v19: 式の中の後置 ++ (値は増える前)"
+"$IWAC" 'i = 5; putc(60 + ++i);' > "$TMP/v19n.bin"
+check_run "$TMP/v19n.bin" B "v19: 式の中の前置 ++ (値は増えた後)"
+"$IWAC" 's = "AB"; putc(*s++); putc(*s);' > "$TMP/v19o.bin"
+check_tail "$TMP/v19o.bin" AB "v19: *s++ は *(s++)"
+"$IWAC" 'i = 0; j = 0; x = (i == 0) || (j++ == 0); putc(64 + j); putc(64 + x);' > "$TMP/v19p.bin"
+check_tail "$TMP/v19p.bin" '@A' "v19: || の短絡 (右を評価しない)"
+"$IWAC" 'i = 0; j = 0; x = (i != 0) && (j++ == 0); putc(64 + j); putc(64 + x);' > "$TMP/v19q.bin"
+check_tail "$TMP/v19q.bin" '@@' "v19: && の短絡 (右を評価しない)"
+"$IWAC" 'putc(48 + (1 << 2 + 1));' > "$TMP/v19r.bin"
+check_run "$TMP/v19r.bin" 8 "v19: 優先順位 (加減がシフトより固い)"
+"$IWAC" 'x = 6; putc(64 + (x > 3 && x < 10));' > "$TMP/v19s.bin"
+check_run "$TMP/v19s.bin" A "v19: 関係演算子と &&"
+check_error 'x = 1; putc(64 + (5++));' "数への後置 ++"
+check_error '++5;' "数への前置 ++"
 
 echo "PASS"
