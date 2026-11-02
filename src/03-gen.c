@@ -79,9 +79,27 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
     asm_imm[i] = imm;
 }
 
-/* 変数番号から、その変数の住むレジスタ番号を出す */
-static int var_reg(int var) {
-    return REG_VAR_BASE + var;
+/* --- 変数の置き場所 (v21) ---
+ * 変数は全部メモリに住む。グローバルは静的領域 (文字列と
+ * 配列の後ろ、globals_base から 8 バイトずつ)、ローカルと
+ * 引数は関数のフレームの中 (fp 相対)。フレームの形:
+ *   入口で sp をフレーム長だけ引き、ra を一番上 (fp-8)、
+ *   呼び出し側の fp をその下 (fp-16) に退避し、fp を張る。
+ *   枠 k の住所は sp(引き後) + 8k = fp - フレーム長 + 8k。
+ * フレーム長は「16 + 枠数 x 8」を16バイト単位に切り上げ */
+static unsigned int globals_base;  /* gen_program が確定させる */
+
+static int func_frame_size(int f) {
+    int size = 16 + func_nlocals[f] * 8;
+    return (size + 15) & ~15;
+}
+
+static int var_frame_off(int var) {
+    return var_slot[var] * 8 - func_frame_size(var_owner[var]);
+}
+
+static unsigned int var_global_addr(int var) {
+    return globals_base + (unsigned int)var_slot[var] * 8u;
 }
 
 /* 葉かどうか: 式の中で「そのまま値として使える材料」は
@@ -139,10 +157,40 @@ static void gen_load_addr(int reg, unsigned int addr) {
     asm_push(OP_ADDI, reg, reg, 0, (int)lo);
 }
 
+/* 変数の住所をレジスタに作る (v21) */
+static void gen_var_addr(int reg, int var) {
+    if (var_owner[var] < 0)
+        gen_load_addr(reg, var_global_addr(var));
+    else
+        asm_push(OP_ADDI, reg, REG_FP, 0, var_frame_off(var));
+}
+
+/* 変数の値をレジスタに読む (v21)。読み先のレジスタだけを
+ * 使うので、葉の読み出しから呼べる */
+static void gen_load_var(int reg, int var) {
+    if (var_owner[var] < 0) {
+        gen_load_addr(reg, var_global_addr(var));
+        asm_push(OP_LD, reg, reg, 0, 0);
+    } else {
+        asm_push(OP_LD, reg, REG_FP, 0, var_frame_off(var));
+    }
+}
+
+/* レジスタの値を変数に書く (v21)。グローバルの場合は
+ * 住所作りに t2 を使う */
+static void gen_store_var(int var, int reg) {
+    if (var_owner[var] < 0) {
+        gen_load_addr(REG_T2, var_global_addr(var));
+        asm_push(OP_SD, 0, REG_T2, reg, 0);
+    } else {
+        asm_push(OP_SD, 0, REG_FP, reg, var_frame_off(var));
+    }
+}
+
 /* 葉を、指定レジスタへ読み出す命令を積む。
  *   数:       小さければ即値で入れる。大きければ (16進の
  *             アドレスなど) 住所の材料と同じ作り方で作る
- *   変数:     そのレジスタからの写し (addi rd, 相手, 0 = mv)
+ *   変数:     メモリから値を読む (v21。gen_load_var)
  *   文字列:   その住所を作る (auipc + addi の2命令)
  *   ポインタ読み: 住所から1バイト読む (lbu)。住所は、
  *             変数ならその値、数なら絶対アドレスそのもの */
@@ -154,7 +202,8 @@ static void gen_load_leaf(int reg, int leaf) {
         else
             gen_load_addr(reg, (unsigned int)node_val[leaf]);
     } else if (k == NODE_VAR)
-        asm_push(OP_ADDI, reg, var_reg(node_val[leaf]), 0, 0);
+        /* 変数の値はメモリから読む (v21) */
+        gen_load_var(reg, node_val[leaf]);
     else if (k == NODE_STR)
         gen_load_addr(reg, str_addr[node_val[leaf]]);
     else if (k == NODE_ARRAY)
@@ -163,8 +212,10 @@ static void gen_load_leaf(int reg, int leaf) {
     else { /* NODE_DEREF: lhs が住所を表すノード */
         int operand = node_lhs[leaf];
         if (node_kind[operand] == NODE_VAR) {
-            /* 変数の持つ住所から読む (従来の形) */
-            asm_push(OP_LBU, reg, var_reg(node_val[operand]), 0, 0);
+            /* 変数の持つ住所から読む: まず変数の値 (住所)
+             * を読み、その先を1バイト読む (v21) */
+            gen_load_var(reg, node_val[operand]);
+            asm_push(OP_LBU, reg, reg, 0, 0);
         } else {
             /* 絶対アドレス読み: 住所を reg に作ってから読む。
              * 住所の材料は auipc 相対なので、0x10000005 の
@@ -277,23 +328,38 @@ static int gen_expr(int node) {
         asm_push(OP_SUB, REG_T1, REG_ZERO, REG_T1, 0);
         return 1;
     }
+    if (node_kind[node] == NODE_ADDR) {
+        /* 単項 &: 変数ならその置き場所の住所、配列なら
+         * 先頭アドレスが値になる (v21) */
+        int operand = node_lhs[node];
+        if (node_kind[operand] == NODE_VAR)
+            gen_var_addr(REG_T1, node_val[operand]);
+        else /* NODE_ARRAY */
+            gen_load_addr(REG_T1, arr_addr[node_val[operand]]);
+        return 1;
+    }
     if (node_kind[node] == NODE_PREINC ||
         node_kind[node] == NODE_POSTINC ||
         node_kind[node] == NODE_PREDEC ||
         node_kind[node] == NODE_POSTDEC) {
-        /* ++ / --: 変数のレジスタを 1 つ増減させる。
+        /* ++ / --: 変数の住所を t2 に作り、読み書きする。
          * 前置は「増減させてから、その値」、後置は「今の
-         * 値を残してから増減」。結果はどちらも t1 に置く */
-        int reg = var_reg(node_val[node]);
+         * 値を残してから増減」。結果はどちらも t1 に置く。
+         * 後置の新しい値は a0 に作る (式の評価の途中では
+         * a0 は使われていない。v21 でメモリ化に追随) */
         int delta = (node_kind[node] == NODE_PREINC ||
                      node_kind[node] == NODE_POSTINC) ? 1 : -1;
         int pre = (node_kind[node] == NODE_PREINC ||
                    node_kind[node] == NODE_PREDEC);
-        if (!pre)
-            asm_push(OP_ADDI, REG_T1, reg, 0, 0);
-        asm_push(OP_ADDI, reg, reg, 0, delta);
-        if (pre)
-            asm_push(OP_ADDI, REG_T1, reg, 0, 0);
+        gen_var_addr(REG_T2, node_val[node]);
+        asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
+        if (pre) {
+            asm_push(OP_ADDI, REG_T1, REG_T1, 0, delta);
+            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
+        } else {
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, delta);
+            asm_push(OP_SD, 0, REG_T2, REG_A0, 0);
+        }
         return 1;
     }
     /* 二項演算: まず左を t1 に */
@@ -445,11 +511,16 @@ static int gen_stmt(int node) {
         asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
         return 1;
     }
+    if (kind == NODE_VDECL) {
+        /* 変数の宣言だけ: 置き場所は parse で予約済みで、
+         * 実行時のコードは何も出ない (v21) */
+        return 1;
+    }
     if (kind == NODE_ASSIGN) {
         if (!gen_expr(node_lhs[node]))
             return 0;
-        /* addi 変数レジスタ, t1, 0 -- 結果を変数へ写す (代入) */
-        asm_push(OP_ADDI, var_reg(node_val[node]), REG_T1, 0, 0);
+        /* 結果 (t1) を変数の置き場所へ書く (代入、v21) */
+        gen_store_var(node_val[node], REG_T1);
         return 1;
     }
     if (kind == NODE_PUTC) {
@@ -479,7 +550,7 @@ static int gen_stmt(int node) {
         if (node_kind[addr] == NODE_NUM)
             gen_load_addr(REG_T2, (unsigned int)node_val[addr]);
         else /* NODE_VAR: 変数の値そのものが住所 (ポインタ) */
-            asm_push(OP_ADDI, REG_T2, var_reg(node_val[addr]), 0, 0);
+            gen_load_var(REG_T2, node_val[addr]);
         /* sb t1, 0(t2) -- 値の下1バイトを住所へ書く */
         asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
         return 1;
@@ -662,12 +733,21 @@ static unsigned int stack_top_addr;
  * 自分の戻り先を失わない。失敗したら 0 */
 static int gen_func(int f) {
     func_entry[f] = nasm;
-    /* addi sp, sp, -16 / sd ra, 8(sp) */
-    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
-    asm_push(OP_SD, 0, REG_SP, REG_RA, 8);
+    int frame = func_frame_size(f);
+    /* 序文 (v21): フレームを取り、ra と呼び出し側の fp を
+     * 退避し、fp を張る。ローカルと引数は fp 相対で触る
+     * ので、式の評価で sp が上下しても住所が変わらない。
+     *   addi sp, sp, -frame
+     *   sd ra, frame-8(sp) / sd fp, frame-16(sp)
+     *   addi fp, sp, frame */
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -frame);
+    asm_push(OP_SD, 0, REG_SP, REG_RA, frame - 8);
+    asm_push(OP_SD, 0, REG_SP, REG_FP, frame - 16);
+    asm_push(OP_ADDI, REG_FP, REG_SP, 0, frame);
     if (func_has_param[f]) {
-        /* addi 引数の変数, a0, 0 -- 引数を受け取る */
-        asm_push(OP_ADDI, var_reg(func_param_var[f]), REG_A0, 0, 0);
+        /* 引数を受け取る: a0 を引数の枠へ書く */
+        asm_push(OP_SD, 0, REG_FP, REG_A0,
+                 var_frame_off(func_param_var[f]));
     }
     return_patch_head = -1;
     gen_in_func = 1;
@@ -678,9 +758,13 @@ static int gen_func(int f) {
     gen_in_func = 0;
     /* 早期 return の飛び先はここ (後始末の頭) */
     apply_patches(return_patch_head, nasm);
-    /* ld ra, 8(sp) / addi sp, sp, 16 / jalr zero, ra, 0 */
-    asm_push(OP_LD, REG_RA, REG_SP, 0, 8);
-    asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+    /* 後始末: ra と fp を戻し (fp の読みは古い fp で
+     * 行う)、フレームを返して、呼び出し側へ戻る
+     *   ld ra, -8(fp) / ld fp, -16(fp) / addi sp, sp, frame
+     *   jalr zero, ra, 0 */
+    asm_push(OP_LD, REG_RA, REG_FP, 0, -8);
+    asm_push(OP_LD, REG_FP, REG_FP, 0, -16);
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, frame);
     asm_push(OP_JALR, 0, REG_RA, 0, 0);
     return 1;
 }
@@ -710,7 +794,7 @@ static int expr_needs_stack(int node) {
          * 要することはある */
         return expr_needs_stack(node_lhs[node]) ||
                expr_needs_stack(node_rhs[node]);
-    if (k == NODE_NOT || k == NODE_NEG)
+    if (k == NODE_NOT || k == NODE_NEG || k == NODE_ADDR)
         return expr_needs_stack(node_lhs[node]);
     if (k == NODE_DEREF)
         return expr_needs_stack(node_lhs[node]);
@@ -850,6 +934,7 @@ static int gen_program(void) {
     for (int f = 0; f < nfunc && !stack_needed; f++)
         stack_needed = list_needs_stack(func_body[f]);
     stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */
+    globals_base = LOAD_BASE;    /* 同上 (グローバルの住所) */
     for (int i = 0; i < narr; i++)
         arr_addr[i] = LOAD_BASE;  /* 同上 (配列の住所も仮置き) */
     if (!gen_all())
@@ -863,12 +948,19 @@ static int gen_program(void) {
         arr_addr[i] = LOAD_BASE + (unsigned int)nasm * 4u +
                       (unsigned int)str_used +
                       (unsigned int)arr_off[i];
-    /* スタックは「コード + 文字列 + 配列」の後ろ 4KB 先から
-     * 下へ伸ばす。16 バイト単位に切り上げておく
-     * (置き場所の約束) */
-    stack_top_addr = LOAD_BASE + (unsigned int)nasm * 4u +
-                     (unsigned int)str_used +
-                     (unsigned int)arr_used + 4096u;
+    /* グローバル変数の領域は配列の後ろ (v21)。
+     * 8 バイトずつ、初期値は 0 (バイナリには含めず、
+     * kosaba では memsz の差分としてゼロ埋めさせる。
+     * ベアメタルでは RAM の更地なので 0 とは限らない
+     * が、プログラムは代入してから使う約束) */
+    globals_base = LOAD_BASE + (unsigned int)nasm * 4u +
+                   (unsigned int)str_used +
+                   (unsigned int)arr_used;
+    /* スタックは「コード + 文字列 + 配列 + グローバル」の
+     * 後ろ 4KB 先から下へ伸ばす。16 バイト単位に切り上げ
+     * ておく (置き場所の約束) */
+    stack_top_addr = globals_base +
+                     (unsigned int)var_nglobal * 8u + 4096u;
     stack_top_addr = (stack_top_addr + 15u) & ~15u;
     if (!gen_all())
         return 0;

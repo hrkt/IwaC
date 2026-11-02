@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v20 まで</title>
+<title>IwaC の歩み — v0 から v21 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v20 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v21 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -340,7 +340,8 @@
   <a class="done" href="#v17">v17 複数ファイル入力</a><span class="arrow">→</span>
   <a class="done" href="#v18">v18 条件付きコンパイル</a><span class="arrow">→</span>
   <a class="done" href="#v19">v19 演算子の完成</a><span class="arrow">→</span>
-  <a class="done" href="#v20">v20 制御構文の完成</a>
+  <a class="done" href="#v20">v20 制御構文の完成</a><span class="arrow">→</span>
+  <a class="done" href="#v21">v21 変数のメモリ化</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1236,10 +1237,49 @@ void check(int n) {
   書き直し待ちの名簿を持つと、入れ子の break も自然に「一番内側だけ」に効きます。</p></div>
 </section>
 
+<!-- ================= v21 ================= -->
+<section class="phase" id="v21">
+  <div class="head"><span class="badge b-v4">v21</span><h2>変数のメモリ化 — 全部の変数に家ができる</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の6段目・本丸。変数をレジスタ4個の枠から解放すること。</b></p>
+  <p>変数は全部メモリに住むようになりました。グローバルは静的領域
+  （文字列と配列の後ろ）に、ローカルと引数は関数のスタックフレームに置きます。
+  フレームは入口で作り、変数は fp（フレームポインタ）からの相対で触ります。
+  式の計算で sp が上下しても、fp は動かないので住所がぶれません。
+  スコープは関数単位になり、別の関数の同名ローカルは別物で、
+  ローカルは同名のグローバルを隠します（シャドーイング）。
+  あわせて宣言の文（<code>int i;</code> / <code>int i = 0;</code>）、
+  <code>for (int i = 0; …)</code> の形、単項 <code>&amp;</code>（住所を取る）も入りました。
+  この段から、互換の守り方は「出力バイトの一致」から「振る舞いの一致」に切り替わります。</p>
+<pre class="code">int counter;                    // グローバル (静的領域)
+
+void bump(int n) {              // 引数とローカルはフレーム
+  int next;
+  next = counter + n;
+  counter = next;
+}
+
+void out(int c) {
+  int b;
+  b = c;
+  putc(*&amp;b);                    // 住所を取って読み戻す
+}</pre>
+  <div class="chips">
+    <span class="chip">変数は全部メモリ</span><span class="chip">fp 相対のフレーム</span>
+    <span class="chip">関数単位のスコープ</span><span class="chip">宣言の文</span>
+    <span class="chip">単項 &amp;</span><span class="chip">上限は記号表 256 件</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  実装中のバグは1つだけで、「宣言が代入と同じ探し方をして、同名グローバルに
+  吸われてしまう」というものでした。宣言は「今のスコープに作る」、代入は
+  「見えている変数を使う」という意味の違いが、記号表のAPIの違いになる、
+  というのがこの段の教訓です。切り分けは逆アセンブルで
+  「代入がフレームでなく静的領域へ書いている」ことを見つけて行いました。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v20 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v21 時点）</p>
 </footer>
 
 </div>

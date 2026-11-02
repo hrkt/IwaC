@@ -73,6 +73,11 @@ static int NODE_RETURN = 41;   /* return 文 (値なし、v20) */
 static int NODE_FORSTEP = 42;  /* for の更新部 (v20)。node_val =
                              * 更新の文。for の本体リストの最後に
                              * だけ現れる (continue の飛び先) */
+static int NODE_VDECL = 43;   /* 変数の宣言だけの文 (v21)。
+                             * node_val = 変数番号。実行時の
+                             * コードは出ない (置き場所の予約) */
+static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
+                             * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
                              * node_val = 配列番号、node_lhs = 添字の式、
                              * node_rhs = 書く値の式 */
@@ -97,22 +102,53 @@ static int node_next[512]; /* 文の並び用: 次の文ノード (-1 で終わ�
 static int nnode;  /* 作ったノードの数 */
 
 /* --- 変数の名簿 (記号表) ---
- * 変数は「名前 → 番号」の対応表で管理する。番号が決まれば、
- * 第2層でレジスタ (t3 + 番号) に割り当てられる。
- * 名前は最大31文字、変数は最大4個まで (レジスタの数の都合) */
-static char var_names[4][32];
-static int var_name_len[4];
-static int nvar;  /* 登録された変数の数 */
+ * 変数は「名前 → 番号」の対応表で管理する。v21 から変数は
+ * 全部メモリに住む (レジスタ割り当ては廃止):
+ *   var_owner[i] : 持ち主。-1 ならグローバル (静的領域)、
+ *                  それ以外は関数番号 (その関数のローカル)
+ *   var_slot[i]  : 置き場所の番号。グローバルなら静的領域の
+ *                  何個目か、ローカルならフレームの何枠目か
+ *   var_bsize[i] : 宣言の型の基本の大きさ (char なら 1、
+ *                  それ以外は 8)。ポインタの歩幅に使う (v23)
+ *   var_plevel[i]: 宣言のポインタ段数 (char ** なら 2)
+ * スコープは関数単位: 解析中の関数 (parse_cur_func) の
+ * ローカルと、グローバルだけが見える。他の関数のローカルは
+ * 見えない (同名でも別物)。ローカルが同名のグローバルを
+ * 隠す (シャドーイング)。名前は最大31文字 */
+static char var_names[256][32];
+static int var_name_len[256];
+static int var_owner[256];
+static int var_slot[256];
+static int var_bsize[256];
+static int var_plevel[256];
+static int nvar;       /* 登録された変数の数 (全スコープ合計) */
+static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
+static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
+static int func_nlocals[16];  /* 関数ごとのフレーム枠数。
+                             * 本体は関数の名簿の節で説明する */
 
-/* 名前 (場所と長さで渡す) が名簿にあればその番号、無ければ -1 */
+/* 名前の一致だけを見る小物 */
+static int var_name_eq(int i, char *name, int len) {
+    if (var_name_len[i] != len)
+        return 0;
+    int j = 0;
+    while (j < len && var_names[i][j] == name[j])
+        j++;
+    return j == len;
+}
+
+/* 今見えている範囲で名前を探す: まず解析中の関数の
+ * ローカル、次にグローバル。あれば番号、無ければ -1 */
 static int find_var(char *name, int len) {
+    if (parse_cur_func >= 0) {
+        for (int i = 0; i < nvar; i++) {
+            if (var_owner[i] == parse_cur_func &&
+                var_name_eq(i, name, len))
+                return i;
+        }
+    }
     for (int i = 0; i < nvar; i++) {
-        if (var_name_len[i] != len)
-            continue;
-        int j = 0;
-        while (j < len && var_names[i][j] == name[j])
-            j++;
-        if (j == len)
+        if (var_owner[i] == -1 && var_name_eq(i, name, len))
             return i;
     }
     return -1;
@@ -122,26 +158,49 @@ static int find_var(char *name, int len) {
  * 先に宣言だけ置く) */
 static int find_array(char *name, int len);
 
-/* 名前を名簿に登録し、番号を返す。既にある名前なら同じ番号を
- * 返す (再代入は同じ変数への代入になる)。配列と同じ名前は
- * 使えない。失敗したら -1 */
-static int define_var(char *name, int len) {
+/* 名前を名簿に登録し、番号を返す。失敗したら -1。
+ * is_decl が 1 (宣言から) のときは「今のスコープの変数」
+ * として作る: 同じスコープに同名があればそれを返し、
+ * 外側 (グローバル) の同名は隠れる (シャドーイング)。
+ * is_decl が 0 (代入から) のときは、見えている変数が
+ * あればそれ (再代入)、無ければ今の場所に新規作成 */
+static int define_var_typed(char *name, int len, int bsize,
+                            int plevel, int is_decl) {
     if (find_array(name, len) >= 0) {
         errmsg = "その名前は配列に使われています";
         return -1;
     }
-    int found = find_var(name, len);
-    if (found >= 0)
-        return found;
-    if (nvar >= 4) {
-        errmsg = "変数は4個までです (レジスタ t3〜t6 の都合)";
+    if (is_decl) {
+        for (int i = 0; i < nvar; i++) {
+            if (var_owner[i] == parse_cur_func &&
+                var_name_eq(i, name, len))
+                return i;
+        }
+    } else {
+        int found = find_var(name, len);
+        if (found >= 0)
+            return found;
+    }
+    if (nvar >= 256) {
+        errmsg = "変数が多すぎます";
         return -1;
     }
     int i = nvar++;
     for (int j = 0; j < len; j++)
         var_names[i][j] = name[j];
     var_name_len[i] = len;
+    var_owner[i] = parse_cur_func;
+    var_bsize[i] = bsize;
+    var_plevel[i] = plevel;
+    if (parse_cur_func >= 0)
+        var_slot[i] = func_nlocals[parse_cur_func]++;
+    else
+        var_slot[i] = var_nglobal++;
     return i;
+}
+
+static int define_var(char *name, int len) {
+    return define_var_typed(name, len, 8, 0, 0);
 }
 
 /* --- プログラムの形 ---
@@ -175,6 +234,8 @@ static int func_has_param[16];
 static int func_param_var[16];
 static int func_body[16];
 static int func_entry[16];
+/* func_nlocals[16] : フレームの枠数 (引数を含む、v21)。
+ * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
 
 /* --- 配列の名簿 ---
@@ -649,6 +710,21 @@ static int parse_unary_expr(void) {
             return -1;
         return new_node(NODE_NEG, 0, operand, 0);
     }
+    if (*cur == '&' && cur[1] != '&') {
+        /* 単項 & (住所、v21): 相手は変数か配列だけ。
+         * && とは位置で見分ける (材料の頭の & は住所、
+         * 式の途中の & はビット演算か論理演算) */
+        cur++;
+        int operand = parse_unary_expr();
+        if (operand < 0)
+            return -1;
+        int ok = node_kind[operand];
+        if (ok != NODE_VAR && ok != NODE_ARRAY) {
+            errmsg = "& の相手は変数か配列だけです";
+            return -1;
+        }
+        return new_node(NODE_ADDR, 0, operand, 0);
+    }
     if (*cur == '!' && cur[1] != '=') {
         cur++;
         int operand = parse_unary_expr();
@@ -1002,6 +1078,12 @@ static int is_type_word(void) {
            ident_is("signed");
 }
 
+/* 直前に読んだ型の情報 (v21): 宣言が変数を作るときに使う。
+ * 先読みで呼ばれた場合は上書きされるが、本読みで最後に
+ * 残るのが正しい値になる */
+static int parse_type_bsize;   /* char を含めば 1、それ以外は 8 */
+static int parse_type_plevel;  /* ポインタの段数 (* の数) */
+
 static int parse_type(void) {
     if (!is_ident_start(*cur))
         return 0;
@@ -1014,6 +1096,7 @@ static int parse_type(void) {
     }
     if (!is_type_word())
         return 0;
+    int has_char = ident_is("char");
     /* 型の言葉が続く間は読み進める (unsigned long や
      * long long のような組み合わせを受けるため) */
     for (;;) {
@@ -1029,12 +1112,18 @@ static int parse_type(void) {
             cur = save;
             break;
         }
+        if (ident_is("char"))
+            has_char = 1;
     }
     skip_spaces();
-    while (*cur == '*') {  /* ポインタの印は読み飛ばす */
+    int stars = 0;
+    while (*cur == '*') {  /* ポインタの印を数える (v21) */
+        stars++;
         cur++;
         skip_spaces();
     }
+    parse_type_bsize = has_char ? 1 : 8;
+    parse_type_plevel = stars;
     return 1;
 }
 
@@ -1071,6 +1160,11 @@ static int parse_funcdef(void) {
     func_has_param[f] = 0;
     func_param_var[f] = -1;
     func_body[f] = -1;
+    func_nlocals[f] = 0;
+    /* 引数と本体の解析の間は、この関数が「今いる場所」
+     * になる (ローカル変数の持ち主、v21) */
+    int save_cur_func = parse_cur_func;
+    parse_cur_func = f;
 
     if (!expect_char('(', "関数名の後には ( が必要です"))
         return 0;
@@ -1092,7 +1186,9 @@ static int parse_funcdef(void) {
         int plen = ident_len;
         for (int i = 0; i < plen; i++)
             pname[i] = ident_buf[i];
-        int var = define_var(pname, plen);
+        /* 引数は宣言なので、型の情報を持って登録する */
+        int var = define_var_typed(pname, plen, parse_type_bsize,
+                                   parse_type_plevel, 1);
         if (var < 0)
             return 0;
         func_has_param[f] = 1;
@@ -1122,6 +1218,7 @@ static int parse_funcdef(void) {
     parse_in_func = 1;
     int body = parse_stmt_list(1);
     parse_in_func = save_in_func;
+    parse_cur_func = save_cur_func;
     if (body == -2)
         return 0;
     func_body[f] = body;
@@ -1210,21 +1307,23 @@ static int parse_stmt_list(int in_brace) {
                              ident_is("return");
             int is_type = is_type_word() || ident_is("const");
             if (is_type) {
-                /* 型で始まるのは、関数定義か配列の宣言。
-                 * 名前の後ろが '[' なら配列の宣言で、こちらは
-                 * 文としてどこにでも置ける。'(' なら関数定義で、
-                 * 置けるのはプログラムの頭だけ */
+                /* 型で始まるのは、関数定義か宣言の文。
+                 * 名前の後ろが '[' (配列) か '=' (初期化) か
+                 * ';' (宣言だけ) なら宣言の文で、こちらは
+                 * どこにでも置ける。'(' なら関数定義で、
+                 * 置けるのはプログラムの頭だけ (v21) */
                 cur = save;
-                int is_array_decl = 0;
+                int is_decl_stmt = 0;
                 if (parse_type()) {
                     skip_spaces();
                     if (parse_ident()) {
                         skip_spaces();
-                        is_array_decl = (*cur == '[');
+                        is_decl_stmt = (*cur == '[' || *cur == '=' ||
+                                        *cur == ';');
                     }
                 }
                 cur = save;
-                if (is_array_decl) {
+                if (is_decl_stmt) {
                     int stmt = parse_stmt();
                     if (stmt < 0)
                         return -2;
@@ -1306,42 +1405,73 @@ static int parse_stmt_list(int in_brace) {
     }
 }
 
-/* 配列の宣言を読む: 型 名前 [ 大きさ ] ;
- * 要素は1バイト (char の配列と同じ扱い。型の単語自体は
- * 今までどおり読み捨てる)。置き場所は名簿に予約するだけで、
- * 実行時のコードは出ない。成功したらノード番号、失敗は -1 */
-static int parse_array_decl(void) {
+/* 宣言の文を読む (v21 で変数宣言を追加):
+ *   型 名前 [ 大きさ ] ;   配列の宣言 (従来。要素は1バイト)
+ *   型 名前 = 式 ;         初期化つきの変数宣言
+ *   型 名前 ;              変数の宣言だけ (値は不定。グローバル
+ *                          は静的領域で 0 始まり)
+ * 変数の宣言は、その場所 (関数の中ならローカル、外なら
+ * グローバル) に変数を作る。成功したらノード番号、失敗は -1 */
+static int parse_decl_stmt(void) {
     if (!parse_type()) {
-        errmsg = "配列の宣言は 型 名前 [ 大きさ ] ; の形です";
+        errmsg = "宣言は 型 名前 の形で書きます";
         return -1;
     }
+    int bsize = parse_type_bsize;
+    int plevel = parse_type_plevel;
     skip_spaces();
     if (!parse_ident()) {
-        errmsg = "配列の名前が必要です";
+        errmsg = "宣言には名前が必要です";
         return -1;
     }
     char name_buf[32];
     int name_len = ident_len;
     for (int i = 0; i < name_len; i++)
         name_buf[i] = ident_buf[i];
-    if (!expect_char('[', "配列は 名前 [ 大きさ ] の形で書きます"))
-        return -1;
     skip_spaces();
-    int size = parse_number_value();
-    if (size < 0)
-        return -1;
-    if (size < 1 || size > 1024) {
-        errmsg = "配列の大きさは 1 から 1024 までです";
-        return -1;
+    if (*cur == '[') {
+        /* 配列の宣言 */
+        cur++;
+        skip_spaces();
+        int size = parse_number_value();
+        if (size < 0)
+            return -1;
+        if (size < 1 || size > 1024) {
+            errmsg = "配列の大きさは 1 から 1024 までです";
+            return -1;
+        }
+        if (!expect_char(']', "配列の大きさの後には ] が必要です"))
+            return -1;
+        if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
+            return -1;
+        int a = define_array(name_buf, name_len, size);
+        if (a < 0)
+            return -1;
+        return new_node(NODE_DECL, a, 0, 0);
     }
-    if (!expect_char(']', "配列の大きさの後には ] が必要です"))
-        return -1;
-    if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
-        return -1;
-    int a = define_array(name_buf, name_len, size);
-    if (a < 0)
-        return -1;
-    return new_node(NODE_DECL, a, 0, 0);
+    if (*cur == '=') {
+        /* 初期化つき宣言: 式を読んでから名簿に載せる
+         * (代入文と同じ理由。初期化の式の中で自分は使えない) */
+        cur++;
+        int expr = parse_expr();
+        if (expr < 0)
+            return -1;
+        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1);
+        if (var < 0)
+            return -1;
+        if (!expect_char(';', "宣言の終わりには ; が必要です"))
+            return -1;
+        return new_node(NODE_ASSIGN, var, expr, 0);
+    }
+    if (*cur == ';') {
+        cur++;
+        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1);
+        if (var < 0)
+            return -1;
+        return new_node(NODE_VDECL, var, 0, 0);
+    }
+    errmsg = "宣言は 型 名前 ; か 型 名前 = 式 ; の形です";
+    return -1;
 }
 
 /* for の更新部を読む (v20): ')' の手前まで。
@@ -1406,13 +1536,13 @@ static int parse_for_step(void) {
 static int parse_stmt(void) {
     skip_spaces();
     if (is_ident_start(*cur)) {
-        /* 型で始まる文は配列の宣言 (関数定義は頭専用で、
+        /* 型で始まる文は宣言 (関数定義は頭専用で、
          * parse_stmt_list がそちらへ振り分ける) */
         char *tsave = cur;
         if (parse_ident() &&
             (is_type_word() || ident_is("const"))) {
             cur = tsave;
-            return parse_array_decl();
+            return parse_decl_stmt();
         }
         cur = tsave;
     }
@@ -1542,16 +1672,17 @@ static int parse_stmt(void) {
         if (*cur == ';') {
             cur++;  /* 初期化なし */
         } else {
-            /* 型で始まる初期化 = 宣言つき (for (int i = 0;)
-             * は、局所変数の宣言が要るので v21 の領分 */
+            /* 型で始まれば宣言つきの初期化 (for (int i = 0; …)、
+             * v21 で対応)。それ以外は普通の文 (代入文など) */
             char *save = cur;
-            if (is_ident_start(*cur) && parse_ident() &&
-                is_type_word()) {
-                errmsg = "for の初期化での宣言はまだです (v21 で対応)";
-                return -1;
-            }
+            int is_decl = is_ident_start(*cur) && parse_ident() &&
+                          (is_type_word() || ident_is("const"));
             cur = save;
-            init = parse_stmt();  /* ';' まで読む (代入文など) */
+            if (is_decl) {
+                init = parse_decl_stmt();  /* ';' まで読む */
+            } else {
+                init = parse_stmt();  /* ';' まで読む (代入文など) */
+            }
             if (init < 0)
                 return -1;
         }
@@ -1732,6 +1863,8 @@ static int parse_program(char *program) {
     cur = program;
     nnode = 0;
     nvar = 0;
+    var_nglobal = 0;
+    parse_cur_func = -1;
     nstr = 0;
     str_used = 0;
     nfunc = 0;

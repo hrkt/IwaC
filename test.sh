@@ -38,6 +38,7 @@
 #   v18: 条件付きコンパイル (#ifdef/#ifndef/#else/#endif、定義済みマクロ)
 #   v19: 演算子の完成 (<< >> | ^ %、単項 - !、&& || 短絡、前置/後置 ++ --)
 #   v20: 制御構文の完成 (for、break、continue、値なし早期 return)
+#   v21: 変数のメモリ化 (グローバル=静的領域、ローカル・引数=フレーム、宣言の文、単項 &)
 set -e
 cd "$(dirname "$0")"
 
@@ -138,7 +139,8 @@ check_run "$TMP/v2d.bin" B "v2: 'abc=66; abc' (長い変数名)"
 
 check_error 'y+1' "'y+1' (代入されていない変数)"
 check_error 'x=x+1; x' "'x=x+1; x' (初回代入での自己参照)"
-check_error 'a=1; b=2; c=3; d=4; e=5; a' "変数5個 (上限は4個)"
+"$IWAC" 'a=1; b=2; c=3; d=4; e=5; putc(64 + a + b + c + d + e);' > "$TMP/v21vars.bin"
+check_run "$TMP/v21vars.bin" O "v21: 変数5個が使える (レジスタ時代の上限4は廃止)"
 
 # --- v3: ポインタと文字列 ---
 "$IWAC" 's="Hi"; *s' > "$TMP/v3a.bin"
@@ -532,6 +534,26 @@ check_tail "$TMP/v20j.bin" AC "v20: 更新が代入の for"
 check_error 'break;' "ループの外の break"
 check_error 'return;' "関数の外の return"
 check_error 'int main() { return 1; }' "戻り値つき return はまだ"
-check_error 'for (int i = 0; i < 3; i++) { }' "for の初期化での宣言はまだ"
+
+# --- v21: 変数のメモリ化 ---
+"$IWAC" 'for (int i = 0; i < 3; i++) { putc(65 + i); }' > "$TMP/v21a.bin"
+check_tail "$TMP/v21a.bin" ABC "v21: for の宣言つき初期化 (v20 ではエラーだった)"
+"$IWAC" 'a = 1; b = 2; c = 3; d = 4; e = 5; f = 6; putc(64 + a + b + c + d + e + f);' > "$TMP/v21b.bin"
+check_run "$TMP/v21b.bin" U "v21: 変数6個 (レジスタ時代の上限4を超える)"
+"$IWAC" 'void f(int n) { x = n + 1; putc(64 + x); } void g(int n) { x = n + 2; putc(64 + x); } int main() { f(1); g(1); }' > "$TMP/v21c.bin"
+check_tail "$TMP/v21c.bin" BC "v21: 別の関数の同名ローカルは別物"
+"$IWAC" 'g = 5; void f(int n) { g = n; } f(9); putc(64 + g);' > "$TMP/v21d.bin"
+check_run "$TMP/v21d.bin" I "v21: 関数からグローバルへ代入"
+"$IWAC" 'g = 5; void f(int n) { int g; g = 1; putc(64 + g); } f(0); putc(64 + g);' > "$TMP/v21e.bin"
+check_tail "$TMP/v21e.bin" AE "v21: ローカルが同名グローバルを隠す"
+"$IWAC" 'g = 5; void f(int g) { putc(64 + g); } f(2); putc(64 + g);' > "$TMP/v21f.bin"
+check_tail "$TMP/v21f.bin" BE "v21: 引数が同名グローバルを隠す"
+"$IWAC" 'int counter; void bump(int n) { counter = counter + n; } bump(2); bump(3); putc(64 + counter);' > "$TMP/v21g.bin"
+check_run "$TMP/v21g.bin" E "v21: 宣言だけのグローバル (0 から始まる)"
+"$IWAC" 'void f(int n) { int i; int s; s = 0; for (i = 0; i < n; i++) { s = s + i; } putc(64 + s); } int main() { f(4); }' > "$TMP/v21h.bin"
+check_run "$TMP/v21h.bin" F "v21: ローカル宣言とフレーム"
+"$IWAC" 'void out(int c) { int b; b = c; putc(*&b); } int main() { out(65); }' > "$TMP/v21i.bin"
+check_run "$TMP/v21i.bin" A "v21: 単項 & (ローカルの住所)"
+check_error 'putc(&5);' "数への &"
 
 echo "PASS"

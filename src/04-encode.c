@@ -239,7 +239,10 @@ static void out64le(unsigned long v) {
 static void write_elf_header(void) {
     unsigned long filesz = (unsigned long)code_insts * 4ul +
                            (unsigned long)str_used;
-    unsigned long memsz = filesz + (unsigned long)arr_used;
+    /* memsz には配列とグローバル変数 (v21) の領域も含める。
+     * ローダが差分をゼロ埋めする = どちらも 0 で始まる */
+    unsigned long memsz = filesz + (unsigned long)arr_used +
+                          (unsigned long)var_nglobal * 8ul;
     /* ELF ヘッダ (64 バイト) */
     out_byte(0x7f);
     out_byte('E');
