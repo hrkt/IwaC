@@ -17,13 +17,23 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v28（ELF の BSS 化）
+## 現在地: v29（入口・出口の約束への移行）
 
-v28 では出力の節約をした。KosabaOS 用 ELF を
-PT_LOAD 3本に分け、ゼロだけの配列領域をファイルに
-含めない（BSS）形にして、iwac2.elf は約3.0MB から
-126,893 バイトになった。固定点は新しい書き出しでも
-再確認済み。メモリ上の大きさは変わらない。
+v29 では KosabaOS の新しい入口・出口の約束に
+生成コードを合わせた。exec で引数が渡せるように
+なった OS（入口で a0 = argc、a1 = argv）に対し、
+生成コードはレジスタをそのまま main へ渡し、
+v22 の決め打ち argv と静的領域は廃止した。起動は
+`run iwac.elf --kosaba hello.c` の形になる。
+あわせて main の戻り値を exit の終了ステータス
+として返す（ドライバが前の段の成否を見られる）。
+固定点は新しい OS で再確認済み（第2世代も一致）。
+
+その前の v28 では出力の節約をした。KosabaOS 用
+ELF を PT_LOAD 3本に分け、ゼロだけの配列領域を
+ファイルに含めない（BSS）形にして、iwac2.elf は
+約3.0MB から 126,893 バイトになった。メモリ上の
+大きさは変わらない。
 
 その前の v27 で、iwac が iwac 自身をコンパイル
 できるようにする階段（v16〜v27、計画は
@@ -97,7 +107,7 @@ iwac 本体が KosabaOS のユーザープログラムとして動く
 OS のシェルで:
 
 ```
-kosaba> run iwac.elf     (hello.c → hello.elf が作られる)
+kosaba> run iwac.elf --kosaba hello.c     (hello.c → hello.elf が作られる)
 kosaba> run hello.elf
 Hello, World!
 ```

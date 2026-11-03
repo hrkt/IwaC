@@ -274,26 +274,25 @@ static long elf_data_offset(void) {
  *       実体は文字列プールだけ。配列の領域は p_memsz
  *       との差分をローダがゼロ埋めする (v28。中身は
  *       ゼロしか無いのでファイルに含める意味が無い)
- *     3本目 (グローバルと argv): 配列の直後へ。実体は
+ *     3本目 (グローバル): 配列の直後へ。実体は
  *       グローバルの初期イメージ (初期値つきのとき
- *       だけ)、argv の領域はゼロ埋めに任せる。
- *       ファイル内では文字列プールの直後に置く
+ *       だけ)。ファイル内では文字列プールの直後に置く
+ *       (v29 で argv の領域は廃止)
  *   v23 までは1本 (権限 RWE) で、静的データがコード領域
  *   (R+X) に載って書き込みが fault していた。2本に分けた
  *   ことで W^X を保ったまま書き込めるようになる */
 static void write_elf_header(void) {
     unsigned long code_filesz = (unsigned long)code_insts * 4ul;
     /* データ側の実体と確保量 (v28): 2本目は文字列の
-     * 実体 + 配列の確保分、3本目はグローバルの実体
-     * + argv の確保分。差分はローダがゼロ埋めする */
+     * 実体 + 配列の確保分、3本目はグローバルの実体と
+     * 確保分。差分はローダがゼロ埋めする */
     unsigned long data_filesz = (unsigned long)str_used;
     unsigned long data_memsz = (unsigned long)str_used +
                                (unsigned long)arr_used;
     unsigned long gbl_filesz = 0;
     if (has_var_inits)
         gbl_filesz = (unsigned long)var_nglobal * 8ul;
-    unsigned long gbl_memsz = (unsigned long)var_nglobal * 8ul +
-                              (unsigned long)argv_used;
+    unsigned long gbl_memsz = (unsigned long)var_nglobal * 8ul;
     /* ELF ヘッダ (64 バイト) */
     out_byte(0x7f);
     out_byte('E');

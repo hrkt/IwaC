@@ -1176,21 +1176,11 @@ static int gen_stmt(int node) {
  * スタックはバイナリの後ろの空き地に置き、下へ伸ばす */
 static unsigned int stack_top_addr;
 
-/* main の決め打ち argv の置き場所 (v22): KosabaOS
- * ターゲットで main が引数を持つときだけ使う。OS は
- * argv を渡す仕組みを持っていないので、kosaba/ の crt
- * と同じ {"iwac", "--kosaba", "hello.c"} を入口の
- * 生成コードが実行時に組み立てる (文字列のバイト列と
- * ポインタ配列の置き場所だけ、グローバルの後ろに確保)。
- * 文字列は合計 22 バイト ("iwac" 5 + "--kosaba" 9 +
- * "hello.c" 8、末尾の 0 込み)、ポインタ配列はその後ろの
- * 8 バイト境界から 3 つ分 (24 バイト) */
-static int need_argv;
-static int argv_used;  /* argv 領域の大きさ (使うとき 48、
-                        * 使わないとき 0)。encode が ELF の
-                        * memsz に足すために持つ */
-static unsigned int argv_str_addr;
-static unsigned int argv_arr_addr;
+/* main の argc / argv (v29): KosabaOS が入口の約束で
+ * a0 = argc、a1 = argv を渡すようになった (OS 側
+ * 2aa149b) ので、入口はレジスタをそのまま main へ
+ * 渡す。v22 の決め打ち argv (静的領域に組み立てる
+ * 方式) は廃止し、argv のための静的領域も無くなった */
 
 /* 関数1つ分の命令列を作る: 入口の決まり文句 (プロローグ)
  * → 本体 → 出口の決まり文句 (エピローグ)。
@@ -1399,50 +1389,27 @@ static int gen_all(void) {
          * main の入口では、戻り先が ra に入っているのを
          * 通常の関数と同じく退避するので、呼び出しの作法
          * そのままで動く */
-        if (need_argv) {
-            /* main が引数を持つ KosabaOS 版 (v22): 決め打ち
-             * の argv を静的領域に組み立ててから呼ぶ。
-             * kosaba/ の crt と同じ {"iwac", "--kosaba",
-             * "hello.c"}。文字列は1バイトずつ sb で書き、
-             * ポインタ配列は住所を作って sd する。バイナリ
-             * のイメージにデータとして埋めるのではなく
-             * 実行時に作るので、ELF の filesz には何も
-             * 要らない (memsz の範囲にゼロ埋めで置ける) */
-            char bytes[22];
-            bytes[0] = 'i'; bytes[1] = 'w'; bytes[2] = 'a';
-            bytes[3] = 'c'; bytes[4] = 0;
-            bytes[5] = '-'; bytes[6] = '-'; bytes[7] = 'k';
-            bytes[8] = 'o'; bytes[9] = 's'; bytes[10] = 'a';
-            bytes[11] = 'b'; bytes[12] = 'a'; bytes[13] = 0;
-            bytes[14] = 'h'; bytes[15] = 'e'; bytes[16] = 'l';
-            bytes[17] = 'l'; bytes[18] = 'o'; bytes[19] = '.';
-            bytes[20] = 'c'; bytes[21] = 0;
-            gen_load_addr(REG_T2, argv_str_addr);
-            for (int i = 0; i < 22; i++) {
-                asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, bytes[i]);
-                asm_push(OP_SB, 0, REG_T2, REG_T1, i);
-            }
-            gen_load_addr(REG_T2, argv_arr_addr);
-            gen_load_addr(REG_T1, argv_str_addr);
-            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
-            gen_load_addr(REG_T1, argv_str_addr + 5);
-            asm_push(OP_SD, 0, REG_T2, REG_T1, 8);
-            gen_load_addr(REG_T1, argv_str_addr + 14);
-            asm_push(OP_SD, 0, REG_T2, REG_T1, 16);
-            /* argc = 3、argv = 配列の住所を a0 / a1 へ */
-            asm_push(OP_ADDI, REG_A0, REG_ZERO, 0, 3);
-            gen_load_addr(REG_A1, argv_arr_addr);
-        }
+        /* main の引数 (v29): KosabaOS では入口の a0 に
+         * argc、a1 に argv が入って届く (OS の約束)。
+         * 関数の作法でも引数は a0 から順なので、触らずに
+         * main を呼べば main のプロローグが枠へ写す。
+         * ベアメタルでは引数の届け先が無いので、main に
+         * 引数があっても値は不定 (従来どおり) */
         asm_push(OP_JAL, REG_RA, 0, 0, -(prog_main + 1));
         if (target_kosaba) {
-            /* kosaba_flush の約束 (v27): プログラムが
+            /* main から戻った後 (v29): 終了ステータス
+             * (OS 側 d28c7b8 で exit の a0 = ステータスに
+             * なった) として、main の戻り値 (t1) を
+             * exit の a0 へ渡す。
+             * kosaba_flush の約束 (v27): プログラムが
              * kosaba_flush という名前の関数を持っていれば、
-             * main から戻った後・exit の前に1回呼ぶ。
-             * kosaba/ の crt が GCC 版の iwac で呼んでいる
-             * のと同じ約束で、ランタイム側の「終了時に
-             * やること」(出力バッファの書き切りなど)の
-             * 置き場所にする。持っていないプログラムの
-             * 出力は従来と変わらない */
+             * exit の前に1回呼ぶ。kosaba/ の crt が GCC 版
+             * の iwac で呼んでいるのと同じ約束で、
+             * ランタイム側の「終了時にやること」(出力
+             * バッファの書き切りなど) の置き場所にする。
+             * 呼ぶ場合は、戻り値が呼び出しで消えないよう
+             * 先にスタックへ退避してから呼ぶ */
+            int flush_f = -1;
             for (int f = 0; f < nfunc; f++) {
                 if (!func_has_body[f])
                     continue;
@@ -1463,16 +1430,31 @@ static int gen_all(void) {
                     func_names[f][9] == 'u' &&
                     func_names[f][10] == 's' &&
                     func_names[f][11] == 'h') {
-                    asm_push(OP_JAL, REG_RA, 0, 0, -(f + 1));
+                    flush_f = f;
                     break;
                 }
+            }
+            if (flush_f >= 0) {
+                asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+                asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+                asm_push(OP_JAL, REG_RA, 0, 0, -(flush_f + 1));
+                asm_push(OP_LD, REG_A0, REG_SP, 0, 0);
+                asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+            } else {
+                /* mv a0, t1 -- main の戻り値がステータス */
+                asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
             }
         }
     }
     if (target_kosaba) {
         /* KosabaOS: exit システムコール (番号 3) で終わる。
          * 戻ってくることはない。シェルから起動された場合は
-         * シェルへ、'u' で起動された場合はカーネルへ戻る */
+         * シェルへ、'u' で起動された場合はカーネルへ戻る。
+         * ステータス (a0) は、main のあるプログラムでは
+         * main の戻り値が入れてある (上の v29 の処理)。
+         * main の無いプログラムは 0 で終わる */
+        if (prog_main < 0)
+            asm_push(OP_ADDI, REG_A0, REG_ZERO, 0, 0);
         asm_push(OP_ADDI, REG_A7, REG_ZERO, 0, 3);
         asm_push(OP_ECALL, 0, 0, 0, 0);
     } else {
@@ -1499,8 +1481,8 @@ static int gen_all(void) {
  *   住所の確定: 静的データの先頭 (data_base) を決める。
  *          ベアメタルではコードの後ろ (LOAD_BASE +
  *          命令数 x 4)、KosabaOS ではデータ領域
- *          0x40200000 (v24)。文字列・配列・グローバル・
- *          argv は data_base からの並びで住所が決まる
+ *          0x40200000 (v24)。文字列・配列・グローバルは
+ *          data_base からの並びで住所が決まる
  *   2回目: 確定した住所で作り直す。これが最終成果になる */
 static int gen_program(void) {
     code_insts = 0;
@@ -1521,12 +1503,6 @@ static int gen_program(void) {
         stack_needed = list_needs_stack(func_body[f]);
     stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */
     globals_base = LOAD_BASE;    /* 同上 (グローバルの住所) */
-    /* argv が要るかどうかは住所に依存しないので、1回目の
-     * 生成の前に決める (入口の命令数が2回で揃うため、v22) */
-    need_argv = target_kosaba && prog_main >= 0 &&
-                func_nparams[prog_main] > 0;
-    argv_str_addr = LOAD_BASE;   /* 1回目は仮の値 (個数は同じ) */
-    argv_arr_addr = LOAD_BASE;
     for (int i = 0; i < narr; i++)
         arr_addr[i] = LOAD_BASE;  /* 同上 (配列の住所も仮置き) */
     /* 条件分岐の範囲の点検 (v27): 届かない分岐は長い形に
@@ -1542,7 +1518,7 @@ static int gen_program(void) {
             break;
     }
     code_insts = nasm;
-    /* 静的データ (文字列 → 配列 → グローバル → argv) の
+    /* 静的データ (文字列 → 配列 → グローバル) の
      * 置き場所の先頭 (v24 でターゲット別になった):
      *   ベアメタル: コードの後ろ (従来どおり連続配置)
      *   KosabaOS  : OS のデータ領域 0x40200000。コード
@@ -1574,23 +1550,13 @@ static int gen_program(void) {
      * してから使う約束) */
     globals_base = data_base + (unsigned int)str_used +
                    (unsigned int)arr_used;
-    /* main の決め打ち argv はグローバルの後ろ (v22)。
-     * 要るのは KosabaOS ターゲットで main が引数を
-     * 持つときだけ。その間 encode 側の memsz は、この
-     * 分も含めて確保する (下の argv_used 参照) */
-    need_argv = target_kosaba && prog_main >= 0 &&
-                func_nparams[prog_main] > 0;
-    argv_used = need_argv ? 48 : 0;
-    argv_str_addr = globals_base + (unsigned int)var_nglobal * 8u;
-    argv_arr_addr = argv_str_addr + 24u;  /* 文字列分を
-                        * 8 バイト境界に切り上げた位置 */
     {
+        /* スタックは静的領域の後ろ 4KB 先から下へ伸ばす。
+         * 16 バイト単位に切り上げておく (置き場所の約束)。
+         * 静的領域の末尾はグローバルの後ろ (v29 で argv
+         * の領域が無くなった) */
         unsigned int tail = globals_base +
                             (unsigned int)var_nglobal * 8u;
-        if (need_argv)
-            tail = argv_arr_addr + 24u;
-        /* スタックは静的領域の後ろ 4KB 先から下へ伸ばす。
-         * 16 バイト単位に切り上げておく (置き場所の約束) */
         stack_top_addr = tail + 4096u;
         stack_top_addr = (stack_top_addr + 15u) & ~15u;
     }

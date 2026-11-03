@@ -581,17 +581,20 @@ check_run "$TMP/v22h.bin" B "v22: 戻り値つき return (v20 ではエラーだ
 # 引数5つの定義は v25 で上限が8つになり意味を持つようになった (上の v25 で8つを確認)
 check_error 'int f(int a) { return a; } putc(f(1, 2));' "引数の数が合わない呼び出し"
 
-# --- v22: KosabaOS 向けの main 引数 (決め打ち argv) ---
-# argv の置き場所 (文字列 24 + ポインタ配列 24) が確保
-# されていることを確かめる。v28 からは3本目の LOAD
-# (グローバル + argv) の memsz が filesz より 48 バイト
-# 大きい形で出る。OS 上での実行確認は v24 で済んだ
-# (データセグメント分離の後、Nish から run して argc と
-# グローバル書き込みが動くことを確認)
+# --- v22/v29: KosabaOS 向けの main 引数 (argv) ---
+# v22 では決め打ち argv の置き場所 (48 バイト) が静的
+# 領域に確保されることを確かめていた。v29 から argv は
+# OS が入口レジスタ (a0 = argc、a1 = argv) で渡す約束
+# になり、静的領域は廃止された。ここでは3本目の LOAD
+# の memsz が filesz と一致する (= argv 領域が無い)
+# ことを確かめる。OS 上での実行確認は v29 で済んだ
+# (run t.elf hello で argc と argv[1] が届くこと、
+# main の戻り値 7 が exit status として Nish に
+# 表示されること、iwac の固定点が新方式でも一致)
 "$IWAC" --kosaba 'int main(int argc, char **argv) { putc(64 + argc); }' > "$TMP/v22k.elf"
 set -- $(readelf -l "$TMP/v22k.elf" | awk '/LOAD/{n++; if (n == 3) {getline; print $1, $2; exit}}')
-[ $(( $2 - $1 )) -eq 48 ] || fail "v22: kosaba の argv 領域 (memsz - filesz) が 48 でない (filesz=$1 memsz=$2)"
-echo "ok: v22: kosaba の argv 領域 48 バイトが memsz に確保された"
+[ $(( $2 - $1 )) -eq 0 ] || fail "v29: kosaba の静的 argv 領域が残っている (filesz=$1 memsz=$2)"
+echo "ok: v29: kosaba の argv はレジスタ渡し (静的領域なし)"
 
 # --- v23: 配列の完成 ---
 "$IWAC" 'int a[4]; a[0] = 65; a[1] = 66; a[2] = 67; putc(a[0]); putc(a[1]); putc(a[2]);' > "$TMP/v23a.bin"

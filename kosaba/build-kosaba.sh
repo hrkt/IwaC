@@ -16,7 +16,7 @@
 # 使い方:
 #   ./kosaba/build-kosaba.sh   → kosaba/iwac.elf ができる
 # できた ELF を OS のファイルシステムに置き、OS のファイル
-# hello.c を用意してシェルから `run iwac.elf` すると、
+# hello.c を用意してシェルから `run iwac.elf --kosaba hello.c` すると、
 # hello.elf が作られる。続けて `run hello.elf` で実行できる。
 #
 # メモリ配置は OS の約束どおり: コード 0x40000000

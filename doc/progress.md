@@ -1,5 +1,21 @@
 # IwaC 進捗（できていること）
 
+## 2026-11-03: v29（入口・出口の約束への移行）— argv を OS から受け、終了ステータスを返す
+
+- KosabaOS の exec が引数を渡せるようになった
+  （OS 側 2aa149b）のを受け、生成コードの入口は
+  a0 = argc、a1 = argv をそのまま main へ渡す形に
+  なった。v22 の決め打ち argv と静的領域は廃止し、
+  起動は `run iwac.elf --kosaba hello.c` の形に
+- 出口は main の戻り値を exit のステータスとして
+  返す（OS 側 d28c7b8）。kosaba_flush を呼ぶ場合は
+  戻り値をスタックへ退避して保護。kosaba/ の crt
+  （GCC 版）も同じ約束に統一した
+- OS 上で固定点を再確認（digest len=126910
+  sum=000000000073ac65 hash=7c5cbbf41c5c1275、
+  第2世代も一致）。引数の受け取りとステータス
+  （成功 0 / 失敗 1 / 任意の 7）の表示も確認済み
+
 ## 2026-11-03: v28（ELF の BSS 化）— iwac2.elf が 3.0MB → 127KB に
 
 - KosabaOS 用 ELF を PT_LOAD 3本に分け、ゼロだけの

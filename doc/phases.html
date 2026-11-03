@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v28 まで</title>
+<title>IwaC の歩み — v0 から v29 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v28 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v29 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -348,7 +348,8 @@
   <a class="done" href="#v25">v25 容量と小さい構文</a>
   <a class="done" href="#v26">v26 ローカル配列</a>
   <a class="done" href="#v27">v27 セルフホスト</a>
-  <a class="done" href="#v28">v28 ELF の BSS 化</a>
+  <a class="done" href="#v28">v28 ELF の BSS 化</a><span class="arrow">→</span>
+  <a class="done" href="#v29">v29 入口と出口の約束</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1555,11 +1556,37 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   小さいボードに載せるには作業机そのものを小さくした
   shirasu が要ります。</p></div>
 </section>
+<!-- ================= v29 ================= -->
+<section class="phase" id="v29">
+  <div class="head"><span class="badge b-v4">v29</span><h2>入口と出口の約束 — 引数をもらい、結果を返す</h2></div>
+  <p class="goal-line">目標：<b>OS から引数を受け取って起動し、終わるときに「うまくいったかどうか」を返す、普通の道具の作法に合わせる。</b></p>
+  <p>今までの iwac 製プログラムは、引数を OS から受け取る仕組みが
+  無かったので、起動時に「iwac --kosaba hello.c」という決め打ちの
+  引数を自分で組み立てていました。KosabaOS 側で exec が引数を
+  渡せるようになり、入口のレジスタに argc（a0）と argv（a1）が
+  入って届く約束になりました。生成コードはレジスタをそのまま
+  main に渡すだけになり、決め打ちの組み立ても、引数のために
+  確保していた静的領域も要らなくなりました。起動の形は
+  <code>run iwac.elf --kosaba hello.c</code> になります。</p>
+  <p>出口も変わりました。main の戻り値を、終了を伝える
+  システムコールの引数（終了ステータス）として返すように
+  しました。OS はそれを起動した側（親やシェル）に伝えます。
+  iwac 自身は失敗したときに 1 を返すので、「前のコンパイルが
+  成功したかどうか」で次を決めるドライバ（これから作る道具）が
+  書けるようになります。</p>
+  <div>
+    <span class="chip">決め打ち argv を廃止</span><span class="chip">終了ステータス</span><span class="chip">固定点を再確認</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  プログラムの入り口と出口の約束は、OS とプログラムの間の契約です。
+  片方だけでは変えられず、OS 側の引数渡しと終了ステータスが
+  揃ってはじめて、コンパイラ側が追随できました。</p></div>
+</section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v28 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v29 時点）</p>
 </footer>
 
 </div>
