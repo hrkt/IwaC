@@ -90,11 +90,14 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
  *   入口で sp をフレーム長だけ引き、ra を一番上 (fp-8)、
  *   呼び出し側の fp をその下 (fp-16) に退避し、fp を張る。
  *   枠 k の住所は sp(引き後) + 8k = fp - フレーム長 + 8k。
- * フレーム長は「16 + 枠数 x 8」を16バイト単位に切り上げ */
+ *   ローカル配列 (v26) は枠の並びの上 (fp-16 の下) に
+ *   置く: 先頭は sp(引き後) + 枠数 x 8 + arr_foff。
+ * フレーム長は「16 + 枠数 x 8 + ローカル配列の合計」を
+ * 16バイト単位に切り上げたもの */
 static unsigned int globals_base;  /* gen_program が確定させる */
 
 static int func_frame_size(int f) {
-    int size = 16 + func_nlocals[f] * 8;
+    int size = 16 + func_nlocals[f] * 8 + func_arr_bytes[f];
     return (size + 15) & ~15;
 }
 
@@ -194,6 +197,31 @@ static int elem_esize(int node) {
     return arr_esize[node_val[node]];
 }
 
+/* 配列の先頭アドレスをレジスタに作る (v26)。
+ * グローバル配列は静的領域の住所 (gen_load_addr)。
+ * ローカル配列はフレームの中、変数の枠の並びの上に
+ * あるので、fp から「枠の分 + フレームの底からの
+ * 位置 − フレーム長」を足した所になる。
+ * オフセットが addi の範囲 (±2048) を超えたら、
+ * 定数を作って足す形に分ける */
+static void gen_load_arr_base(int reg, int a) {
+    if (arr_owner[a] < 0) {
+        gen_load_addr(reg, arr_addr[a]);
+        return;
+    }
+    int off = func_nlocals[arr_owner[a]] * 8 + arr_foff[a] -
+              func_frame_size(arr_owner[a]);
+    if (off >= -2048 && off <= 2047) {
+        asm_push(OP_ADDI, reg, REG_FP, 0, off);
+        return;
+    }
+    int hi = (off + 0x800) >> 12;
+    int lo = off - (hi << 12);
+    asm_push(OP_LUI, reg, 0, 0, hi);
+    asm_push(OP_ADD, reg, REG_FP, reg, 0);
+    asm_push(OP_ADDI, reg, reg, 0, lo);
+}
+
 /* 変数の住所をレジスタに作る (v21) */
 static void gen_var_addr(int reg, int var) {
     if (var_owner[var] < 0)
@@ -251,7 +279,7 @@ static void gen_load_leaf(int reg, int leaf) {
         gen_load_addr(reg, str_addr[node_val[leaf]]);
     else if (k == NODE_ARRAY)
         /* 配列の名前の「値」は先頭アドレス */
-        gen_load_addr(reg, arr_addr[node_val[leaf]]);
+        gen_load_arr_base(reg, node_val[leaf]);
     else { /* NODE_DEREF: lhs が住所を表すノード */
         int operand = node_lhs[leaf];
         if (node_kind[operand] == NODE_VAR) {
@@ -266,7 +294,7 @@ static void gen_load_leaf(int reg, int leaf) {
             if (node_kind[operand] == NODE_NUM)
                 gen_load_addr(reg, (unsigned int)node_val[operand]);
             else if (node_kind[operand] == NODE_ARRAY)
-                gen_load_addr(reg, arr_addr[node_val[operand]]);
+                gen_load_arr_base(reg, node_val[operand]);
             else /* NODE_STR: 文字列の住所から読む */
                 gen_load_addr(reg, str_addr[node_val[operand]]);
             asm_push(OP_LBU, reg, reg, 0, 0);
@@ -341,7 +369,7 @@ static int gen_expr(int node) {
                 asm_push(OP_MUL, REG_T1, REG_T1, REG_A0, 0);
             }
         }
-        gen_load_addr(REG_T2, arr_addr[a]);
+        gen_load_arr_base(REG_T2, a);
         asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
         return 1;
     }
@@ -471,7 +499,7 @@ static int gen_expr(int node) {
         if (node_kind[operand] == NODE_VAR)
             gen_var_addr(REG_T1, node_val[operand]);
         else if (node_kind[operand] == NODE_ARRAY)
-            gen_load_addr(REG_T1, arr_addr[node_val[operand]]);
+            gen_load_arr_base(REG_T1, node_val[operand]);
         else {
             /* 要素: 住所作りの道具が t2 に住所を置く */
             if (!gen_elem_addr(operand))
@@ -652,7 +680,7 @@ static int gen_elem_addr(int node) {
         /* t1 = 線形添字 (行 × 列数 + 列) */
         if (arr_esize[a] == 8)
             asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
-        gen_load_addr(REG_T2, arr_addr[a]);
+        gen_load_arr_base(REG_T2, a);
         asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
         return 1;
     }
@@ -676,7 +704,7 @@ static int gen_elem_addr(int node) {
             return 0;
         if (elem_esize(node) == 8)
             asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
-        gen_load_addr(REG_T2, arr_addr[node_val[node]]);
+        gen_load_arr_base(REG_T2, node_val[node]);
         asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
         return 1;
     }
@@ -1316,10 +1344,14 @@ static int gen_program(void) {
         data_base = LOAD_BASE + (unsigned int)nasm * 4u;
     for (int i = 0; i < nstr; i++)
         str_addr[i] = data_base + (unsigned int)str_off[i];
-    /* 配列の領域は文字列の後ろに置く */
+    /* グローバル配列の領域は文字列の後ろに置く。
+     * ローカル配列はフレームの中なので住所は持たない
+     * (gen_load_arr_base が fp 相対で作る、v26) */
     for (int i = 0; i < narr; i++)
-        arr_addr[i] = data_base + (unsigned int)str_used +
-                      (unsigned int)arr_off[i];
+        arr_addr[i] = arr_owner[i] < 0
+            ? data_base + (unsigned int)str_used +
+              (unsigned int)arr_off[i]
+            : 0u;
     /* グローバル変数の領域は配列の後ろ (v21)。
      * 8 バイトずつ。初期値のあるものは encode が初期
      * イメージとして埋め、無いものは 0 で始まる

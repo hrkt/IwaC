@@ -285,10 +285,15 @@ static int func_called[128];
 static int nfunc;
 
 /* --- 配列の名簿 ---
- * 配列は変数 (レジスタ) と違い、メモリに置き場所が要る。
- * 置き場所はバイナリの「コード＋文字列の後ろ」にまとめて
- * 確保し (静的な領域)、住所は文字列と同じく2パス生成で
- * 確定させる。配列 i 番について:
+ * 配列は変数と違い、メモリに置き場所が要る。置き場所は
+ * スコープで違う (v26 でローカル配列が入った):
+ *   グローバル配列: バイナリの「コード＋文字列の後ろ」の
+ *     静的な領域にまとめて確保し、住所は文字列と同じく
+ *     2パス生成で確定させる
+ *   ローカル配列  : 宣言した関数のフレームの中。置き場所
+ *     はフレームの底からの位置で表し、実行時は fp 相対で
+ *     辿る。呼び出しごとに別の実体になる (再帰でも安全)
+ * 配列 i 番について:
  *   arr_size[i] : 最初の [ ] の数 (1次元なら要素数、
  *                 2次元なら行数)
  *   arr_cols[i] : 2次元の列数 (1次元なら 0、v23)
@@ -296,28 +301,55 @@ static int nfunc;
  *                 宣言の型から決まる: ポインタの配列
  *                 (型に * が付く) は 8、char は 1、
  *                 それ以外は 8
- *   arr_off[i]  : 配列領域の中での位置 (バイト単位)
- *   arr_addr[i] : 確定した先頭アドレス (第2層が決める)
- * 配列は最大128個、合計 4MB まで (v25 で実測に合わせて拡大) */
+ *   arr_owner[i]: 持ち主の関数番号。-1 ならグローバル
+ *   arr_off[i]  : グローバル配列の、配列領域の中での
+ *                 位置 (バイト単位)
+ *   arr_foff[i] : ローカル配列の、フレーム内の配列
+ *                 置き場 (変数の枠の並びの上) の中での
+ *                 位置 (バイト単位、v26)
+ *   arr_addr[i] : グローバル配列の確定した先頭アドレス
+ *                 (第2層が決める。ローカルでは使わない)
+ * 配列は最大128個、グローバルの合計 4MB まで
+ * (v25 で実測に合わせて拡大) */
 static char arr_names[128][32];
 static int arr_name_len[128];
 static int arr_size[128];
 static int arr_cols[128];
 static int arr_esize[128];
+static int arr_owner[128];
 static int arr_off[128];
+static int arr_foff[128];
 static unsigned int arr_addr[128];
 static int narr;      /* 登録された配列の数 */
-static int arr_used;  /* 配列領域の使用済みバイト数 */
+static int arr_used;  /* グローバル配列領域の使用済みバイト数 */
+/* func_arr_bytes[f]: 関数 f のフレームに入るローカル
+ * 配列の合計バイト数 (v26)。フレーム長の計算 (第2層の
+ * func_frame_size) が使う */
+static int func_arr_bytes[128];
 
-/* 名前 (場所と長さで渡す) の配列があればその番号、無ければ -1 */
+/* 名前の一致だけを見る小物 (変数の var_name_eq と同じ) */
+static int arr_name_eq(int i, char *name, int len) {
+    if (arr_name_len[i] != len)
+        return 0;
+    int j = 0;
+    while (j < len && arr_names[i][j] == name[j])
+        j++;
+    return j == len;
+}
+
+/* 今見えている範囲で名前の配列を探す: まず解析中の
+ * 関数のローカル、次にグローバル (変数の find_var と
+ * 同じ作法)。あれば番号、無ければ -1 */
 static int find_array(char *name, int len) {
+    if (parse_cur_func >= 0) {
+        for (int i = 0; i < narr; i++) {
+            if (arr_owner[i] == parse_cur_func &&
+                arr_name_eq(i, name, len))
+                return i;
+        }
+    }
     for (int i = 0; i < narr; i++) {
-        if (arr_name_len[i] != len)
-            continue;
-        int j = 0;
-        while (j < len && arr_names[i][j] == name[j])
-            j++;
-        if (j == len)
+        if (arr_owner[i] == -1 && arr_name_eq(i, name, len))
             return i;
     }
     return -1;
@@ -326,10 +358,21 @@ static int find_array(char *name, int len) {
 /* 配列を名簿に登録し、番号を返す。rows は最初の [ ] の
  * 数、cols は2つ目の [ ] の数 (1次元なら 0)、esize は
  * 要素の大きさ。確保する大きさは 要素数 × esize バイト。
- * 名前は変数とも配列とも重なってはいけない。失敗したら -1 */
+ * スコープの作法は変数と同じ (v26): 今のスコープ (解析中
+ * の関数、またはファイル範囲) に同名の配列や、今見えて
+ * いる同名の変数があればエラー。外側の同名は隠れる。
+ * 宣言場所で置き場所が決まる: 関数の中ならフレーム、
+ * 外なら静的な領域。失敗したら -1 */
 static int define_array(char *name, int len, int rows, int cols,
                         int esize) {
-    if (find_array(name, len) >= 0 || find_var(name, len) >= 0) {
+    for (int i = 0; i < narr; i++) {
+        if (arr_owner[i] == parse_cur_func &&
+            arr_name_eq(i, name, len)) {
+            errmsg = "その名前は既に使われています";
+            return -1;
+        }
+    }
+    if (find_var(name, len) >= 0) {
         errmsg = "その名前は既に使われています";
         return -1;
     }
@@ -338,7 +381,9 @@ static int define_array(char *name, int len, int rows, int cols,
         return -1;
     }
     int elems = cols > 0 ? rows * cols : rows;
-    if (arr_used + elems * esize > 4194304) {
+    int bytes = elems * esize;
+    if (parse_cur_func < 0 &&
+        arr_used + bytes > 4194304) {
         errmsg = "配列の合計が大きすぎます (4MBまで)";
         return -1;
     }
@@ -349,8 +394,20 @@ static int define_array(char *name, int len, int rows, int cols,
     arr_size[i] = rows;
     arr_cols[i] = cols;
     arr_esize[i] = esize;
-    arr_off[i] = arr_used;
-    arr_used += elems * esize;
+    arr_owner[i] = parse_cur_func;
+    if (parse_cur_func < 0) {
+        arr_off[i] = arr_used;
+        arr_used += bytes;
+        arr_foff[i] = 0;
+    } else {
+        /* ローカル配列はフレームの底から詰める。要
+         * 素が 8 バイトの配列の先頭が 8 バイト境界に
+         * 来るよう、使う分を 8 の倍数に切り上げる */
+        int alloc = (bytes + 7) & ~7;
+        arr_foff[i] = func_arr_bytes[parse_cur_func];
+        func_arr_bytes[parse_cur_func] += alloc;
+        arr_off[i] = 0;
+    }
     return i;
 }
 
@@ -1431,6 +1488,7 @@ static int parse_funcdef(void) {
         func_nparams[f] = 0;
         func_body[f] = -1;
         func_nlocals[f] = 0;
+        func_arr_bytes[f] = 0;
         func_has_body[f] = 0;
         func_called[f] = 0;
     }

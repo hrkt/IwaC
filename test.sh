@@ -43,6 +43,7 @@
 #   v23: 配列の完成 (8バイト要素、2次元配列、ポインタの添字)
 #   v24: グローバル宣言とプロトタイプ (初期化子は初期イメージ、宣言だけの関数、ELF のデータセグメント分離)
 #   v25: 容量の調整と小さい構文の追随 (実測で決めた表の定数、static、引数8つ、三項、キャスト、複合代入、要素の増減、単一文本体)
+#   v26: 配列のスコープとローカル配列 (同名を別関数で宣言、隠蔽、2次元、再帰、フレーム配置)
 set -e
 cd "$(dirname "$0")"
 
@@ -669,5 +670,21 @@ check_tail "$TMP/v25k.bin" AAB "v25: 大きな数と接尾辞 (2047 の壁を撤
 "$IWAC" 'char big[100000]; big[99999] = 65; putc(big[99999]);' > "$TMP/v25l.bin"
 check_run "$TMP/v25l.bin" A "v25: 大きな配列 (合計 4MB まで)"
 check_error 'int f(int a, int b, int c, int d, int e, int g, int h, int i, int j) { return a; }' "引数9つの定義"
+
+# --- v26: 配列のスコープとローカル配列 ---
+"$IWAC" 'int f(void) { char name_buf[32]; name_buf[0] = 65; return name_buf[0]; } int g(void) { char name_buf[32]; name_buf[0] = 66; return name_buf[0]; } int main(void) { putc(f()); putc(g()); return 0; }' > "$TMP/v26a.bin"
+check_tail "$TMP/v26a.bin" AB "v26: 別々の関数で同名のローカル配列"
+"$IWAC" 'char buf[4]; int main(void) { char buf[4]; buf[0] = 65; putc(buf[0]); return 0; }' > "$TMP/v26b.bin"
+check_run "$TMP/v26b.bin" A "v26: ローカル配列が同名グローバルを隠す"
+"$IWAC" 'void put_first(char *p) { putc(p[0]); } int main(void) { char m[2][3]; m[0][0] = 65; m[1][0] = 66; m[0][1] = m[1][0] + 1; putc(m[0][1]); put_first(m[1]); return 0; }' > "$TMP/v26c.bin"
+check_tail "$TMP/v26c.bin" CB "v26: 2次元のローカル配列と行アドレス"
+"$IWAC" 'int rec(int n) { char b[8]; b[0] = 65 + n; if (n == 0) { putc(b[0]); return 0; } rec(n - 1); putc(b[0]); return 0; } int main(void) { rec(2); return 0; }' > "$TMP/v26d.bin"
+check_tail "$TMP/v26d.bin" ABC "v26: 再帰でもフレームごとに別の配列"
+"$IWAC" 'int main(void) { int a[4]; int x; x = 90; a[0] = 65; a[1] = 66; putc(a[0]); putc(a[1]); putc(x - 25); return 0; }' > "$TMP/v26e.bin"
+check_tail "$TMP/v26e.bin" ABA "v26: ローカル配列とローカル変数が重ならない"
+"$IWAC" 'int main(void) { char big[5000]; big[4999] = 65; big[0] = 66; putc(big[0]); putc(big[4999]); return 0; }' > "$TMP/v26f.bin"
+check_tail "$TMP/v26f.bin" BA "v26: 大きなローカル配列 (フレームのオフセットが addi 範囲外)"
+check_error 'int main(void) { char b[4]; char b[8]; return 0; }' "同じ関数で同じ名前の配列を2回宣言"
+check_error 'int main(void) { char b[4]; int b; return 0; }' "配列と同じ名前の変数"
 
 echo "PASS"

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v25 まで</title>
+<title>IwaC の歩み — v0 から v26 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v25 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v26 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -346,6 +346,7 @@
   <a class="done" href="#v23">v23 配列の完成</a><span class="arrow">→</span>
   <a class="done" href="#v24">v24 グローバル宣言とプロトタイプ</a><span class="arrow">→</span>
   <a class="done" href="#v25">v25 容量と小さい構文</a>
+  <a class="done" href="#v26">v26 ローカル配列</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1429,10 +1430,49 @@ if (ok) putc(65);                        // { } 無しの本体</pre>
   次の段の主題になりました。</p></div>
 </section>
 
+<section class="phase" id="v26">
+  <div class="head"><span class="badge b-v4">v26</span><h2>配列のスコープとローカル配列 — 置き場所はフレーム</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の11段目。関数の中の配列（ローカル配列）を、変数と同じ作法で扱えるようにすること。</b></p>
+  <p>これまで配列はプログラム全体で名前が一意、という決まりでした。だから
+  <code>char name_buf[32];</code> のような配列を2つの関数で宣言すると
+  「その名前は既に使われています」で止まります。変数は v21 で関数ごとの
+  スコープを持つようになっていたので、配列にも同じ「持ち主（関数）」の
+  概念を足し、名前の解決を変数とそろえました：まず自分の関数の配列、
+  次にグローバル。同名のローカル配列が関数ごとに持て、ローカルが
+  同名のグローバルを隠します。</p>
+<pre class="code">int f(void) { char name_buf[32]; name_buf[0] = 65; return name_buf[0]; }
+int g(void) { char name_buf[32]; name_buf[0] = 66; return name_buf[0]; }
+int main(void) { putc(f()); putc(g()); return 0; }   // AB と出る</pre>
+  <p>置き場所は、グローバル配列が静的な領域なのに対し、ローカル配列は
+  関数のフレーム（呼び出しのたびに作られる作業領域）の中です。だから
+  呼び出しごとに実体が別になり、再帰しても壊れません。フレームの中の
+  並びは「変数の枠 → ローカル配列 → 戻り先の退避場所」の順で、
+  フレームの大きさに配列の合計が加わります。</p>
+  <p>実は初版でこの並びを間違え、配列を変数の枠の下に置いてしまいました。
+  すると最初の引数の置き場所と配列が重なります。普通の呼び出しでは
+  たまたま動いてしまったのに、再帰のテストでは引数を配列への書き込みで
+  潰して無限ループになりました。「枠の上」に直し、再帰・変数との共存・
+  2次元配列・行アドレス・大きなローカル配列まで確かめました。</p>
+  <p>これで iwac 自身のソースは全文が読めるようになりました。残る壁は
+  外部の4つの関数（write / open / read / close：OS の関数で、宣言だけが
+  ソースにある）の定義だけです。仮の定義を足した予行演習では、iwac が
+  自分自身の ELF（約3.0MB）を作るところまで行きました。本物の定義は
+  次の段の kosaba_rt.c が担当します。</p>
+  <div class="chips">
+    <span class="chip">配列にスコープ</span><span class="chip">フレーム配置</span>
+    <span class="chip">再帰でも安全</span><span class="chip">2次元のローカル配列</span>
+    <span class="chip">自分のソースが通り切った</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  メモリの置き場所の重なりは、浅いテストでは「たまたま正しい答え」に
+  化けます。潰し合う値を両方とも後で読み直すテスト（再帰や、変数と配列の
+  共存）で初めて顔を出しました。重なりを疑うテストを置くことが大事です。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v25 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v26 時点）</p>
 </footer>
 
 </div>
