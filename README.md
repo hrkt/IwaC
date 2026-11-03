@@ -84,8 +84,9 @@ for の宣言つき初期化、単項 `&`（住所）も使える。
 iwac 本体が KosabaOS のユーザープログラムとして動く
 ようになった（`kosaba/build-kosaba.sh` で `iwac.elf` を
 ビルド）。データ領域が 1MB 級のボード（K210）向けには、
-容量を絞った `kosaba/build-kosaba-small.sh` もある
-（`iwac-small.elf`、静的データ約255KB）。iwac.c は無変更で、入口（crt）と4つの外部関数の
+容量を絞った小容量版「shirasu」もある
+（`kosaba/build-shirasu.sh` で `iwac-shirasu.elf`、
+静的データ約255KB）。iwac.c は無変更で、入口（crt）と4つの外部関数の
 実装（OS のシステムコール）を横に置いて差し替えた。
 OS のシェルで:
 

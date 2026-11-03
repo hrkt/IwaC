@@ -735,20 +735,20 @@ size=$(wc -c < "$TMP/v27self.elf")
 [ "$size" -gt 3000000 ] || fail "v27: セルフコンパイルの出力が小さすぎる ($size バイト)"
 echo "ok: v27: セルフコンパイル (ホスト側) で $size バイトの iwac2.elf ができた"
 
-# --- 小容量ビルド (K210 プロファイル、v15 の節と同じ流儀) ---
-# RISC-V 用 gcc が見つかるときだけ、kosaba/iwac-small.elf が
+# --- 小容量ビルド「shirasu」(K210 プロファイル、v15 の節と同じ流儀) ---
+# RISC-V 用 gcc が見つかるときだけ、kosaba/iwac-shirasu.elf が
 # 作れて、データ量が 1MB に収まることを確かめる (スクリプト
 # 自身が「標準と小容量でコンパイル結果が一致」も確認する。
 # OS 上での実行確認は統合検証として別途実施)
 if [ -n "$RISCV_CC" ]; then
-    (cd kosaba && CC="$RISCV_CC" ./build-kosaba-small.sh >/dev/null 2>&1) || fail "小容量ビルドに失敗"
-    memsz=$(readelf -l kosaba/iwac-small.elf | grep -A1 'LOAD.*0x0000000040200000' | tail -1 | awk '{print $2}')
-    [ -n "$memsz" ] || fail "小容量ビルド: データセグメントが読めない"
+    (cd kosaba && CC="$RISCV_CC" ./build-shirasu.sh >/dev/null 2>&1) || fail "小容量ビルド (shirasu) に失敗"
+    memsz=$(readelf -l kosaba/iwac-shirasu.elf | grep -A1 'LOAD.*0x0000000040200000' | tail -1 | awk '{print $2}')
+    [ -n "$memsz" ] || fail "小容量ビルド (shirasu): データセグメントが読めない"
     dec=$(printf '%d' "$memsz")
-    [ "$dec" -lt 1048576 ] || fail "小容量ビルド: データが 1MB を超えている ($dec バイト)"
-    echo "ok: 小容量ビルド: iwac-small.elf のデータ $dec バイト (1MB 未満)"
+    [ "$dec" -lt 1048576 ] || fail "小容量ビルド (shirasu): データが 1MB を超えている ($dec バイト)"
+    echo "ok: 小容量ビルド (shirasu): iwac-shirasu.elf のデータ $dec バイト (1MB 未満)"
 else
-    echo "skip: 小容量ビルド (RISC-V 用 gcc が無いため)"
+    echo "skip: 小容量ビルド (shirasu、RISC-V 用 gcc が無いため)"
 fi
 
 echo "PASS"

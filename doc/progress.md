@@ -1,5 +1,14 @@
 # IwaC 進捗（できていること）
 
+## 2026-11-03: 小容量ビルドを「shirasu」と命名
+
+- 小容量ビルド（K210 プロファイル）に名前を付けた。
+  スクリプトは `kosaba/build-kosaba-small.sh` から
+  `kosaba/build-shirasu.sh` へ、成果物は
+  iwac-small.elf から iwac-shirasu.elf へ、
+  作業ディレクトリも shirasu-build/ に改名
+- test.sh・README・doc/selfhost.md の参照も追随
+
 ## 2026-11-03: v27（セルフコンパイル）— 階段の12段目、セルフホスト達成
 
 - **固定点を確認した**: ホスト（GCC）版 iwac が

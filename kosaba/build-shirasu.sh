@@ -1,5 +1,7 @@
 #!/bin/sh
-# build-kosaba-small.sh -- 小容量版の iwac.elf をビルドする
+# build-shirasu.sh -- 小容量版の iwac「shirasu」をビルドする
+#
+# この小容量版の名前は「shirasu」(2026-11-03 に命名)。
 #
 # 標準の iwac.elf は静的データが約1.75MB あり、データ領域が
 # 1MB 級しかないボード (K210 の KosabaOS はデータ 1MB) には
@@ -32,8 +34,8 @@
 #   変わったら、それに気付くための仕掛け。
 #
 # 使い方:
-#   ./kosaba/build-kosaba-small.sh
-#     → kosaba/iwac-small.elf ができる
+#   ./kosaba/build-shirasu.sh
+#     → kosaba/iwac-shirasu.elf ができる
 #   作る前に、小容量の iwac (ホスト版) と標準の iwac で
 #   examples/hello-kosaba.c をコンパイルし、出力が一致
 #   することを確かめる (容量だけが違うことの確認)。
@@ -49,9 +51,9 @@ if [ -z "$CC" ] && [ -x "../../../kosaba-os/tools/riscv-gcc/bin/riscv-none-elf-g
 fi
 CC=${CC:-riscv64-linux-gnu-gcc}
 HOSTCC=${HOSTCC:-gcc}
-echo "build-kosaba-small: CC=$CC HOSTCC=$HOSTCC"
+echo "build-shirasu: CC=$CC HOSTCC=$HOSTCC"
 
-WORK=small-build
+WORK=shirasu-build
 rm -rf "$WORK"
 mkdir -p "$WORK"
 for f in ../src/0*.c; do
@@ -65,11 +67,11 @@ apply() {
     file=$1; from=$2; to=$3; want=$4
     n=$(grep -c -F -- "$from" "$WORK/$file" || true)
     if [ "$n" != "$want" ]; then
-        echo "build-kosaba-small: $file の '$from' が $n 件 (期待 $want 件)。本体が変わったかもしれないので止まります" >&2
+        echo "build-shirasu: $file の '$from' が $n 件 (期待 $want 件)。本体が変わったかもしれないので止まります" >&2
         exit 1
     fi
     FROM="$from" TO="$to" perl -pi -e 's/\Q$ENV{FROM}\E/$ENV{TO}/g' "$WORK/$file"
-    echo "build-kosaba-small: $file: '$from' → '$to' ($n 件)"
+    echo "build-shirasu: $file: '$from' → '$to' ($n 件)"
 }
 
 # 02-parse.c: ノード表と変数表と文字列プール。
@@ -96,21 +98,21 @@ apply 06-preproc.c 'exp_len >= 262143' 'exp_len >= 32767' 1
 
 # 小容量の iwac (ホスト版) と、標準の iwac (ホスト版) を作る
 cat "$WORK"/0*.c > "$WORK/iwac_all.c"
-"$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/iwac-small" "$WORK/iwac_all.c"
+"$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/iwac-shirasu" "$WORK/iwac_all.c"
 cat ../src/0*.c > "$WORK/iwac_std_all.c"
 "$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/iwac-std" "$WORK/iwac_std_all.c"
 
 # 容量だけが違うことの確認: 同じ入力からは同じ出力
 "$WORK/iwac-std" --kosaba ../examples/hello-kosaba.c > "$WORK/hello-std.elf"
-"$WORK/iwac-small" --kosaba ../examples/hello-kosaba.c > "$WORK/hello-small.elf"
-if ! cmp -s "$WORK/hello-std.elf" "$WORK/hello-small.elf"; then
-    echo "build-kosaba-small: 標準と小容量でコンパイル結果が違います。止まります" >&2
+"$WORK/iwac-shirasu" --kosaba ../examples/hello-kosaba.c > "$WORK/hello-shirasu.elf"
+if ! cmp -s "$WORK/hello-std.elf" "$WORK/hello-shirasu.elf"; then
+    echo "build-shirasu: 標準と小容量でコンパイル結果が違います。止まります" >&2
     exit 1
 fi
-echo "build-kosaba-small: 標準と小容量で hello-kosaba.c の出力が一致"
+echo "build-shirasu: 標準と小容量で hello-kosaba.c の出力が一致"
 
 # KosabaOS 用の ELF を組む (標準版と同じ舞台)
 "$CC" -march=rv64gc -mabi=lp64 -mcmodel=medany -ffreestanding \
     -nostdlib -no-pie -Wl,--build-id=none -O2 \
-    -T kosaba.ld -o iwac-small.elf "$WORK/iwac_all.c" kosaba_lib.c kosaba_crt.S
-echo "build-kosaba-small: iwac-small.elf を作りました"
+    -T kosaba.ld -o iwac-shirasu.elf "$WORK/iwac_all.c" kosaba_lib.c kosaba_crt.S
+echo "build-shirasu: iwac-shirasu.elf を作りました"
