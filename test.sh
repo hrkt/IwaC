@@ -44,6 +44,7 @@
 #   v24: グローバル宣言とプロトタイプ (初期化子は初期イメージ、宣言だけの関数、ELF のデータセグメント分離)
 #   v25: 容量の調整と小さい構文の追随 (実測で決めた表の定数、static、引数8つ、三項、キャスト、複合代入、要素の増減、単一文本体)
 #   v26: 配列のスコープとローカル配列 (同名を別関数で宣言、隠蔽、2次元、再帰、フレーム配置)
+#   v27: セルフホスト (syscall3、kosaba_rt.c、分岐の緩和、大きな定数と *p の幅、前処理の文字リテラル、セルフコンパイル)
 set -e
 cd "$(dirname "$0")"
 
@@ -686,6 +687,53 @@ check_tail "$TMP/v26e.bin" ABA "v26: ローカル配列とローカル変数が�
 check_tail "$TMP/v26f.bin" BA "v26: 大きなローカル配列 (フレームのオフセットが addi 範囲外)"
 check_error 'int main(void) { char b[4]; char b[8]; return 0; }' "同じ関数で同じ名前の配列を2回宣言"
 check_error 'int main(void) { char b[4]; int b; return 0; }' "配列と同じ名前の変数"
+
+# --- v27: セルフホスト ---
+check_error 'int main(void) { syscall3(1, 65, 0, 0); return 0; }' "syscall3 (ベアメタルではエラー)"
+"$IWAC" --kosaba 'int main(void) { syscall3(1, 65, 0, 0); syscall3(1, 66, 0, 0); return 0; }' > "$TMP/v27sc.elf"
+sz=$(od -A n -t u8 -j 96 -N 8 "$TMP/v27sc.elf" | tr -d ' ')
+n=$(od -v -t x4 -j 4096 -N "$sz" "$TMP/v27sc.elf" | grep -o '00000073' | wc -l)
+[ "$n" -eq 3 ] || fail "v27: syscall3 の ecall が $n 個 (3のはず: 2回分 + 終了)"
+echo "ok: v27: syscall3 が ecall になった (2回分 + 終了 = 3)"
+# 前処理が文字リテラルを守ること ('"' で文字列と誤認すると
+# 後ろの #define が行頭と認識されず効かなくなる)
+cat > "$TMP/v27pp.c" <<'EOF'
+#ifdef NOPE
+int bad(void) { return '"'; }
+#endif
+int dq(void) { return '"'; }
+#define MARK 66
+int main(void) { putc(MARK); putc(dq() == 34 ? 65 : 88); return 0; }
+EOF
+"$IWAC" "$TMP/v27pp.c" > "$TMP/v27pp.bin"
+check_tail "$TMP/v27pp.bin" BA "v27: 文字リテラルの後ろでも #define が効く (前処理)"
+# 分岐の距離: 本体が beq の届く範囲 (±4KB) を大きく超える
+# while / if でも正しく飛べること (分岐の緩和)
+{
+    echo 'int main(void) { int i = 0; int x = 0; int y = 0;'
+    echo 'while (i < 3) {'
+    n=0; while [ $n -lt 700 ]; do echo 'x = x + 1;'; n=$((n+1)); done
+    echo 'i = i + 1; }'
+    echo 'if (x == 2100) putc(65); else putc(88);'
+    echo 'if (x == 9999) {'
+    n=0; while [ $n -lt 700 ]; do echo 'y = y + 1;'; n=$((n+1)); done
+    echo '}'
+    echo 'if (x == 2100) putc(66); else putc(88);'
+    echo 'return 0; }'
+} > "$TMP/v27branch.c"
+"$IWAC" "$TMP/v27branch.c" > "$TMP/v27branch.bin"
+check_tail "$TMP/v27branch.bin" AB "v27: 4KB を超える本体を持つ while / if (分岐の緩和)"
+"$IWAC" 'long a = 0xFFFFFFFF; long b = 0x80200000; putc(a == 0xFFFFFFFF ? 65 : 88); putc(b == 0x80200000 ? 66 : 88); putc(2147483647 > 2147483646 ? 67 : 88); putc(0x80000000 > 2000000000 ? 68 : 88);' > "$TMP/v27const.bin"
+check_tail "$TMP/v27const.bin" ABCD "v27: 大きな定数 (0xFFFFFFFF / 0x80200000 / INT_MAX 境界)"
+"$IWAC" 'long id(long v) { return v; } int main(void) { putc(id(2066) == 2066 ? 65 : 88); int x; int *p = &x; *p = 2066; putc(x == 2066 ? 66 : 88); putc(*p == 2066 ? 67 : 88); long y; long *q = &y; *q = 70000; putc(y == 70000 ? 68 : 88); char c; char *r = &c; *r = 69; putc(c); return 0; }' > "$TMP/v27deref.bin"
+check_tail "$TMP/v27deref.bin" ABCDE "v27: 関数をまたぐ大きな値と *p の幅 (int* / long* は8バイト、char* は1バイト)"
+# iwac が自分自身 (+ ランタイム) をコンパイルできること。
+# OS 上での固定点 (iwac2 == iwac3) の確認は統合検証として
+# 別途実施 (doc/selfhost.md)
+"$IWAC" --kosaba src/0*.c kosaba/kosaba_rt.c > "$TMP/v27self.elf" || fail "v27: セルフコンパイルに失敗"
+size=$(wc -c < "$TMP/v27self.elf")
+[ "$size" -gt 3000000 ] || fail "v27: セルフコンパイルの出力が小さすぎる ($size バイト)"
+echo "ok: v27: セルフコンパイル (ホスト側) で $size バイトの iwac2.elf ができた"
 
 # --- 小容量ビルド (K210 プロファイル、v15 の節と同じ流儀) ---
 # RISC-V 用 gcc が見つかるときだけ、kosaba/iwac-small.elf が

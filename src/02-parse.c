@@ -105,6 +105,12 @@ static int NODE_COND = 51;  /* 三項演算子 (v25)。node_lhs =
                              * node_rhs = そうでないときの式 */
 static int NODE_BITNOT = 52; /* ビット反転 ~ (v25)。
                              * node_lhs = 相手 */
+static int NODE_SYSCALL3 = 53; /* 組み込み syscall3 (v27)。
+                             * node_lhs = 引数の式の並び
+                             * (node_next で繋ぐ、4つ固定:
+                             * 番号、a0、a1、a2)。KosabaOS の
+                             * システムコールを直接呼ぶ式で、
+                             * 値は戻り値 (a0) */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -405,7 +411,11 @@ static int define_array(char *name, int len, int rows, int cols,
          * 来るよう、使う分を 8 の倍数に切り上げる */
         int alloc = (bytes + 7) & ~7;
         arr_foff[i] = func_arr_bytes[parse_cur_func];
-        func_arr_bytes[parse_cur_func] += alloc;
+        /* 要素への複合代入 (+= 等) は iwac の言語に
+         * まだ無いので、展開した形で書く (本体の約束:
+         * まだ作っていないものを使わない) */
+        func_arr_bytes[parse_cur_func] =
+            func_arr_bytes[parse_cur_func] + alloc;
         arr_off[i] = 0;
     }
     return i;
@@ -597,7 +607,19 @@ static int parse_number_node(void) {
         while (*cur == 'u' || *cur == 'U' || *cur == 'l' ||
                *cur == 'L')
             cur++;
-        return new_node(NODE_NUM, (int)(unsigned int)value, 0, 0);
+        /* しまう前に、32ビットのパターンを int の
+         * 符号付きの範囲 (-2^31 .. 2^31-1) に畳む。
+         * キャスト任せにすると、GCC では負の数になる
+         * のに iwac では (幅が全部64ビットなので) 正の
+         * 大きな数のままになり、読む側 (eval_const や
+         * gen_load_leaf) の結果が作ったコンパイラで
+         * 食い違って固定点にならない (v27 のセルフ
+         * ホストで発覚)。畳む計算自体が両方で同じに
+         * なるよう、キャストには頼らない */
+        long sval = (long)(unsigned int)value;
+        if (sval >= 0x80000000)
+            sval = sval - 0x80000000 - 0x80000000;
+        return new_node(NODE_NUM, (int)sval, 0, 0);
     }
     int value = parse_number_value();
     if (value < 0)
@@ -671,6 +693,7 @@ static int parse_type(void);  /* キャストの判定で先に使う (v25) */
 static int parse_rel_expr(void);  /* eq の段から呼ばれる (v11) */
 static int parse_unary_expr(void); /* 単項の段 (v19)。文からも使う */
 static int expect_char(char c, char *msg);
+static int ident_is(char *word);  /* syscall3 の判定で先に使う (v27) */
 
 /* 呼び出しの引数リストを読む (v22): 「(」は消費済みの前提で、
  * 引数の式をカンマ区切りで読み、「)」まで消費する。
@@ -801,6 +824,39 @@ static int parse_primary_node(void) {
     if (is_ident_start(*cur)) {
         if (!parse_ident())
             return -1;
+        if (ident_is("syscall3")) {
+            /* 組み込み syscall3(番号, a0, a1, a2) (v27):
+             * KosabaOS のシステムコールを直接呼ぶ式。
+             * putc と同じ予約の名前で、ユーザーの関数
+             * より先に拾う。引数は4つ固定 */
+            skip_spaces();
+            if (*cur != '(') {
+                errmsg = "syscall3 の後には ( が必要です";
+                return -1;
+            }
+            cur++;
+            int argnodes[4];
+            for (int i = 0; i < 4; i++) {
+                int a = parse_expr();
+                if (a < 0)
+                    return -1;
+                argnodes[i] = a;
+                skip_spaces();
+                if (i < 3) {
+                    if (*cur != ',') {
+                        errmsg = "syscall3 の引数は4つです (番号, a0, a1, a2)";
+                        return -1;
+                    }
+                    cur++;
+                }
+            }
+            if (!expect_char(')', "syscall3 の後には ) が必要です"))
+                return -1;
+            for (int i = 0; i < 3; i++)
+                node_next[argnodes[i]] = argnodes[i + 1];
+            node_next[argnodes[3]] = -1;
+            return new_node(NODE_SYSCALL3, 0, argnodes[0], 0);
+        }
         /* 関数の名前で、次が '(' なら呼び出し (v22 で式に
          * なった)。戻り値が式の材料になる。呼べるのは
          * 定義済みの関数だけ (「使う前に定義」の約束) */
@@ -1842,7 +1898,12 @@ static int parse_stmt_list(int in_brace) {
 static int eval_const(int node, long *out) {
     int k = node_kind[node];
     if (k == NODE_NUM) {
-        *out = node_val[node];
+        /* 16進リテラルは parse の時点で int の範囲に
+         * 畳んであるが、値としては符号なし32ビットの
+         * 数 (式の中での作り方、gen_load_u32 と同じ)。
+         * 符号拡張のまま初期値にすると、式で読んだ
+         * ときの値と食い違う (v27 のテストで発覚) */
+        *out = node_val[node] & 0xFFFFFFFFL;
         return 1;
     }
     if (k == NODE_STR) {
@@ -2444,6 +2505,17 @@ static int parse_stmt(void) {
      * 文の位置では戻り値を捨てる。関数は定義済みのもの
      * だけ呼べる (「使う前に定義」の約束は関数も同じ) */
     if (*cur == '(') {
+        if (ident_is("syscall3")) {
+            /* 組み込みの呼び出し文 (v27): 式として
+             * 読み直して、戻り値は捨てる */
+            cur = stmt_name_start;
+            int e = parse_primary_node();
+            if (e < 0)
+                return -1;
+            if (!expect_char(';', "呼び出し文の終わりには ; が必要です"))
+                return -1;
+            return e;
+        }
         int f = find_func(name_buf, name_len);
         if (f < 0) {
             errmsg = "定義されていない関数が呼ばれました";

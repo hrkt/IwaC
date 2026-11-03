@@ -243,6 +243,19 @@ static int expand_defines(char *src) {
                     i += 2;
                 } else if (src[i] == '/' && src[i + 1] == '/') {
                     break;
+                } else if (src[i] == '"' || src[i] == '\'') {
+                    /* リテラルの中はコメントの始まりを
+                     * 探さない (v27、アクティブ側と同じ) */
+                    int q = src[i];
+                    i++;
+                    while (src[i] != '\0' && src[i] != q &&
+                           src[i] != '\n') {
+                        if (src[i] == '\\' && src[i + 1] != '\0')
+                            i++;
+                        i++;
+                    }
+                    if (src[i] == q)
+                        i++;
                 } else {
                     i++;
                 }
@@ -292,6 +305,30 @@ static int expand_defines(char *src) {
             }
             if (src[i] == '"') {
                 exp_ch('"');
+                i++;
+            }
+            sol = 0;
+            continue;
+        }
+        if (c == '\'') {
+            /* 文字リテラル (v27): 文字列と同じく中身を
+             * 守る。これが無いと '"' (ダブルクォートの
+             * 文字リテラル) の " で「文字列が始まった」
+             * と誤認し、その先のコメント判定や行頭の
+             * 状態が壊れる。iwac 自身のソース (字句解析
+             * の文字比較) を前処理して初めて発覚した */
+            exp_ch(c);
+            i++;
+            while (src[i] != '\0' && src[i] != '\'') {
+                if (src[i] == '\\' && src[i + 1] != '\0') {
+                    exp_ch(src[i]);
+                    i++;
+                }
+                exp_ch(src[i]);
+                i++;
+            }
+            if (src[i] == '\'') {
+                exp_ch('\'');
                 i++;
             }
             sol = 0;

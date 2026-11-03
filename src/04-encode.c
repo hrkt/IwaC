@@ -28,12 +28,28 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                ((unsigned int)rd << 7) | 0x13u;
     }
+    if (op == OP_ADDIW) {
+        /* addiw rd, rs1, imm -- I 形式 (v27)。addi との
+         * 違いは opcode が 0x1B で、計算が下位32ビット
+         * で行われ結果が符号拡張されること。lui と組で
+         * 大きな定数を作るときに使う (gen_load_const) */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x1Bu;
+    }
     if (op == OP_SLLI) {
         /* slli rd, rs1, shamt -- I 形式 (v23)。addi との
          * 違いは funct3 が 1 で、imm がシフト量 (RV64 では
          * 下位 6 ビット) なこと */
         return ((unsigned int)(imm & 63) << 20) |
                ((unsigned int)rs1 << 15) | (1u << 12) |
+               ((unsigned int)rd << 7) | 0x13u;
+    }
+    if (op == OP_SRLI) {
+        /* srli rd, rs1, shamt -- I 形式 (v27)。slli との
+         * 違いは funct3 が 5 で、空いた上位が 0 で埋まる
+         * こと (算術版 srai は funct7 が 0x20 になる) */
+        return ((unsigned int)(imm & 63) << 20) |
+               ((unsigned int)rs1 << 15) | (5u << 12) |
                ((unsigned int)rd << 7) | 0x13u;
     }
     if (op == OP_ADD) {
@@ -162,23 +178,27 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                (3u << 12) | ((unsigned int)rd << 7) | 0x13u;
     }
-    if (op == OP_BEQ) {
-        /* beq rs1, rs2, offset -- B 形式 (分岐)。
+    if (op == OP_BEQ || op == OP_BNE) {
+        /* beq / bne rs1, rs2, offset -- B 形式 (分岐)。
          * 命令列での飛び先は「命令番号」なので、まず
          * バイト単位の相対オフセットに直す:
          *   offset = (飛び先番号 - 自分の番号) x 4
          * 即値 (オフセット) のビットは形式の都合で
          * バラバラの場所に散らばっているのが B 形式の特徴:
          * [ imm[12] << 31 | imm[10:5] << 25 | rs2 << 20
-         *   | rs1 << 15 | funct3(0) << 12 | imm[4:1] << 8
+         *   | rs1 << 15 | funct3 << 12 | imm[4:1] << 8
          *   | imm[11] << 7 | opcode 0x63 ]
          * オフセットの下1ビットは常に 0 (命令は4バイト単位)
-         * なので格納されない。届く範囲は 前後 約4KB */
+         * なので格納されない。届く範囲は 前後 約4KB。
+         * beq は funct3 が 0、bne (等しくなければ飛ぶ) は 1。
+         * bne は v27 で導入: 届かない条件分岐を「反転した
+         * 分岐 + jal」に伸ばすときの反転側に使う */
         int off = (imm - i) * 4;
+        unsigned int f3 = (op == OP_BNE) ? 1u : 0u;
         return ((unsigned int)((off >> 12) & 1) << 31) |
                ((unsigned int)((off >> 5) & 0x3f) << 25) |
                ((unsigned int)rs2 << 20) |
-               ((unsigned int)rs1 << 15) |
+               ((unsigned int)rs1 << 15) | (f3 << 12) |
                ((unsigned int)((off >> 1) & 0xf) << 8) |
                ((unsigned int)((off >> 11) & 1) << 7) | 0x63u;
     }

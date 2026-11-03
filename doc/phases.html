@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v26 まで</title>
+<title>IwaC の歩み — v0 から v27 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v26 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v27 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -347,6 +347,7 @@
   <a class="done" href="#v24">v24 グローバル宣言とプロトタイプ</a><span class="arrow">→</span>
   <a class="done" href="#v25">v25 容量と小さい構文</a>
   <a class="done" href="#v26">v26 ローカル配列</a>
+  <a class="done" href="#v27">v27 セルフホスト</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1112,13 +1113,13 @@ uart_puts(<span class="s">"Hello, World!\n"</span>);</pre>
   <p class="goal-line">目標：<b>「iwac が iwac 自身をコンパイルできる」への第一歩として、本物の C ソースの字句を全部読めるようにすること。</b></p>
   <p>新しい目標はセルフホスト（自分自身をコンパイルできるコンパイラ）です。
   iwac 本体のソース（約116KB）を実測して「何が足りないか」を洗い出し、
-  v16 から v26 までの階段を計画しました。構造体や switch のように
+  v16 から v27 までの階段を計画しました。構造体や switch のように
   iwac 本体が使っていないものは、階段に入れていません。</p>
 <pre class="code">/* コメント */ putc('A');   ← ブロックコメントと文字リテラル
 long f(unsigned long x) { … }  ← 型の語彙の拡張</pre>
   <div class="chips">
     <span class="chip">ブロックコメント</span><span class="chip">文字リテラル</span>
-    <span class="chip">long / unsigned</span><span class="chip">階段は v26 まで</span>
+    <span class="chip">long / unsigned</span><span class="chip">階段は v27 まで</span>
   </div>
   <div class="learn"><p><b class="title">ここでの学び：</b>
   ゴールの測り方です。「自分をコンパイルできる」は遠い目標ですが、
@@ -1469,10 +1470,64 @@ int main(void) { putc(f()); putc(g()); return 0; }   // AB と出る</pre>
   共存）で初めて顔を出しました。重なりを疑うテストを置くことが大事です。</p></div>
 </section>
 
+<!-- ================= v27 ================= -->
+<section class="phase" id="v27">
+  <div class="head"><span class="badge b-v4">v27</span><h2>セルフコンパイル — 自分で自分を作る（固定点）</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の12段目（最終段）。iwac が iwac 自身をコンパイルし、その結果が寸分違わず同じになること（固定点）。</b></p>
+  <p>最後の壁は「外部の4つの関数」の定義でした。まず、OS のシステムコールを
+  直接呼ぶ組み込み <code>syscall3(番号, a0, a1, a2)</code> を言語に足します。
+  次に、その部品で4つの関数を iwac 自身の言語で書いた
+  <code>kosaba/kosaba_rt.c</code>（ランタイム）を用意します。あとは本体の
+  ソースとランタイムを並べて渡すだけ、のはずでした。</p>
+<pre class="code">ホスト版 iwac ──コンパイル──&gt; iwac2.elf
+iwac2.elf（OS の上）──同じ入力をコンパイル──&gt; iwac3.elf
+iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
+  <p>ところが実際にやってみると、本物の不具合が次々と顔を出しました。
+  どれも「小さいプログラムでは出ない、自分のソースくらい大きくて
+  複雑だと出る」という種類のものです：</p>
+  <p>・<b>ジャンプが届いていない</b>：条件分岐の命令は前後 約4KB までしか
+  飛べません。大きな関数では飛び先が命令の形式に収まらず、黙って
+  切り捨てられて別の場所へ飛んでいました。届かない分岐は「逆向きの
+  分岐＋遠くまで飛べるジャンプ」の2命令に伸ばす仕組み（分岐の緩和）を
+  入れました。<br>
+  ・<b>大きな数が化ける</b>：数をレジスタに作る定石が、ある大きさから
+  符号拡張で壊れていました。作り方を場合ごとに直し、16進数の大きな数は
+  「0 で埋めて広げる」専用の作り方を新設しました。<br>
+  ・<b>ポインタの読み書きが1バイトだけ</b>：昔の「ポインタは文字を指す
+  もの」という前提のまま、<code>*p</code> が常に1バイトしか読み書き
+  していませんでした。ファイルの読み込みバイト数（int へのポインタ
+  経由）が下1バイトに切れて、読み込みが壊れます。指す先の型の
+  大きさで読み書きするよう直しました。<br>
+  ・<b>前処理が文字リテラルに弱い</b>：<code>'"'</code>（ダブルクォート
+  という文字）を見て「文字列が始まった」と誤認し、後ろの
+  <code>#define</code> 行が読めなくなっていました。<br>
+  ・<b>作った人で答えが違う</b>：いちばん固定点らしい問題です。iwac の
+  型は全部64ビット幅でキャストは読み捨て、という割り切りのため、
+  「32ビットに切り詰めたはずの値」が、GCC で作った iwac の中では
+  負の数、iwac で作った iwac の中では正の大きな数、という違う姿に
+  なっていました。値のしまい方と読み方に約束を決め、
+  「出力は、作ったコンパイラによらない」ようにそろえました。</p>
+  <p>全部直した結果、ホスト版が作った iwac2.elf（3,076,094 バイト）と、
+  OS の上で iwac2 が作った iwac3.elf が<b>バイト単位で一致</b>しました。
+  iwac3 が作る次の世代も同じでした。ついでに、自己コンパイルされた
+  iwac2 が OS の上で Hello World をコンパイルして実行できるところまで
+  確かめました。v16 から登ってきた階段は、これで完走です。</p>
+  <div class="chips">
+    <span class="chip">syscall3</span><span class="chip">kosaba_rt.c</span>
+    <span class="chip">分岐の緩和</span><span class="chip">固定点を確認</span>
+    <span class="chip">階段を完走</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  セルフホストは「究極のテスト」でした。小さいテストでは一生出会わない
+  不具合が、自分のソースという「大きくて本物の入力」で次々と見つかります。
+  そして固定点（作る側が変わっても出力が変わらないこと）は、
+  コンパイラの正しさがいちばん厳しく問われる形です。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v26 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v27 時点）</p>
 </footer>
 
 </div>

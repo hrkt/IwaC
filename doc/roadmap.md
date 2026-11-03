@@ -392,14 +392,18 @@ iwac.c が使っていないので不要（% はついでに入れる）。
   置く。iwac 自身のソースは全文が読めるようになり、
   残る壁は外部4関数（write / open / read / close）
   の定義だけになった
-- v27 セルフコンパイル: OS 用ランタイムを iwac の
-  言語で書いた kosaba_rt.c（syscall を呼ぶ組み込み
-  `syscall3` を追加し、write/open/read/close を実装）
-  と iwac 本体（src/ の断片群）を複数ファイル入力で
-  渡し、iwac 自身でコンパイルする。検証は固定点で
-  行う: gcc 製 iwac が作る
-  iwac2.elf と、iwac2 が作る iwac3.elf がバイト一致
-  すればセルフホスト成立
+- v27 セルフコンパイル（済み、2026-11-03）: OS 用
+  ランタイムを iwac の言語で書いた kosaba_rt.c
+  （syscall を呼ぶ組み込み `syscall3` を追加し、
+  write/open/read/close を実装）と iwac 本体
+  （src/ の断片群）を複数ファイル入力で渡し、iwac
+  自身でコンパイルした。固定点を確認: gcc 製 iwac
+  が作る iwac2.elf と、KosabaOS 上で iwac2 が作る
+  iwac3.elf がバイト一致し、第2世代も同じだった。
+  セルフコンパイルでは実物の不具合が5件出て直した
+  （前処理の文字リテラル、分岐の距離の緩和、大きな
+  定数の作り方、`*p` の幅、表現の一貫性。詳細は
+  doc/selfhost.md の v27 の節）。**階段は完走**
 
 実機移植はこの階段とは独立に、OS 側の進行と合わせて
 別途進める。

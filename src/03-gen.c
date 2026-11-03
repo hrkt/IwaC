@@ -65,6 +65,17 @@ static int OP_SLLI = 26; /* 左シフト即値 (v23)。I 形式、
 static int OP_ECALL = 20; /* ecall (環境呼び出し)。KosabaOS
                            * ターゲットで OS のシステムコールを
                            * 呼ぶ命令。符号化は固定の1語 (v14) */
+static int OP_BNE = 27;  /* 2つのレジスタが等しくなければ飛ぶ
+                          * (v27)。beq と funct3 だけが違う。
+                          * 届かない条件分岐を「反転 + jal」の
+                          * 形に伸ばすときに使う (emit_beq_t1z) */
+static int OP_ADDIW = 28; /* addiw (v27): 32ビットで加えて
+                          * 符号拡張する。大きな定数を作る
+                          * (lui + addiw) とき専用 */
+static int OP_SRLI = 29; /* 論理右シフト即値 (v27)。I 形式、
+                          * funct3=5、imm はシフト量。
+                          * 32ビット定数を 0 埋めで 64 ビットに
+                          * 広げる (gen_load_u32) ときに使う */
 
 static int asm_op[32768];
 static int asm_rd[32768];
@@ -81,6 +92,64 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
     asm_rs1[i] = rs1;
     asm_rs2[i] = rs2;
     asm_imm[i] = imm;
+}
+
+/* --- 条件分岐の届く範囲 (v27) ---
+ * if / while / && などの条件分岐は「t1 が 0 なら飛ぶ」
+ * beq で置くが、B 形式の届く範囲は前後 約4KB しかない。
+ * 大きな関数では飛び先が範囲の外になり、オフセットが
+ * 黙って丸まって無関係な場所へ飛んでしまう (セルフ
+ * コンパイルで expand_defines のループ脱出が壊れて発覚)。
+ * そこで、届かない分岐は次の2命令の形に伸ばす:
+ *   bne t1, zero, 次   (0 でないなら jal を飛び越える)
+ *   jal zero, 飛び先   (jal は前後 約1MB 届く)
+ * 伸ばすと後ろの命令がずれて別の分岐が届かなくなる
+ * ことがあるので、gen_program が「生成 → 点検」を
+ * 繰り返し、届かない分岐が無くなるまで印を増やす。
+ * 印は条件分岐の通し番号 (branch_ord) で管理する。
+ * 生成は決定的なので、通し番号は生成のたびに同じ分岐を
+ * 指す。届く分岐は従来どおり beq 1命令のままなので、
+ * 今まで正しく作れていたプログラムの出力は変わらない */
+static int branch_ord;         /* 条件分岐の通し番号 */
+static char branch_long[32768]; /* 伸ばす分岐の印 */
+
+/* 「t1 が 0 なら飛ぶ」条件分岐を置く。戻り値は、飛び先
+ * (命令番号) を asm_imm に書き込むべき命令の番号:
+ * 短い形なら beq 自身、長い形なら後ろの jal の方 */
+static int emit_beq_t1z(void) {
+    int ord = branch_ord++;
+    if (branch_long[ord]) {
+        asm_push(OP_BNE, 0, REG_T1, REG_ZERO, nasm + 2);
+        int j = nasm;
+        asm_push(OP_JAL, 0, 0, 0, 0);
+        return j;
+    }
+    int b = nasm;
+    asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+    return b;
+}
+
+/* 生成し終えた命令列を眺め、範囲 (±4KB) の外へ飛ぶ
+ * 条件分岐があれば branch_long に印を付ける。
+ * 新しい印が付いたら 1 を返す */
+static int relax_scan(void) {
+    int ord = 0;
+    int changed = 0;
+    for (int i = 0; i < nasm; i++) {
+        if (asm_op[i] == OP_BNE) {
+            ord++;  /* 長い形の分岐 (相方は jal) */
+            continue;
+        }
+        if (asm_op[i] != OP_BEQ)
+            continue;
+        int off = (asm_imm[i] - i) * 4;
+        if ((off < -4096 || off > 4092) && !branch_long[ord]) {
+            branch_long[ord] = 1;
+            changed = 1;
+        }
+        ord++;
+    }
+    return changed;
 }
 
 /* --- 変数の置き場所 (v21) ---
@@ -166,20 +235,78 @@ static void gen_load_addr(int reg, unsigned int addr) {
 
 /* 小さな定数をレジスタに作る (v23): 2次元の列数や行の
  * 歩幅のような、コンパイラだけが知っている定数専用。
- * 2047 までは addi 1つ、それより大きいときは lui + addi
+ * 2047 までは addi 1つ、それより大きいときは lui + addiw
  * の定石 (hi / lo の分け方は gen_load_addr と同じ考え方
  * だが、こちらは住所でなく「値そのもの」を作るので
- * auipc でなく lui を使う。対象は配列の大きさの範囲の
- * 正の値だけ) */
+ * auipc でなく lui を使う)
+ * v27 の直し (セルフコンパイルで発覚): 大きな正の数
+ * (式の中の数リテラル) もここを通るようになっていた
+ * (v25) ので、INT_MAX 付近まで正しく作れること:
+ *   - hi / lo の計算は long で行う。int のままだと
+ *     v + 0x800 が溢れて hi が滅茶苦茶になる
+ *   - 下位は addi でなく addiw。lui は作った32ビットを
+ *     符号拡張するので、hi の最上位ビットが立つ値
+ *     (0x7FFFF800 以上) では addi だと上位が全部1に
+ *     なってしまう。addiw は32ビットで計算し直して
+ *     から符号拡張するので、意図した値になる */
 static void gen_load_const(int reg, int v) {
     if (v <= 2047) {
         asm_push(OP_ADDI, reg, REG_ZERO, 0, v);
         return;
     }
-    int hi = (v + 0x800) >> 12;
-    int lo = v - (hi << 12);
-    asm_push(OP_LUI, reg, 0, 0, hi);
-    asm_push(OP_ADDI, reg, reg, 0, lo);
+    long hi = ((long)v + 0x800) >> 12;
+    long lo = (long)v - (hi << 12);
+    asm_push(OP_LUI, reg, 0, 0, (int)hi);
+    asm_push(OP_ADDIW, reg, reg, 0, (int)lo);
+}
+
+/* 32ビットのパターンを、符号なしの値として 0 埋めで
+ * 64 ビットに作る (v27)。式の中の大きな16進リテラル
+ * (0xFFFFFFFF 等) のための道具。引数 v は node_val の
+ * int (2^31 以上は負の数として入っている) そのまま。
+ * 作り方: マスクで正のパターンに戻し、lui + addiw で
+ * 32ビットの値を作り、slli / srli 32 で上位を 0 に
+ * 戻す。slli / srli は「最上位ビットが立つときだけ」
+ * と条件分岐せず常に出す: パターンの読み方 (符号
+ * つきで見るか符号なしで見るか) は、作ったコンパイラ
+ * が GCC か iwac かで食い違うことがあり (キャストは
+ * iwac では読み捨て)、分岐すると自分で自分をコン
+ * パイルしたときに命令列が変わってしまうため。
+ * セルフコンパイルで発覚した昔の不具合: 以前はこの
+ * 場合を住所作り (auipc 相対) で代用しており、配置
+ * 0x40000000 から遠い 0xFFFFFFFF が作れなかった */
+static void gen_load_u32(int reg, int v) {
+    long uv = v & 0xFFFFFFFFL;
+    long hi = (uv + 0x800) >> 12;
+    long lo = uv - (hi << 12);
+    asm_push(OP_LUI, reg, 0, 0, (int)hi);
+    asm_push(OP_ADDIW, reg, reg, 0, (int)lo);
+    asm_push(OP_SLLI, reg, reg, 0, 32);
+    asm_push(OP_SRLI, reg, reg, 0, 32);
+}
+
+/* ポインタ読み書き (*p) で触る先の大きさ (v27)。
+ * 先が変数 (ポインタ) なら elem_esize と同じ決め方:
+ * 段数 2 以上が指すのはポインタ自体なので 8、段数 1 は
+ * 宣言の基本の大きさ (char* は 1、int* / long* は 8)。
+ * 先が配列の名前なら要素の大きさ。絶対アドレス (数) と
+ * 文字列は従来どおり 1 バイト (デバイスの窓口や文字の
+ * 読み書きが前提のため) */
+static int deref_esize(int addr) {
+    if (node_kind[addr] == NODE_VAR) {
+        int var = node_val[addr];
+        if (var_plevel[var] >= 2)
+            return 8;
+        if (var_plevel[var] == 1)
+            return var_bsize[var];
+        /* 段数 0 はポインタとして宣言されていない
+         * 変数 (代入で作られた変数が文字列を持つ、
+         * 昔からの使い方): 従来どおり 1 バイト */
+        return 1;
+    }
+    if (node_kind[addr] == NODE_ARRAY)
+        return arr_esize[node_val[addr]];
+    return 1;
 }
 
 /* 要素ノード (INDEX / INDEX2 / PINDEX / INDEX_STORE) が
@@ -192,7 +319,11 @@ static int elem_esize(int node) {
         int var = node_val[node];
         if (var_plevel[var] >= 2)
             return 8;
-        return var_bsize[var];
+        if (var_plevel[var] == 1)
+            return var_bsize[var];
+        /* 段数 0 (宣言されていない変数) は deref と
+         * 同じく従来どおり 1 バイト (v27) */
+        return 1;
     }
     return arr_esize[node_val[node]];
 }
@@ -257,21 +388,27 @@ static void gen_store_var(int var, int reg) {
  *             アドレスなど) 住所の材料と同じ作り方で作る
  *   変数:     メモリから値を読む (v21。gen_load_var)
  *   文字列:   その住所を作る (auipc + addi の2命令)
- *   ポインタ読み: 住所から1バイト読む (lbu)。住所は、
+ *   ポインタ読み: 指す先の大きさで読む (v27。char* は
+ *             1バイト、int* は 8バイト)。住所は、
  *             変数ならその値、数なら絶対アドレスそのもの */
 static void gen_load_leaf(int reg, int leaf) {
     int k = node_kind[leaf];
     if (k == NODE_NUM) {
-        if ((unsigned int)node_val[leaf] <= 2047u)
-            asm_push(OP_ADDI, reg, REG_ZERO, 0, node_val[leaf]);
-        else if (node_val[leaf] > 0)
-            /* 大きな正の数は「値」として lui + addi で作る
-             * (v25)。住所作り (auipc 相対) は配置先頭の
-             * 近くの住所のための道具で、遠く離れた小さい
-             * 数は hi が 20 ビットに収まらず作れない */
-            gen_load_const(reg, node_val[leaf]);
+        /* 分岐は node_val の符号つきの値で決める
+         * (キャストで符号なしとして見てはいけない:
+         * iwac ではキャストは読み捨てなので、GCC で
+         * 作った iwac と iwac で作った iwac で判断が
+         * 食い違い、固定点にならない。v27 のセルフ
+         * ホストで発覚)。16進リテラルは parse の時点で
+         * int の範囲に畳んであるので、符号つきの見え
+         * 方は作ったコンパイラによらず同じ */
+        int v = node_val[leaf];
+        if (v >= 0 && v <= 2047)
+            asm_push(OP_ADDI, reg, REG_ZERO, 0, v);
         else
-            gen_load_addr(reg, (unsigned int)node_val[leaf]);
+            /* 値として作る (住所作りの auipc 相対では
+             * ない)。gen_load_u32 が 0 埋めで広げる */
+            gen_load_u32(reg, v);
     } else if (k == NODE_VAR)
         /* 変数の値はメモリから読む (v21) */
         gen_load_var(reg, node_val[leaf]);
@@ -282,11 +419,14 @@ static void gen_load_leaf(int reg, int leaf) {
         gen_load_arr_base(reg, node_val[leaf]);
     else { /* NODE_DEREF: lhs が住所を表すノード */
         int operand = node_lhs[leaf];
+        /* 読む幅は指す先の大きさで決める (v27: 以前は
+         * 常に1バイトで、int* の読みが切れていた) */
+        int op = deref_esize(operand) == 8 ? OP_LD : OP_LBU;
         if (node_kind[operand] == NODE_VAR) {
             /* 変数の持つ住所から読む: まず変数の値 (住所)
-             * を読み、その先を1バイト読む (v21) */
+             * を読み、その先を読む (v21) */
             gen_load_var(reg, node_val[operand]);
-            asm_push(OP_LBU, reg, reg, 0, 0);
+            asm_push(op, reg, reg, 0, 0);
         } else {
             /* 絶対アドレス読み: 住所を reg に作ってから読む。
              * 住所の材料は auipc 相対なので、0x10000005 の
@@ -297,7 +437,7 @@ static void gen_load_leaf(int reg, int leaf) {
                 gen_load_arr_base(reg, node_val[operand]);
             else /* NODE_STR: 文字列の住所から読む */
                 gen_load_addr(reg, str_addr[node_val[operand]]);
-            asm_push(OP_LBU, reg, reg, 0, 0);
+            asm_push(op, reg, reg, 0, 0);
         }
     }
 }
@@ -326,7 +466,9 @@ static int gen_expr(int node) {
     }
     if (node_kind[node] == NODE_DEREF) {
         /* 相手が計算式のポインタ読み: 住所を t1 で計算し、
-         * その住所から1バイト読む */
+         * その住所から1バイト読む。計算式だと指す先の型が
+         * 分からないので、従来どおり1バイトのまま
+         * (変数が先の読みは gen_load_leaf が大きさで読む) */
         if (!gen_expr(node_lhs[node]))
             return 0;
         asm_push(OP_LBU, REG_T1, REG_T1, 0, 0);
@@ -373,6 +515,29 @@ static int gen_expr(int node) {
         asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
         return 1;
     }
+    if (node_kind[node] == NODE_SYSCALL3) {
+        /* 組み込み syscall3 (v27、KosabaOS ターゲット専用):
+         *   引数を右から評価してスタックに積む (関数呼び
+         *   出しと同じ gen_call_args。積んだ引数は
+         *   sp + 番号*16 に並ぶ)
+         *   a7 = 第0引数 (番号)、a0 / a1 / a2 = 第1〜3引数
+         *   スタックを戻して ecall、戻り値 a0 を t1 へ
+         * ベア版にはシステムコールが無いのでエラーにする */
+        if (!target_kosaba) {
+            errmsg = "syscall3 は KosabaOS ターゲット専用です";
+            return 0;
+        }
+        if (!gen_call_args(node_lhs[node]))
+            return 0;
+        asm_push(OP_LD, REG_A7, REG_SP, 0, 0);
+        asm_push(OP_LD, REG_A0, REG_SP, 0, 16);
+        asm_push(OP_LD, REG_A1, REG_SP, 0, 32);
+        asm_push(OP_LD, REG_A2, REG_SP, 0, 48);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 64);
+        asm_push(OP_ECALL, 0, 0, 0, 0);
+        asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
+        return 1;
+    }
     if (node_kind[node] == NODE_CALL) {
         /* 関数呼び出し (v22 で式になった):
          *   引数を右から評価してスタックに積む
@@ -410,8 +575,7 @@ static int gen_expr(int node) {
          * 左の値は分岐で消費されるので、退避は要らない */
         if (!gen_expr(node_lhs[node]))
             return 0;
-        int f_jump = nasm;
-        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int f_jump = emit_beq_t1z();
         if (!gen_expr(node_rhs[node]))
             return 0;
         asm_push(OP_SLTU, REG_T1, REG_ZERO, REG_T1, 0);
@@ -433,8 +597,7 @@ static int gen_expr(int node) {
          * L_end: */
         if (!gen_expr(node_lhs[node]))
             return 0;
-        int r_jump = nasm;
-        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int r_jump = emit_beq_t1z();
         asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, 1);
         int e_jump = nasm;
         asm_push(OP_JAL, 0, 0, 0, 0);
@@ -472,8 +635,7 @@ static int gen_expr(int node) {
          * 条件の値は分岐で消費されるので退避は不要 */
         if (!gen_expr(node_lhs[node]))
             return 0;
-        int f_jump = nasm;
-        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int f_jump = emit_beq_t1z();
         if (!gen_expr(node_val[node]))
             return 0;
         int e_jump = nasm;
@@ -828,9 +990,14 @@ static int gen_stmt(int node) {
     }
     if (kind == NODE_STORE) {
         /* メモリ書き込み: 先に「書く値」を t1 で計算し、
-         * 次に「書き込み先の住所」を t2 に作って sb する。
+         * 次に「書き込み先の住所」を t2 に作って書き込む。
          * この順番なのは、住所作りが t1 を壊さないため
-         * (値の計算は t2 を下書きに使うことがある) */
+         * (値の計算は t2 を下書きに使うことがある)。
+         * 書く幅は指す先の大きさで決める (v27: 以前は
+         * 常に sb で、int* への書き込みが1バイトに切れて
+         * いた。セルフコンパイルの append_file で発覚)。
+         * 絶対アドレス (デバイスの窓口) は従来どおり
+         * 1バイト */
         if (!gen_expr(node_rhs[node]))
             return 0;
         int addr = node_lhs[node];
@@ -838,13 +1005,16 @@ static int gen_stmt(int node) {
             gen_load_addr(REG_T2, (unsigned int)node_val[addr]);
         else /* NODE_VAR: 変数の値そのものが住所 (ポインタ) */
             gen_load_var(REG_T2, node_val[addr]);
-        /* sb t1, 0(t2) -- 値の下1バイトを住所へ書く */
-        asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+        if (deref_esize(addr) == 8)
+            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
+        else
+            asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
         return 1;
     }
-    if (kind == NODE_CALL) {
+    if (kind == NODE_CALL || kind == NODE_SYSCALL3) {
         /* 呼び出し文: 式として生成し、戻り値 (t1) は
-         * 捨てる (v22 で呼び出しが式になったための形) */
+         * 捨てる (v22 で呼び出しが式になったための形。
+         * syscall3 の文も同じ、v27) */
         return gen_expr(node);
     }
     if (kind == NODE_IF) {
@@ -859,8 +1029,7 @@ static int gen_stmt(int node) {
          * 飛び先の書き直しは while と同じやり方 */
         if (!gen_expr(node_lhs[node]))
             return 0;
-        int beq_index = nasm;
-        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int beq_index = emit_beq_t1z();
         int then_body = node_rhs[node];
         for (int s = then_body; s != -1; s = node_next[s]) {
             if (!gen_stmt(s))
@@ -890,8 +1059,7 @@ static int gen_stmt(int node) {
             return 0;
         /* beq t1, zero, L_end -- 飛び先はまだ分からないので
          * 仮に 0 を入れておき、下で書き直す */
-        int beq_index = nasm;
-        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int beq_index = emit_beq_t1z();
         if (loop_depth >= 32) {
             errmsg = "ループの入れ子が深すぎます";
             return 0;
@@ -936,8 +1104,7 @@ static int gen_stmt(int node) {
         int l_cond = nasm;
         if (!gen_expr(node_lhs[node]))
             return 0;
-        int beq_index = nasm;
-        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        int beq_index = emit_beq_t1z();
         if (loop_depth >= 32) {
             errmsg = "ループの入れ子が深すぎます";
             return 0;
@@ -1107,8 +1274,9 @@ static int expr_needs_stack(int node) {
     if (k == NODE_EPRE || k == NODE_EPOST)
         /* 要素の ++ / -- (v25): 住所作りの中の式を見る */
         return expr_needs_stack(node_lhs[node]);
-    if (k == NODE_CALL) {
-        /* 呼び出しの引数の式が退避を要するか (v22) */
+    if (k == NODE_CALL || k == NODE_SYSCALL3) {
+        /* 呼び出しの引数の式が退避を要するか (v22)。
+         * syscall3 も引数の並び方は同じ (v27) */
         for (int a = node_lhs[node]; a != -1; a = node_next[a]) {
             if (expr_needs_stack(a))
                 return 1;
@@ -1192,6 +1360,7 @@ static int list_needs_stack(int head) {
 static int gen_all(void) {
     nasm = 0;
     loop_depth = 0;    /* 2パス生成のたびに数え直す (v20) */
+    branch_ord = 0;    /* 条件分岐の通し番号も数え直す (v27) */
     gen_in_func = 0;
     if (!target_kosaba) {
         /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る
@@ -1265,6 +1434,40 @@ static int gen_all(void) {
             gen_load_addr(REG_A1, argv_arr_addr);
         }
         asm_push(OP_JAL, REG_RA, 0, 0, -(prog_main + 1));
+        if (target_kosaba) {
+            /* kosaba_flush の約束 (v27): プログラムが
+             * kosaba_flush という名前の関数を持っていれば、
+             * main から戻った後・exit の前に1回呼ぶ。
+             * kosaba/ の crt が GCC 版の iwac で呼んでいる
+             * のと同じ約束で、ランタイム側の「終了時に
+             * やること」(出力バッファの書き切りなど)の
+             * 置き場所にする。持っていないプログラムの
+             * 出力は従来と変わらない */
+            for (int f = 0; f < nfunc; f++) {
+                if (!func_has_body[f])
+                    continue;
+                if (func_name_len[f] != 12)
+                    continue;
+                /* "kosaba_flush" と1文字ずつ比べる
+                 * (文字列リテラルの添字は iwac の言語に
+                 * 無いので、この形で書く) */
+                if (func_names[f][0] == 'k' &&
+                    func_names[f][1] == 'o' &&
+                    func_names[f][2] == 's' &&
+                    func_names[f][3] == 'a' &&
+                    func_names[f][4] == 'b' &&
+                    func_names[f][5] == 'a' &&
+                    func_names[f][6] == '_' &&
+                    func_names[f][7] == 'f' &&
+                    func_names[f][8] == 'l' &&
+                    func_names[f][9] == 'u' &&
+                    func_names[f][10] == 's' &&
+                    func_names[f][11] == 'h') {
+                    asm_push(OP_JAL, REG_RA, 0, 0, -(f + 1));
+                    break;
+                }
+            }
+        }
     }
     if (target_kosaba) {
         /* KosabaOS: exit システムコール (番号 3) で終わる。
@@ -1326,8 +1529,18 @@ static int gen_program(void) {
     argv_arr_addr = LOAD_BASE;
     for (int i = 0; i < narr; i++)
         arr_addr[i] = LOAD_BASE;  /* 同上 (配列の住所も仮置き) */
-    if (!gen_all())
-        return 0;
+    /* 条件分岐の範囲の点検 (v27): 届かない分岐は長い形に
+     * 伸ばす。伸ばすと別の分岐が届かなくなることがある
+     * ので、印が増えなくなるまで1回目の生成を繰り返す
+     * (emit_beq_t1z の説明参照) */
+    for (int i = 0; i < 32768; i++)
+        branch_long[i] = 0;
+    for (;;) {
+        if (!gen_all())
+            return 0;
+        if (!relax_scan())
+            break;
+    }
     code_insts = nasm;
     /* 静的データ (文字列 → 配列 → グローバル → argv) の
      * 置き場所の先頭 (v24 でターゲット別になった):
