@@ -94,6 +94,17 @@ static int NODE_ELEM_STORE = 48; /* 要素への書き込み文 (v23)。
                              * (INDEX2 か PINDEX)、node_rhs =
                              * 書く値の式。1次元の配列要素は
                              * 従来の NODE_INDEX_STORE のまま */
+static int NODE_EPRE = 49;  /* 要素への前置 ++/-- (v25)。
+                             * node_lhs = 要素ノード、node_val =
+                             * +1 か -1。値は増減のあとの値 */
+static int NODE_EPOST = 50; /* 要素への後置 ++/-- (v25)。
+                             * node_lhs = 要素ノード、node_val =
+                             * +1 か -1。値は増減のまえの値 */
+static int NODE_COND = 51;  /* 三項演算子 (v25)。node_lhs =
+                             * 条件、node_val = 成り立つときの式、
+                             * node_rhs = そうでないときの式 */
+static int NODE_BITNOT = 52; /* ビット反転 ~ (v25)。
+                             * node_lhs = 相手 */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -111,11 +122,11 @@ static int NODE_STORE = 13; /* メモリ書き込み文。
                              * (変数 = ポインタ、数 = 絶対アドレス)、
                              * node_rhs = 書く値の式 */
 
-static int node_kind[512];
-static int node_val[512];
-static int node_lhs[512];
-static int node_rhs[512];
-static int node_next[512]; /* 文の並び用: 次の文ノード (-1 で終わり)。
+static int node_kind[16384];
+static int node_val[16384];
+static int node_lhs[16384];
+static int node_rhs[16384];
+static int node_next[16384]; /* 文の並び用: 次の文ノード (-1 で終わり)。
                             * 式のノードでは使わない */
 static int nnode;  /* 作ったノードの数 */
 
@@ -133,25 +144,25 @@ static int nnode;  /* 作ったノードの数 */
  * ローカルと、グローバルだけが見える。他の関数のローカルは
  * 見えない (同名でも別物)。ローカルが同名のグローバルを
  * 隠す (シャドーイング)。名前は最大31文字 */
-static char var_names[256][32];
-static int var_name_len[256];
-static int var_owner[256];
-static int var_slot[256];
-static int var_bsize[256];
-static int var_plevel[256];
+static char var_names[1024][32];
+static int var_name_len[1024];
+static int var_owner[1024];
+static int var_slot[1024];
+static int var_bsize[1024];
+static int var_plevel[1024];
 /* グローバル変数の初期値 (v24): ファイル範囲の宣言の
  * 初期化子を定数として記録し、静的領域の初期イメージ
  * としてバイナリに埋めるための情報。
  *   var_init_kind[i]: 0 = 初期値なし、1 = 数値、
  *                     2 = 文字列 (値はその住所になる)
  *   var_init_val[i] : 数値そのもの、または文字列番号 */
-static int var_init_kind[256];
-static long var_init_val[256];
+static int var_init_kind[1024];
+static long var_init_val[1024];
 static int has_var_inits;  /* 初期値つきグローバルがあるか */
 static int nvar;       /* 登録された変数の数 (全スコープ合計) */
 static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
 static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
-static int func_nlocals[16];  /* 関数ごとのフレーム枠数。
+static int func_nlocals[128];  /* 関数ごとのフレーム枠数。
                              * 本体は関数の名簿の節で説明する */
 
 /* 名前の一致だけを見る小物 */
@@ -208,7 +219,7 @@ static int define_var_typed(char *name, int len, int bsize,
         if (found >= 0)
             return found;
     }
-    if (nvar >= 256) {
+    if (nvar >= 1024) {
         errmsg = "変数が多すぎます";
         return -1;
     }
@@ -255,21 +266,21 @@ static int prog_main;
  *   func_body[i]      : 本体の文の並びの先頭ノード
  *   func_entry[i]     : 命令列の中での入口の命令番号
  *                       (第2層が生成のたびに決める)
- * 関数は最大16個まで */
-static char func_names[16][32];
-static int func_name_len[16];
-static int func_nparams[16];
-static int func_param_var[16][4];
-static int func_body[16];
-static int func_entry[16];
+ * 関数は最大128個まで */
+static char func_names[128][32];
+static int func_name_len[128];
+static int func_nparams[128];
+static int func_param_var[128][8];
+static int func_body[128];
+static int func_entry[128];
 /* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
  *   func_has_body[i]: 本体まで読めたら 1
  *   func_called[i]  : 呼び出しが現れたら 1。最後まで
  *                     本体が無い関数が呼ばれていたら、
  *                     生成の入口でエラーにする */
-static int func_has_body[16];
-static int func_called[16];
-/* func_nlocals[16] : フレームの枠数 (引数を含む、v21)。
+static int func_has_body[128];
+static int func_called[128];
+/* func_nlocals[128] : フレームの枠数 (引数を含む、v21)。
  * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
 
@@ -287,14 +298,14 @@ static int nfunc;
  *                 それ以外は 8
  *   arr_off[i]  : 配列領域の中での位置 (バイト単位)
  *   arr_addr[i] : 確定した先頭アドレス (第2層が決める)
- * 配列は最大8個、合計 4096 バイトまで (上限は v25 で調整) */
-static char arr_names[8][32];
-static int arr_name_len[8];
-static int arr_size[8];
-static int arr_cols[8];
-static int arr_esize[8];
-static int arr_off[8];
-static unsigned int arr_addr[8];
+ * 配列は最大128個、合計 4MB まで (v25 で実測に合わせて拡大) */
+static char arr_names[128][32];
+static int arr_name_len[128];
+static int arr_size[128];
+static int arr_cols[128];
+static int arr_esize[128];
+static int arr_off[128];
+static unsigned int arr_addr[128];
 static int narr;      /* 登録された配列の数 */
 static int arr_used;  /* 配列領域の使用済みバイト数 */
 
@@ -322,13 +333,13 @@ static int define_array(char *name, int len, int rows, int cols,
         errmsg = "その名前は既に使われています";
         return -1;
     }
-    if (narr >= 8) {
-        errmsg = "配列は8個までです";
+    if (narr >= 128) {
+        errmsg = "配列は128個までです";
         return -1;
     }
     int elems = cols > 0 ? rows * cols : rows;
-    if (arr_used + elems * esize > 4096) {
-        errmsg = "配列の合計が大きすぎます (4096バイトまで)";
+    if (arr_used + elems * esize > 4194304) {
+        errmsg = "配列の合計が大きすぎます (4MBまで)";
         return -1;
     }
     int i = narr++;
@@ -366,16 +377,16 @@ static int find_func(char *name, int len) {
  * 実行時の住所 (str_addr) は第2層が決める (コードの後ろに
  * このプールをそのまま置くので、住所 = 読み込み先頭 +
  * コードのバイト数 + str_off[i]) */
-static char str_pool[4096];
-static int str_off[64];
-static int str_len[64];
+static char str_pool[16384];
+static int str_off[512];
+static int str_len[512];
 static int nstr;       /* 文字列の数 */
 static int str_used;   /* str_pool の使用済みバイト数 */
-static unsigned int str_addr[64];  /* 第2層が確定させる住所 */
+static unsigned int str_addr[512];  /* 第2層が確定させる住所 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
-    if (nnode >= 512) {
+    if (nnode >= 16384) {
         errmsg = "プログラムが大きすぎます (ノード数上限)";
         return -1;
     }
@@ -475,16 +486,21 @@ static int parse_number_value(void) {
         errmsg = "数字が必要です";
         return -1;
     }
-    int value = 0;
+    /* v25: 上限を int の範囲まで広げた (大きな数は生成が
+     * auipc + addi の組み合わせで作る)。接尾辞 (u / l の
+     * 並び) は読み捨てる */
+    long value = 0;
     while (is_digit(*cur)) {
         value = value * 10 + (*cur - '0');
-        if (value > 2047) {
-            errmsg = "項が大きすぎます (2047 まで。addi の即値が12ビットのため)";
+        if (value > 2147483647L) {
+            errmsg = "数字が大きすぎます";
             return -1;
         }
         cur++;
     }
-    return value;
+    while (*cur == 'u' || *cur == 'U' || *cur == 'l' || *cur == 'L')
+        cur++;
+    return (int)value;
 }
 
 /* 16進数の1文字が表す値。16進数でなければ -1 */
@@ -520,6 +536,10 @@ static int parse_number_node(void) {
             }
             cur++;
         }
+        /* 接尾辞 (u / l の並び) は読み捨てる (v25) */
+        while (*cur == 'u' || *cur == 'U' || *cur == 'l' ||
+               *cur == 'L')
+            cur++;
         return new_node(NODE_NUM, (int)(unsigned int)value, 0, 0);
     }
     int value = parse_number_value();
@@ -530,11 +550,11 @@ static int parse_number_node(void) {
 
 /* 文字列リテラルを読み、文字列テーブルに登録して、その
  * NODE_STR ノードを作る。カーソルは開きの '"' の位置にある
- * 前提。エスケープは \n (改行) \t (タブ) \\ \" の4つだけ。
+ * 前提。エスケープは \n (改行) \t (タブ) \r \\ \" (v25 で \r を追加)。
  * 閉じの '"' が無い、知らないエスケープ、長すぎる文字列は
  * エラー。成功したらノード番号、失敗したら -1 を返す */
 static int parse_string_node(void) {
-    if (nstr >= 64) {
+    if (nstr >= 512) {
         errmsg = "文字列が多すぎます";
         return -1;
     }
@@ -558,16 +578,18 @@ static int parse_string_node(void) {
                 c = '\n';
             else if (*cur == 't')
                 c = '\t';
+            else if (*cur == 'r')
+                c = '\r';
             else if (*cur == '\\')
                 c = '\\';
             else if (*cur == '"')
                 c = '"';
             else {
-                errmsg = "使えるエスケープは \\n \\t \\\\ \\\" だけです";
+                errmsg = "使えるエスケープは \\n \\t \\r \\\\ \\\" だけです";
                 return -1;
             }
         }
-        if (str_used >= 4095) {
+        if (str_used >= 16383) {
             errmsg = "文字列が長すぎます";
             return -1;
         }
@@ -588,6 +610,7 @@ static int parse_string_node(void) {
  * 式全体なので、互いに呼び合う)。先に宣言だけ置く。
  * expect_char も下で定義する道具の先行宣言 */
 static int parse_expr(void);
+static int parse_type(void);  /* キャストの判定で先に使う (v25) */
 static int parse_rel_expr(void);  /* eq の段から呼ばれる (v11) */
 static int parse_unary_expr(void); /* 単項の段 (v19)。文からも使う */
 static int expect_char(char c, char *msg);
@@ -596,7 +619,8 @@ static int expect_char(char c, char *msg);
  * 引数の式をカンマ区切りで読み、「)」まで消費する。
  * 結果は node_next で繋いだ式の並びで、先頭を *head_out へ
  * 置く (引数なしは -1)。個数は関数の定義と照合する。
- * 引数は最大4つ (a0〜a3 で渡す呼び出し規約のため)。
+ * 引数は最大8つ (a0〜a7 で渡す呼び出し規約のため。
+ * v25 で 4 から 8 に拡大)。
  * 式の材料 (parse_primary_node) からも、呼び出し文
  * (parse_stmt) からも使う共通の道具。成功 1、失敗 0 */
 static int parse_call_list(int f, int *head_out) {
@@ -614,8 +638,8 @@ static int parse_call_list(int f, int *head_out) {
         return 1;
     }
     for (;;) {
-        if (n >= 4) {
-            errmsg = "引数は4つまでです";
+        if (n >= 8) {
+            errmsg = "引数は8つまでです";
             return 0;
         }
         int arg = parse_expr();
@@ -653,7 +677,7 @@ static int parse_call_list(int f, int *head_out) {
  * 成功したらノード番号、失敗したら -1 を返す */
 /* 文字リテラルを読む (v16): 'a' の形。中身は1文字か
  * エスケープ1つ。値はその文字コードで、数のノードになる。
- * エスケープは文字列の4つ (\n \t \\ \") に \' と \0 を
+ * エスケープは文字列のもの (\n \t \r \\ \") に \' と \0 を
  * 加えた6つ。空 ('')、2文字以上、閉じ忘れはエラー。
  * 成功したらノード番号、失敗したら -1 を返す */
 static int parse_char_node(void) {
@@ -665,6 +689,8 @@ static int parse_char_node(void) {
             value = '\n';
         else if (*cur == 't')
             value = '\t';
+        else if (*cur == 'r')
+            value = '\r';
         else if (*cur == '0')
             value = 0;
         else if (*cur == '\\')
@@ -674,7 +700,7 @@ static int parse_char_node(void) {
         else if (*cur == '"')
             value = '"';
         else {
-            errmsg = "使えるエスケープは \\n \\t \\0 \\\\ \\' \\\" だけです";
+            errmsg = "使えるエスケープは \\n \\t \\r \\0 \\\\ \\' \\\" だけです";
             return -1;
         }
         cur++;
@@ -800,25 +826,39 @@ static int parse_primary_node(void) {
 /* 後置の段 (v19): 材料の後ろに ++ / -- が付いたら包む。
  * 相手は変数だけ (今のところ)。*p++ の p や、添字の中の
  * i++ がここで読まれる */
+/* 要素を表すノードか (添字読みの3種)。++ / -- と
+ * 単項 & の相手の判定に使う (v25) */
+static int is_elem_node(int node) {
+    int k = node_kind[node];
+    return k == NODE_INDEX || k == NODE_INDEX2 || k == NODE_PINDEX;
+}
+
 static int parse_postfix_expr(void) {
     int node = parse_primary_node();
     if (node < 0)
         return -1;
     for (;;) {
         skip_spaces();
-        int kind;
+        int is_post_inc;
         if (cur[0] == '+' && cur[1] == '+')
-            kind = NODE_POSTINC;
+            is_post_inc = 1;
         else if (cur[0] == '-' && cur[1] == '-')
-            kind = NODE_POSTDEC;
+            is_post_inc = 0;
         else
             return node;
-        if (node_kind[node] != NODE_VAR) {
-            errmsg = "++ / -- の相手は変数だけです";
+        cur += 2;
+        if (node_kind[node] == NODE_VAR) {
+            /* 変数への後置 (v19) */
+            node = new_node(is_post_inc ? NODE_POSTINC : NODE_POSTDEC,
+                            node_val[node], 0, 0);
+        } else if (is_elem_node(node)) {
+            /* 要素への後置 (v25): a[i]++ の形 */
+            node = new_node(NODE_EPOST, is_post_inc ? 1 : -1,
+                            node, 0);
+        } else {
+            errmsg = "++ / -- の相手は変数か要素だけです";
             return -1;
         }
-        cur += 2;
-        node = new_node(kind, node_val[node], 0, 0);
         if (node < 0)
             return -1;
     }
@@ -833,27 +873,47 @@ static int parse_postfix_expr(void) {
  *               *p++ を「*(p++)」と読むため)。** はまだ扱わない */
 static int parse_unary_expr(void) {
     skip_spaces();
+    if (*cur == '(') {
+        /* キャスト (型) 式 (v25): '(' の直後が型なら
+         * キャスト。iwac は型を区別しないので、キャストは
+         * 読み捨てて相手の式をそのまま使う。切り詰めの
+         * ような変換は起きない点は割り切り (iwac 自身の
+         * ソースのキャストは範囲が合っているものだけ) */
+        char *save = cur;
+        cur++;
+        skip_spaces();
+        if (parse_type()) {
+            skip_spaces();
+            if (*cur == ')') {
+                cur++;
+                return parse_unary_expr();
+            }
+        }
+        cur = save;
+    }
     if (cur[0] == '+' && cur[1] == '+') {
         cur += 2;
         int operand = parse_unary_expr();
         if (operand < 0)
             return -1;
-        if (node_kind[operand] != NODE_VAR) {
-            errmsg = "++ / -- の相手は変数だけです";
-            return -1;
-        }
-        return new_node(NODE_PREINC, node_val[operand], 0, 0);
+        if (node_kind[operand] == NODE_VAR)
+            return new_node(NODE_PREINC, node_val[operand], 0, 0);
+        if (is_elem_node(operand))
+            return new_node(NODE_EPRE, 1, operand, 0);
+        errmsg = "++ / -- の相手は変数か要素だけです";
+        return -1;
     }
     if (cur[0] == '-' && cur[1] == '-') {
         cur += 2;
         int operand = parse_unary_expr();
         if (operand < 0)
             return -1;
-        if (node_kind[operand] != NODE_VAR) {
-            errmsg = "++ / -- の相手は変数だけです";
-            return -1;
-        }
-        return new_node(NODE_PREDEC, node_val[operand], 0, 0);
+        if (node_kind[operand] == NODE_VAR)
+            return new_node(NODE_PREDEC, node_val[operand], 0, 0);
+        if (is_elem_node(operand))
+            return new_node(NODE_EPRE, -1, operand, 0);
+        errmsg = "++ / -- の相手は変数か要素だけです";
+        return -1;
     }
     if (*cur == '-') {
         cur++;
@@ -863,7 +923,7 @@ static int parse_unary_expr(void) {
         return new_node(NODE_NEG, 0, operand, 0);
     }
     if (*cur == '&' && cur[1] != '&') {
-        /* 単項 & (住所、v21): 相手は変数か配列だけ。
+        /* 単項 & (住所、v21。v25 で要素も相手にできる):
          * && とは位置で見分ける (材料の頭の & は住所、
          * 式の途中の & はビット演算か論理演算) */
         cur++;
@@ -871,8 +931,9 @@ static int parse_unary_expr(void) {
         if (operand < 0)
             return -1;
         int ok = node_kind[operand];
-        if (ok != NODE_VAR && ok != NODE_ARRAY) {
-            errmsg = "& の相手は変数か配列だけです";
+        if (ok != NODE_VAR && ok != NODE_ARRAY &&
+            !is_elem_node(operand)) {
+            errmsg = "& の相手は変数か配列か要素だけです";
             return -1;
         }
         return new_node(NODE_ADDR, 0, operand, 0);
@@ -883,6 +944,14 @@ static int parse_unary_expr(void) {
         if (operand < 0)
             return -1;
         return new_node(NODE_NOT, 0, operand, 0);
+    }
+    if (*cur == '~') {
+        /* ビット反転 (v25): 全ビットをひっくり返す */
+        cur++;
+        int operand = parse_unary_expr();
+        if (operand < 0)
+            return -1;
+        return new_node(NODE_BITNOT, 0, operand, 0);
     }
     if (*cur == '*') {
         /* ポインタ読み: * の次は「住所を表すもの」。
@@ -1162,10 +1231,11 @@ static int parse_land_expr(void) {
     }
 }
 
-/* 式全体を読む。一番外側は論理 OR の段 (v19)。
+/* 論理 OR の段 (v19)。式全体の入口は、この段の上に
+ * 三項演算子を載せた parse_expr (v25)。
  * 例: "*s != 0" は !=(*s, 0)、"a || b && c" は
  * ||(a, &&(b, c)) という木になる (C と同じ読み) */
-static int parse_expr(void) {
+static int parse_lor_expr(void) {
     int lhs = parse_land_expr();
     if (lhs < 0)
         return -1;
@@ -1182,6 +1252,29 @@ static int parse_expr(void) {
         if (lhs < 0)
             return -1;
     }
+}
+
+/* 式の最上位 (v25 で三項演算子を追加):
+ *   条件 ? 真の式 : 偽の式
+ * 三項は右結合 (? の中と : の後はまた式を読む)。
+ * 成り立たない側は実行しない (短絡) のは生成の仕事 */
+static int parse_expr(void) {
+    int cond = parse_lor_expr();
+    if (cond < 0)
+        return -1;
+    skip_spaces();
+    if (*cur != '?')
+        return cond;
+    cur++;
+    int texpr = parse_expr();
+    if (texpr < 0)
+        return -1;
+    if (!expect_char(':', "三項演算子には : が必要です"))
+        return -1;
+    int fexpr = parse_expr();
+    if (fexpr < 0)
+        return -1;
+    return new_node(NODE_COND, texpr, cond, fexpr);
 }
 
 /* 読み取ったばかりの識別子 (ident_buf) が、指定した単語と
@@ -1211,11 +1304,21 @@ static int expect_char(char c, char *msg) {
  * その文にまた while がありうる) ので、先に宣言だけ置く */
 static int parse_stmt(void);
 static int parse_stmt_list(int in_brace);
+static int parse_body(void);  /* 制御文の本体 (v25) */
 
 /* parse の状態 (v20): break / continue が許される深さと、
  * return が許される場所を parse の時点で確かめるために持つ */
 static int parse_loop_depth;  /* while / for の本体の中なら 1 以上 */
 static int parse_in_func;     /* 関数の本体の中なら 1 */
+
+/* 今の位置の先 (空白の後ろ) に '*' があるか (v25)。
+ * キャストと (void) 判定の先読みに使う */
+static int is_ptr_ahead(void) {
+    char *p = cur;
+    while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r')
+        p++;
+    return *p == '*';
+}
 
 /* 型を1つ読む: [ const ] 型の言葉 { 型の言葉 } { * }
  * 型は今は読み捨てるので、形だけ確かめて進む。
@@ -1241,7 +1344,10 @@ static int parse_type(void) {
         return 0;
     if (!parse_ident())
         return 0;
-    if (ident_is("const")) {
+    if (ident_is("const") || ident_is("static")) {
+        /* 修飾子 (v25 で static を追加): どちらも型の
+         * 意味には影響しないので、読み捨てて次へ進む。
+         * iwac 自身のソースは static を多用する */
         skip_spaces();
         if (!parse_ident())
             return 0;
@@ -1286,7 +1392,8 @@ static int parse_type(void) {
  * 載せるので、自分自身を呼ぶ (再帰の) 形も読める。
  * 宣言が先にあれば、定義はその名簿の続きとして読む。
  * 相互再帰 (互いを呼び合う関数) は宣言で可能になる。
- * 引数は4つまで (v22)。定義では引数の名前が変数として
+ * 引数は8つまで (v22 で4つ、v25 で8つに拡大。a0〜a7)。
+ * 定義では引数の名前が変数として
  * 名簿に載る。宣言では名前は省略でき、あっても捨てる */
 static int parse_funcdef(void) {
     if (!parse_type()) {
@@ -1312,8 +1419,8 @@ static int parse_funcdef(void) {
             return 0;
         }
     } else {
-        if (nfunc >= 16) {
-            errmsg = "関数は16個までです";
+        if (nfunc >= 128) {
+            errmsg = "関数は128個までです";
             return 0;
         }
         f = nfunc++;
@@ -1333,19 +1440,38 @@ static int parse_funcdef(void) {
      * としての登録は、本体のある定義だと分かった後で
      * 行う (宣言だけのプロトタイプでは、引数の名前は
      * 意味を持たないため。名前の省略も宣言では許す) */
-    char pnames[4][32];
-    int plens[4];
-    int pbs[4];
-    int ppl[4];
+    char pnames[8][32];
+    int plens[8];
+    int pbs[8];
+    int ppl[8];
     int np = 0;
+    int params_done = 0;  /* (void) は引数なしと同義 (v25) */
     skip_spaces();
     if (*cur == ')') {
         cur++;  /* 引数なし */
+        params_done = 1;
+    } else {
+        skip_spaces();
+        char *save_v = cur;
+        if (parse_ident() && ident_is("void") && !is_ptr_ahead()) {
+            /* 先読み '(void)': 型が void だけで、後に名前も
+             * * も続かないなら引数なしの宣言 (C の書き方)。
+             * void 型の引数が1つ、の形は iwac では使わない */
+            skip_spaces();
+            if (*cur == ')')
+                params_done = 1;
+        }
+        if (!params_done)
+            cur = save_v;  /* (void) でなければ読み直す */
+    }
+    if (params_done) {
+        if (*cur == ')')
+            cur++;  /* ')' を消費する */
     } else {
         /* 引数の並び: 型 [名前] (, 型 [名前])* (v22 で複数) */
         for (;;) {
-            if (np >= 4) {
-                errmsg = "引数は4つまでです";
+            if (np >= 8) {
+                errmsg = "引数は8つまでです";
                 return 0;
             }
             skip_spaces();  /* カンマの後の空白 (parse_type は
@@ -1452,6 +1578,21 @@ static int parse_stmt_list(int in_brace) {
             if (*cur == '\0')
                 return head;  /* 文だけのプログラムもよい */
         }
+        /* 裸のブロック (v25): parse_stmt が本体を読む。
+         * 並びは複数ノードの鎖で返るので、末尾も進める */
+        if (*cur == '{') {
+            int stmt = parse_stmt();
+            if (stmt < 0)
+                return -2;
+            if (head < 0)
+                head = stmt;
+            else
+                node_next[tail] = stmt;
+            tail = stmt;
+            while (node_next[tail] >= 0)
+                tail = node_next[tail];
+            continue;
+        }
         /* '*' で始まる場合の先読み: 相手の後ろに '=' が
          * あればメモリ書き込み文、無ければ * で始まる式
          * (プログラムの最後の式) である。相手は変数か数
@@ -1507,7 +1648,7 @@ static int parse_stmt_list(int in_brace) {
                              ident_is("if") || ident_is("for") ||
                              ident_is("break") || ident_is("continue") ||
                              ident_is("return");
-            int is_type = is_type_word() || ident_is("const");
+            int is_type = is_type_word() || ident_is("const") || ident_is("static");
             if (is_type) {
                 /* 型で始まるのは、関数定義か宣言の文。
                  * 名前の後ろが '[' (配列) か '=' (初期化) か
@@ -1553,7 +1694,13 @@ static int parse_stmt_list(int in_brace) {
                 continue;
             }
             skip_spaces();
-            int is_assign = (*cur == '=' && cur[1] != '=');
+            int is_assign = (*cur == '=' && cur[1] != '=') ||
+                            (cur[1] == '=' && (*cur == '+' || *cur == '-' ||
+                             *cur == '*' || *cur == '/' || *cur == '%' ||
+                             *cur == '&' || *cur == '|' || *cur == '^')) ||
+                            ((*cur == '<' || *cur == '>') &&
+                             cur[1] == *cur && cur[2] == '=');
+                            /* 複合代入 op= も代入文 (v25) */
             int is_call = (*cur == '(');
             int is_incdec = (cur[0] == '+' && cur[1] == '+') ||
                             (cur[0] == '-' && cur[1] == '-');
@@ -1589,6 +1736,10 @@ static int parse_stmt_list(int in_brace) {
                 }
                 is_index_store = (depth == 0 && *p == '=' &&
                                   p[1] != '=');
+                if (depth == 0 &&
+                    ((p[0] == '+' && p[1] == '+') ||
+                     (p[0] == '-' && p[1] == '-')))
+                    is_incdec = 1;  /* 要素への増減文 (v25) */
             }
             if (is_keyword || is_assign || is_call || is_index_store ||
                 is_incdec) {
@@ -1652,11 +1803,27 @@ static int eval_const(int node, long *out) {
         *out = *out == 0 ? 1 : 0;
         return 1;
     }
+    if (k == NODE_BITNOT) {
+        if (eval_const(node_lhs[node], out) != 1)
+            return 0;
+        *out = ~*out;
+        return 1;
+    }
+    if (k == NODE_COND) {
+        /* 三項も定数同士なら畳める (v25)。文字列の枝は
+         * 選ばれた側がそのまま答えになる */
+        long c;
+        if (eval_const(node_lhs[node], &c) != 1)
+            return 0;
+        return eval_const(c != 0 ? node_val[node] : node_rhs[node],
+                          out);
+    }
     if (k == NODE_ADD || k == NODE_SUB || k == NODE_MUL ||
         k == NODE_DIV || k == NODE_MOD || k == NODE_SHL ||
         k == NODE_SHR || k == NODE_AND || k == NODE_OR ||
         k == NODE_XOR) {
-        long l, r;
+        long l;
+        long r;
         if (eval_const(node_lhs[node], &l) != 1 ||
             eval_const(node_rhs[node], &r) != 1)
             return 0;
@@ -1721,8 +1888,8 @@ static int parse_decl_stmt(void) {
         int size = parse_number_value();
         if (size < 0)
             return -1;
-        if (size < 1 || size > 1024) {
-            errmsg = "配列の大きさは 1 から 1024 までです";
+        if (size < 1 || size > 1048576) {
+            errmsg = "配列の大きさは 1 から 1048576 までです";
             return -1;
         }
         if (!expect_char(']', "配列の大きさの後には ] が必要です"))
@@ -1736,8 +1903,8 @@ static int parse_decl_stmt(void) {
             cols = parse_number_value();
             if (cols < 0)
                 return -1;
-            if (cols < 1 || cols > 1024) {
-                errmsg = "配列の大きさは 1 から 1024 までです";
+            if (cols < 1 || cols > 1048576) {
+                errmsg = "配列の大きさは 1 から 1048576 までです";
                 return -1;
             }
             if (!expect_char(']', "配列の大きさの後には ] が必要です"))
@@ -1854,14 +2021,39 @@ static int parse_for_step(void) {
 
 /* 文を1つ読み、その AST ノードを返す。失敗したら -1。
  * 呼び出し時点でカーソルは文の頭にあること */
+/* 制御文の本体を読む (v25): { 文の並び } でも文1つでも
+ * よい (C の本来の形)。失敗したら -2、空の本体なら -1、
+ * それ以外は本体の先頭ノードを返す (parse_stmt_list と
+ * 同じ約束)。v24 までは { } が必須だった */
+static int parse_body(void) {
+    skip_spaces();
+    if (*cur == '{') {
+        cur++;
+        return parse_stmt_list(1);
+    }
+    int s = parse_stmt();
+    if (s < 0)
+        return -2;
+    return s;
+}
+
 static int parse_stmt(void) {
     skip_spaces();
+    if (*cur == '{') {
+        /* 裸のブロック (v25): { 文の並び } 自体が文になる。
+         * 中身の並びをそのまま返す */
+        cur++;
+        int body = parse_stmt_list(1);
+        if (body == -2)
+            return -1;
+        return body;
+    }
     if (is_ident_start(*cur)) {
         /* 型で始まる文は宣言 (関数定義は頭専用で、
          * parse_stmt_list がそちらへ振り分ける) */
         char *tsave = cur;
         if (parse_ident() &&
-            (is_type_word() || ident_is("const"))) {
+            (is_type_word() || ident_is("const") || ident_is("static"))) {
             cur = tsave;
             return parse_decl_stmt();
         }
@@ -1901,11 +2093,12 @@ static int parse_stmt(void) {
             return -1;
         return e;
     }
+    char *stmt_name_start = cur;  /* 要素の増減文の読み直し用 */
     if (!parse_ident())
         return -1;
 
     if (ident_is("while")) {
-        /* while ( 条件 ) { 文の並び } */
+        /* while ( 条件 ) 本体。本体は { } か文1つ (v25) */
         if (!expect_char('(', "while の後には ( が必要です"))
             return -1;
         int cond = parse_expr();
@@ -1913,10 +2106,8 @@ static int parse_stmt(void) {
             return -1;
         if (!expect_char(')', "while の条件の後には ) が必要です"))
             return -1;
-        if (!expect_char('{', "while の後には { が必要です"))
-            return -1;
         parse_loop_depth++;
-        int body = parse_stmt_list(1);
+        int body = parse_body();
         parse_loop_depth--;
         if (body == -2)
             return -1;
@@ -1938,9 +2129,9 @@ static int parse_stmt(void) {
     }
 
     if (ident_is("if")) {
-        /* if ( 条件 ) { 文の並び } [ else { 文の並び }
-         *                          | else if ... ]
-         * 本体は while と同じく { } で囲む形だけにする */
+        /* if ( 条件 ) 本体 [ else 本体 ] (v25)。
+         * 本体は { } でも文1つでもよい。else if は
+         * 「else の本体が if 文1つ」として自然に読める */
         if (!expect_char('(', "if の後には ( が必要です"))
             return -1;
         int cond = parse_expr();
@@ -1948,9 +2139,7 @@ static int parse_stmt(void) {
             return -1;
         if (!expect_char(')', "if の条件の後には ) が必要です"))
             return -1;
-        if (!expect_char('{', "if の後には { が必要です"))
-            return -1;
-        int then_body = parse_stmt_list(1);
+        int then_body = parse_body();
         if (then_body == -2)
             return -1;
         /* else があるかを先読みする (無ければ巻き戻す) */
@@ -1959,22 +2148,9 @@ static int parse_stmt(void) {
         skip_spaces();
         if (is_ident_start(*cur) && parse_ident() &&
             ident_is("else")) {
-            skip_spaces();
-            if (*cur == '{') {
-                cur++;
-                else_body = parse_stmt_list(1);
-                if (else_body == -2)
-                    return -1;
-            } else if (is_ident_start(*cur)) {
-                /* else if の形: else の中身は if 文を1つ */
-                int sub = parse_stmt();
-                if (sub < 0)
-                    return -1;
-                else_body = sub;
-            } else {
-                errmsg = "else の後には { か if が必要です";
+            else_body = parse_body();
+            if (else_body == -2)
                 return -1;
-            }
         } else {
             cur = save;  /* else ではなかった */
         }
@@ -1997,7 +2173,7 @@ static int parse_stmt(void) {
              * v21 で対応)。それ以外は普通の文 (代入文など) */
             char *save = cur;
             int is_decl = is_ident_start(*cur) && parse_ident() &&
-                          (is_type_word() || ident_is("const"));
+                          (is_type_word() || ident_is("const") || ident_is("static"));
             cur = save;
             if (is_decl) {
                 init = parse_decl_stmt();  /* ';' まで読む */
@@ -2026,10 +2202,8 @@ static int parse_stmt(void) {
             return -1;
         if (!expect_char(')', "for の後には ) が必要です"))
             return -1;
-        if (!expect_char('{', "for の後には { が必要です"))
-            return -1;
         parse_loop_depth++;
-        int body = parse_stmt_list(1);
+        int body = parse_body();
         parse_loop_depth--;
         if (body == -2)
             return -1;
@@ -2101,6 +2275,47 @@ static int parse_stmt(void) {
      * ポインタ変数なら 名前 [ 添字 ] = 式 ; (v23) */
     skip_spaces();
     if (*cur == '[') {
+        /* 要素への増減文 (v25): 名前 [ 添字 ] ++ ; の形は、
+         * 添字列の後ろを先読みして見分ける。当たりなら
+         * 巻き戻して式として読み直す (後置の道具が
+         * 要素への増減ノードを作る) */
+        {
+            char *p = cur;
+            int depth = 0;
+            for (;;) {
+                depth = 0;
+                while (*p != '\0') {
+                    if (*p == '[')
+                        depth++;
+                    else if (*p == ']') {
+                        depth--;
+                        if (depth == 0) {
+                            p++;
+                            break;
+                        }
+                    }
+                    p++;
+                }
+                if (depth != 0)
+                    break;
+                while (*p == ' ' || *p == '\t')
+                    p++;
+                if (*p != '[')
+                    break;
+            }
+            if (depth == 0 &&
+                ((p[0] == '+' && p[1] == '+') ||
+                 (p[0] == '-' && p[1] == '-'))) {
+                /* 名前の頭に戻して式として読み直す */
+                cur = stmt_name_start;
+                int e = parse_unary_expr();
+                if (e < 0)
+                    return -1;
+                if (!expect_char(';', "文の終わりには ; が必要です"))
+                    return -1;
+                return e;
+            }
+        }
         int a = find_array(name_buf, name_len);
         if (a >= 0) {
             cur++;
@@ -2200,6 +2415,44 @@ static int parse_stmt(void) {
         if (!expect_char(';', "文の終わりには ; が必要です"))
             return -1;
         return new_node(kind, var, 0, 0);
+    }
+
+    /* 複合代入 (v25): 名前 op= 式 ; は
+     * 名前 = 名前 op 式 ; と同じ意味として読む。
+     * 対象は変数だけ (要素への複合代入は扱わない) */
+    {
+        int cop = -1;
+        int clen = 0;
+        if (cur[0] == '+' && cur[1] == '=') { cop = NODE_ADD; clen = 2; }
+        else if (cur[0] == '-' && cur[1] == '=') { cop = NODE_SUB; clen = 2; }
+        else if (cur[0] == '*' && cur[1] == '=') { cop = NODE_MUL; clen = 2; }
+        else if (cur[0] == '/' && cur[1] == '=') { cop = NODE_DIV; clen = 2; }
+        else if (cur[0] == '%' && cur[1] == '=') { cop = NODE_MOD; clen = 2; }
+        else if (cur[0] == '<' && cur[1] == '<' && cur[2] == '=') { cop = NODE_SHL; clen = 3; }
+        else if (cur[0] == '>' && cur[1] == '>' && cur[2] == '=') { cop = NODE_SHR; clen = 3; }
+        else if (cur[0] == '&' && cur[1] == '=') { cop = NODE_AND; clen = 2; }
+        else if (cur[0] == '|' && cur[1] == '=') { cop = NODE_OR; clen = 2; }
+        else if (cur[0] == '^' && cur[1] == '=') { cop = NODE_XOR; clen = 2; }
+        if (cop >= 0) {
+            cur += clen;
+            int cvar = find_var(name_buf, name_len);
+            if (cvar < 0) {
+                errmsg = "代入されていない変数が使われました";
+                return -1;
+            }
+            int cexpr = parse_expr();
+            if (cexpr < 0)
+                return -1;
+            int self = new_node(NODE_VAR, cvar, 0, 0);
+            if (self < 0)
+                return -1;
+            int comb = new_node(cop, 0, self, cexpr);
+            if (comb < 0)
+                return -1;
+            if (!expect_char(';', "代入文の終わりには ; が必要です"))
+                return -1;
+            return new_node(NODE_ASSIGN, cvar, comb, 0);
+        }
     }
 
     /* 残る形は代入文: 名前 = 式 ;

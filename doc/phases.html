@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v24 まで</title>
+<title>IwaC の歩み — v0 から v25 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v24 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v25 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -344,7 +344,8 @@
   <a class="done" href="#v21">v21 変数のメモリ化</a><span class="arrow">→</span>
   <a class="done" href="#v22">v22 関数の完成</a><span class="arrow">→</span>
   <a class="done" href="#v23">v23 配列の完成</a><span class="arrow">→</span>
-  <a class="done" href="#v24">v24 グローバル宣言とプロトタイプ</a>
+  <a class="done" href="#v24">v24 グローバル宣言とプロトタイプ</a><span class="arrow">→</span>
+  <a class="done" href="#v25">v25 容量と小さい構文</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1388,10 +1389,50 @@ int is_even(int n) {
   権限（読み書き可否）を分けて考えることが、OS との境目では効いてきます。</p></div>
 </section>
 
+<!-- ================= v25 ================= -->
+<section class="phase" id="v25">
+  <div class="head"><span class="badge b-v4">v25</span><h2>容量の調整と小さい構文 — 測ってから決める</h2></div>
+  <p class="goal-line">目標：<b>セルフホストへの階段の10段目。iwac 自身のソース（約212KB）を入れる器を、実測で決めること。</b></p>
+  <p>いきなり定数を決めず、まず「計測版」の iwac を作りました。表を巨大化して、
+  コンパイルのたびに使用量を出すだけの使い捨てのビルドです。それで iwac 自身の
+  ソースをコンパイルして数えたところ、ノード 10,951 個、命令 26,233 個
+  （生成コードは約103KB）、変数 513、関数 99、文字列 204 個でした。
+  定数はその約1.3〜2.5倍に決めました（ノード 16384、命令 32768、
+  変数 1024、関数 128、ソース上限 約256KB）。</p>
+<pre class="code">static int helper(void) { return 65; }   // static と (void)
+int pick(int c) { return c ? 65 : 66; }  // 三項演算子
+x += 5;  x >>= 1;                        // 複合代入
+a[0]++;  p = &amp;a[1];                   // 要素への ++ と &amp;
+if (ok) putc(65);                        // { } 無しの本体</pre>
+  <p>計測の過程で、前に調べた「iwac のソースはこの形を使っていない」という
+  前提が幾つも崩れました。三項演算子、キャスト、複合代入、単項の <code>~</code>、
+  要素への <code>++</code>、文1つだけの本体、<code>(void)</code> 引数などです。
+  どれも言語側へ追随して入れました。キャストは「読み捨てる」割り切りです
+  （型を変える変換は起きません。iwac のソースのキャストは、値の範囲が
+  合っている場所だけ、という前提に立ちます）。</p>
+  <p>もう1つ分かったこと：コンパイルされた iwac の静的データは約2.9MB に
+  なり、KosabaOS のユーザーデータ領域（2MB）に入りません。コード側は
+  約103KB で余裕なので、問題はデータだけです。OS 側と相談して、
+  virt では領域を 4MB に広げること、K210 でのセルフホストは目標に
+  しないことを決めました。iwac 側の作業はそれを待たずに進められます。</p>
+  <div class="chips">
+    <span class="chip">実測で定数を決めた</span><span class="chip">ソース上限 256KB</span>
+    <span class="chip">三項演算子</span><span class="chip">キャスト（読み捨て）</span>
+    <span class="chip">複合代入</span><span class="chip">引数8つ</span>
+    <span class="chip">静的データ約2.9MB</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  容量は「たぶん足りる」ではなく測って決めるもの、という当たり前を、
+  計測版という使い捨ての道具で実践しました。そして「使っていないはずの
+  構文」が次々見つかったのは、調査の方法（grep の当て方）が粗かったためです。
+  前提は疑って、実物で確かめる。残る壁はローカル配列（関数の中の配列）で、
+  次の段の主題になりました。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v24 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v25 時点）</p>
 </footer>
 
 </div>

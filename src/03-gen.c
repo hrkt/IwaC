@@ -12,10 +12,11 @@
  * 「add する」という言葉だけで考える。ビット列への
  * 変換は第3層の仕事。
  *
- * 容量の約束: ノード上限 512 に対し命令は最大でも
- * ノード数 x2 + 文の数 + 3 個程度 (演算ノード1つが
- * addi + add/sub の2命令、代入文1つが余分に移し替え1命令)。
- * 2048 あれば解析が成功した後は生成があふれることはない。
+ * 容量の約束: 命令は最大でもノード数の数倍程度 (演算
+ * ノード1つが数命令、住所作りも命令を使う)。ノード
+ * 16384 に対し命令表 32768 を用意する (v25 で実測に
+ * 合わせて拡大: iwac 自身のコンパイルでノード約1.1万、
+ * 命令約2.6万を使った)。
  * ================================================================ */
 
 static int OP_LUI = 0;
@@ -65,11 +66,11 @@ static int OP_ECALL = 20; /* ecall (環境呼び出し)。KosabaOS
                            * ターゲットで OS のシステムコールを
                            * 呼ぶ命令。符号化は固定の1語 (v14) */
 
-static int asm_op[2048];
-static int asm_rd[2048];
-static int asm_rs1[2048];
-static int asm_rs2[2048];
-static int asm_imm[2048];
+static int asm_op[32768];
+static int asm_rd[32768];
+static int asm_rs1[32768];
+static int asm_rs2[32768];
+static int asm_imm[32768];
 static int nasm;  /* 並べた命令の数 */
 
 /* 命令を1つ、命令列の末尾に積む */
@@ -235,6 +236,12 @@ static void gen_load_leaf(int reg, int leaf) {
     if (k == NODE_NUM) {
         if ((unsigned int)node_val[leaf] <= 2047u)
             asm_push(OP_ADDI, reg, REG_ZERO, 0, node_val[leaf]);
+        else if (node_val[leaf] > 0)
+            /* 大きな正の数は「値」として lui + addi で作る
+             * (v25)。住所作り (auipc 相対) は配置先頭の
+             * 近くの住所のための道具で、遠く離れた小さい
+             * 数は hi が 20 ビットに収まらず作れない */
+            gen_load_const(reg, node_val[leaf]);
         else
             gen_load_addr(reg, (unsigned int)node_val[leaf]);
     } else if (k == NODE_VAR)
@@ -418,6 +425,37 @@ static int gen_expr(int node) {
         asm_push(OP_SLTIU, REG_T1, REG_T1, 0, 1);
         return 1;
     }
+    if (node_kind[node] == NODE_BITNOT) {
+        /* ~x (v25): 全ビット反転は -1 との XOR */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_XORI, REG_T1, REG_T1, 0, -1);
+        return 1;
+    }
+    if (node_kind[node] == NODE_COND) {
+        /* 三項演算子 (v25): 短絡評価。&& と同じく、
+         * 条件の値で飛び先を分ける:
+         *   条件を計算 (t1)
+         *   beq t1, zero, L_false
+         *   真の式を計算 (t1)
+         *   jal zero, L_end
+         * L_false: 偽の式を計算 (t1)
+         * L_end:
+         * 条件の値は分岐で消費されるので退避は不要 */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        int f_jump = nasm;
+        asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+        if (!gen_expr(node_val[node]))
+            return 0;
+        int e_jump = nasm;
+        asm_push(OP_JAL, 0, 0, 0, 0);
+        asm_imm[f_jump] = nasm;
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        asm_imm[e_jump] = nasm;
+        return 1;
+    }
     if (node_kind[node] == NODE_NEG) {
         /* -x: 0 から引く (sub t1, zero, t1) */
         if (!gen_expr(node_lhs[node]))
@@ -427,12 +465,19 @@ static int gen_expr(int node) {
     }
     if (node_kind[node] == NODE_ADDR) {
         /* 単項 &: 変数ならその置き場所の住所、配列なら
-         * 先頭アドレスが値になる (v21) */
+         * 先頭アドレス、要素なら要素の住所 (v25) が
+         * 値になる */
         int operand = node_lhs[node];
         if (node_kind[operand] == NODE_VAR)
             gen_var_addr(REG_T1, node_val[operand]);
-        else /* NODE_ARRAY */
+        else if (node_kind[operand] == NODE_ARRAY)
             gen_load_addr(REG_T1, arr_addr[node_val[operand]]);
+        else {
+            /* 要素: 住所作りの道具が t2 に住所を置く */
+            if (!gen_elem_addr(operand))
+                return 0;
+            asm_push(OP_ADDI, REG_T1, REG_T2, 0, 0);
+        }
         return 1;
     }
     if (node_kind[node] == NODE_PREINC ||
@@ -456,6 +501,36 @@ static int gen_expr(int node) {
         } else {
             asm_push(OP_ADDI, REG_A0, REG_T1, 0, delta);
             asm_push(OP_SD, 0, REG_T2, REG_A0, 0);
+        }
+        return 1;
+    }
+    if (node_kind[node] == NODE_EPRE ||
+        node_kind[node] == NODE_EPOST) {
+        /* 要素への ++ / -- (v25): 変数の版と同じ流れで、
+         * 住所は要素の住所作り (gen_elem_addr) が t2 に置く。
+         * 読み書きの幅は要素の大きさで決まる (char なら
+         * lbu/sb)。後置は元の値を a0 に作ってから書く */
+        int operand = node_lhs[node];
+        if (!gen_elem_addr(operand))
+            return 0;
+        int esize = elem_esize(operand);
+        if (esize == 1) {
+            asm_push(OP_LBU, REG_T1, REG_T2, 0, 0);
+        } else {
+            asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
+        }
+        if (node_kind[node] == NODE_EPRE) {
+            asm_push(OP_ADDI, REG_T1, REG_T1, 0, node_val[node]);
+            if (esize == 1)
+                asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+            else
+                asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
+        } else {
+            asm_push(OP_ADDI, REG_A0, REG_T1, 0, node_val[node]);
+            if (esize == 1)
+                asm_push(OP_SB, 0, REG_T2, REG_A0, 0);
+            else
+                asm_push(OP_SD, 0, REG_T2, REG_A0, 0);
         }
         return 1;
     }
@@ -628,7 +703,7 @@ static int gen_elem_addr(int node) {
 static int loop_depth;
 static int loop_break_head[32];
 static int loop_cont_head[32];
-static int patch_next[2048];
+static int patch_next[32768];
 
 /* 関数の return の飛び先 (出口は関数の生成の最後まで
  * 分からない) も同じ道具で積む */
@@ -652,8 +727,10 @@ static void apply_patches(int head, int target) {
 static int gen_stmt(int node) {
     int kind = node_kind[node];
     if (kind == NODE_PREINC || kind == NODE_POSTINC ||
-        kind == NODE_PREDEC || kind == NODE_POSTDEC) {
-        /* 増減文: 式として生成し、結果 (t1) は捨てる (v19) */
+        kind == NODE_PREDEC || kind == NODE_POSTDEC ||
+        kind == NODE_EPRE || kind == NODE_EPOST) {
+        /* 増減文: 式として生成し、結果 (t1) は捨てる
+         * (v19。要素への増減は v25 で追加) */
         return gen_expr(node);
     }
     if (kind == NODE_DECL) {
@@ -991,7 +1068,16 @@ static int expr_needs_stack(int node) {
          * 要することはある */
         return expr_needs_stack(node_lhs[node]) ||
                expr_needs_stack(node_rhs[node]);
-    if (k == NODE_NOT || k == NODE_NEG || k == NODE_ADDR)
+    if (k == NODE_NOT || k == NODE_NEG || k == NODE_ADDR ||
+        k == NODE_BITNOT)
+        return expr_needs_stack(node_lhs[node]);
+    if (k == NODE_COND)
+        /* 三項 (v25): 条件と両枝のどこかで退避が要るか */
+        return expr_needs_stack(node_lhs[node]) ||
+               expr_needs_stack(node_val[node]) ||
+               expr_needs_stack(node_rhs[node]);
+    if (k == NODE_EPRE || k == NODE_EPOST)
+        /* 要素の ++ / -- (v25): 住所作りの中の式を見る */
         return expr_needs_stack(node_lhs[node]);
     if (k == NODE_CALL) {
         /* 呼び出しの引数の式が退避を要するか (v22) */

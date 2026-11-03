@@ -12,7 +12,7 @@
 #   v0: iwac A と iwac 65 が同じ16バイトを出し、実行すると A が出る
 #   v1: 式 65+1 → B、66-1 → A、50+10+5 → A が実行時に計算されて出る
 #       空白ありの式が空白なしと同じバイナリになる
-#       文法エラー (65+ / 2048 など) では失敗し、出力が空になる
+#       文法エラー (65+ など) では失敗し、出力が空になる
 #   v2: 変数と代入 (x=65; x+1 → B、2変数の加算、再代入、長い変数名)、
 #       未代入の変数や変数5個では失敗し、出力が空になる
 #   v3: 文字列とポインタ (s="Hi"; *s → H、s=s+1 で次を読む、
@@ -42,6 +42,7 @@
 #   v22: 関数の完成 (引数4つ、戻り値、再帰、main の引数と決め打ち argv)
 #   v23: 配列の完成 (8バイト要素、2次元配列、ポインタの添字)
 #   v24: グローバル宣言とプロトタイプ (初期化子は初期イメージ、宣言だけの関数、ELF のデータセグメント分離)
+#   v25: 容量の調整と小さい構文の追随 (実測で決めた表の定数、static、引数8つ、三項、キャスト、複合代入、要素の増減、単一文本体)
 set -e
 cd "$(dirname "$0")"
 
@@ -124,7 +125,7 @@ check_error() {
 }
 check_error '65+' "'65+'"
 # '65*2' は v7 で掛け算として意味を持つようになった (下の v7 で確認)
-check_error '2048' "'2048' (addi 即値の上限超え)"
+# '2048' は v25 で大きな数として意味を持つようになった (下の v25 で確認)
 check_error '' "空文字列"
 
 # --- v2: 変数と代入、文の並び ---
@@ -270,7 +271,7 @@ check_tail "$TMP/v8d.bin" 'ABA' "v8: while の中の if/else"
 "$IWAC" 'void f(char c) { if (c == 65) { putc(97); } else { putc(98); } } f(65); f(66);' > "$TMP/v8e.bin"
 check_tail "$TMP/v8e.bin" 'ab' "v8: 関数の中の if"
 
-check_error 'if (1) putc(65);' "if の本体に { } が無い"
+# 'if (1) putc(65);' は v25 で単一文の本体として意味を持つようになった (下の v25 で確認)
 check_error 'if (1) { putc(65);' "if の本体が閉じていない"
 
 # --- v9: 配列 ---
@@ -575,7 +576,7 @@ check_run "$TMP/v22f.bin" P "v22: 引数は右から評価 (副作用の順序�
 check_run "$TMP/v22g.bin" Q "v22: 戻り値を代入に使う"
 "$IWAC" 'int f() { return 66; } int main() { putc(f()); return 0; }' > "$TMP/v22h.bin"
 check_run "$TMP/v22h.bin" B "v22: 戻り値つき return (v20 ではエラーだった)"
-check_error 'int f(int a, int b, int c, int d, int e) { return a; }' "引数5つの定義"
+# 引数5つの定義は v25 で上限が8つになり意味を持つようになった (上の v25 で8つを確認)
 check_error 'int f(int a) { return a; } putc(f(1, 2));' "引数の数が合わない呼び出し"
 
 # --- v22: KosabaOS 向けの main 引数 (決め打ち argv) ---
@@ -641,5 +642,32 @@ echo "ok: v24: kosaba ELF は PT_LOAD 2本 (コード R+X / データ 0x40200000
 set -- $(readelf -l "$TMP/v24k2.elf" | awk '/LOAD/{n++; if (n == 2) {getline; print $1, $2; exit}}')
 [ $(( $1 )) -eq 8 ] || fail "v24: 初期イメージ (グローバル1個=8バイト) が filesz に無い (filesz=$1)"
 echo "ok: v24: 初期イメージがデータセグメントの実体に入った"
+
+# --- v25: 容量の調整と小さい構文の追随 ---
+"$IWAC" 'int calls; int side() { calls = calls + 1; return 66; } int main() { int x = (3 > 2) ? 65 : 66; putc(x); int z = 1 ? 67 : side(); putc(z); if (calls == 0) { putc(48); } int w = 0 ? side() : 68; putc(w); if (calls == 0) { putc(48); } return 0; }' > "$TMP/v25a.bin"
+check_tail "$TMP/v25a.bin" AC0D0 "v25: 三項演算子 (短絡で呼ばれない側は評価しない)"
+"$IWAC" 'putc(~0 + 66);' > "$TMP/v25b.bin"
+check_run "$TMP/v25b.bin" A "v25: ビット反転 ~"
+"$IWAC" 'putc((char)65); putc((int)(unsigned char)66 - 1);' > "$TMP/v25c.bin"
+check_tail "$TMP/v25c.bin" AA "v25: キャスト (読み捨て)"
+"$IWAC" 'x = 60; x += 5; putc(x); x = 130; x >>= 1; putc(x); x = 32; x <<= 1; x += 1; putc(x);' > "$TMP/v25d.bin"
+check_tail "$TMP/v25d.bin" AAA "v25: 複合代入 (+= >>= <<=)"
+"$IWAC" 'int a[4]; int main() { a[0] = 64; a[0]++; putc(a[0]); int old = a[0]++; putc(old); putc(a[0]); ++a[0]; putc(a[0]); a[0]--; putc(a[0]); return 0; }' > "$TMP/v25e.bin"
+check_tail "$TMP/v25e.bin" AABCB "v25: 要素への ++ / -- (前置と後置、文と式)"
+"$IWAC" 'char s[8]; int main() { s[0] = 64; s[0]++; putc(s[0]); return 0; }' > "$TMP/v25f.bin"
+check_run "$TMP/v25f.bin" A "v25: char 要素への ++ (1バイト幅)"
+"$IWAC" 'int a[4]; int main() { int *p = &a[1]; *p = 72; putc(a[1]); return 0; }' > "$TMP/v25g.bin"
+check_run "$TMP/v25g.bin" H "v25: 要素への & (&a[1])"
+"$IWAC" 'int main() { int i = 0; while (i < 3) i++; if (i == 3) putc(65); else putc(66); for (int k = 0; k < 2; k++) putc(68); { putc(69); } return 0; }' > "$TMP/v25h.bin"
+check_tail "$TMP/v25h.bin" ADDE "v25: 単一文の本体と裸のブロック"
+"$IWAC" 'int sum8(int a, int b, int c, int d, int e, int f, int g, int h) { return a + b + c + d + e + f + g + h; } putc(sum8(1, 2, 3, 4, 5, 6, 7, 37));' > "$TMP/v25i.bin"
+check_run "$TMP/v25i.bin" A "v25: 引数8つ (a0〜a7)"
+"$IWAC" 'static int helper(void) { return 65; } static int counter; int main(void) { counter = helper(); putc(counter); return 0; }' > "$TMP/v25j.bin"
+check_run "$TMP/v25j.bin" A "v25: static と (void) 引数"
+"$IWAC" 'long x = 65536; putc((x >> 10) + 1); putc(65UL); putc(0x42u);' > "$TMP/v25k.bin"
+check_tail "$TMP/v25k.bin" AAB "v25: 大きな数と接尾辞 (2047 の壁を撤廃)"
+"$IWAC" 'char big[100000]; big[99999] = 65; putc(big[99999]);' > "$TMP/v25l.bin"
+check_run "$TMP/v25l.bin" A "v25: 大きな配列 (合計 4MB まで)"
+check_error 'int f(int a, int b, int c, int d, int e, int g, int h, int i, int j) { return a; }' "引数9つの定義"
 
 echo "PASS"

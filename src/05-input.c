@@ -5,10 +5,10 @@
  * (開けなければエラー)。それ以外でも、同名のファイルが
  * 開けるならその中身を、開けないなら引数そのものを
  * プログラムとして読む (従来の使い方もそのまま残す)。
- * 読み込んだソースは src_buf に置く。上限は約64KB。
+ * 読み込んだソースは src_buf に置く。上限は約256KB。
  * ================================================================ */
 
-static char src_buf[65536];
+static char src_buf[262144];
 
 /* path が ".c" で終わる名前かどうか */
 static int ends_with_c(char *path) {
@@ -31,12 +31,12 @@ static int append_file(char *path, int *used_io) {
         return 0;
     int used = *used_io;
     for (;;) {
-        if (used >= 65535) {
+        if (used >= 262143) {
             close(fd);
-            errmsg = "ファイルが大きすぎます (約64KBまで)";
+            errmsg = "ファイルが大きすぎます (約256KBまで)";
             return -1;
         }
-        long n = read(fd, src_buf + used, 65535 - used);
+        long n = read(fd, src_buf + used, 262143 - used);
         if (n < 0) {
             close(fd);
             /* ディレクトリなど、開けても読めないものは
@@ -72,8 +72,8 @@ static int load_files(char **paths, int count) {
     load_failed_name = 0;
     for (int i = 0; i < count; i++) {
         if (used > 0) {
-            if (used >= 65535) {
-                errmsg = "ファイルが大きすぎます (約64KBまで)";
+            if (used >= 262143) {
+                errmsg = "ファイルが大きすぎます (約256KBまで)";
                 return -1;
             }
             src_buf[used++] = '\n';
