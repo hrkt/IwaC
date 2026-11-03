@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v27 まで</title>
+<title>IwaC の歩み — v0 から v28 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v27 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v28 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -348,6 +348,7 @@
   <a class="done" href="#v25">v25 容量と小さい構文</a>
   <a class="done" href="#v26">v26 ローカル配列</a>
   <a class="done" href="#v27">v27 セルフホスト</a>
+  <a class="done" href="#v28">v28 ELF の BSS 化</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1524,10 +1525,41 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   コンパイラの正しさがいちばん厳しく問われる形です。</p></div>
 </section>
 
+<!-- ================= v28 ================= -->
+<section class="phase" id="v28">
+  <div class="head"><span class="badge b-v4">v28</span><h2>ELF の BSS 化 — ゼロはファイルに書かない</h2></div>
+  <p class="goal-line">目標：<b>コンパイル結果のファイルを小さくする。自分自身をコンパイルした iwac2.elf は約3.0MB もあり、その 99.8% はゼロだった。</b></p>
+  <p>静的データの並びは「文字列 → 配列 → グローバル → 実行時の引数（argv）」で、
+  配列の中身はゼロしかありません。ところが今までの書き出しは、初期値つきの
+  グローバルがあると、その手前にある配列のゼロまで丸ごとファイルに
+  書いていました。大きな表を持つ iwac 自身では、それが約3.0MB に
+  膨らんでいたのです。</p>
+  <p>ELF にはもともと仕掛けがあります。プログラムヘッダに「ファイルに
+  ある分（p_filesz）」と「メモリに要る分（p_memsz）」を別々に書くと、
+  ローダが差分をゼロで埋めてくれます（いわゆる BSS）。KosabaOS の
+  ローダは最初からその約束どおりに作ってありました。変えるのは
+  iwac の書き出しだけです：</p>
+<pre class="code">1本目： コード（今までどおり）
+2本目： 文字列の実体 ＋ 配列の確保分（ゼロはローダ任せ）
+3本目： グローバルの実体 ＋ argv の確保分（同上）</pre>
+  <p>結果、iwac2.elf は 3,076,045 バイトから <b>126,893 バイト</b>に
+  なりました。OS の上でも確かめています：大きなゼロ配列の後ろにある
+  初期値つきの変数が正しく読めること、そして新しい書き出しでも
+  固定点（iwac2 と iwac3 の一致）が保たれること。</p>
+  <div>
+    <span class="chip">PT_LOAD 3本</span><span class="chip">ファイルは約 1/24</span><span class="chip">メモリ上の大きさは不変</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  小さくなったのはファイルだけで、メモリの使用量は変わりません。
+  「置き場所の節約」と「作業机の節約」は別の話で、K210 のような
+  小さいボードに載せるには作業机そのものを小さくした
+  shirasu が要ります。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v27 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v28 時点）</p>
 </footer>
 
 </div>

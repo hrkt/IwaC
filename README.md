@@ -17,11 +17,17 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v27（セルフホスト達成、階段を完走）
+## 現在地: v28（ELF の BSS 化）
 
-iwac が iwac 自身をコンパイルできるようにする階段
-（v16〜v27、計画は doc/roadmap.md と doc/selfhost.md）を
-登り切った。
+v28 では出力の節約をした。KosabaOS 用 ELF を
+PT_LOAD 3本に分け、ゼロだけの配列領域をファイルに
+含めない（BSS）形にして、iwac2.elf は約3.0MB から
+126,893 バイトになった。固定点は新しい書き出しでも
+再確認済み。メモリ上の大きさは変わらない。
+
+その前の v27 で、iwac が iwac 自身をコンパイル
+できるようにする階段（v16〜v27、計画は
+doc/roadmap.md と doc/selfhost.md）を登り切った。
 12段目（最終段）はセルフコンパイル: 組み込み
 `syscall3` と、外部4関数を iwac の言語で実装した
 `kosaba/kosaba_rt.c` を足し、ホスト版 iwac が作った

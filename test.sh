@@ -582,14 +582,14 @@ check_run "$TMP/v22h.bin" B "v22: 戻り値つき return (v20 ではエラーだ
 check_error 'int f(int a) { return a; } putc(f(1, 2));' "引数の数が合わない呼び出し"
 
 # --- v22: KosabaOS 向けの main 引数 (決め打ち argv) ---
-# ELF のデータセグメント (v24 で分離。2本目の LOAD) の
-# memsz が filesz より 48 バイト大きいことで、argv の
-# 置き場所 (文字列 24 + ポインタ配列 24) が確保されている
-# ことを確かめる。OS 上での実行確認は v24 で済んだ
+# argv の置き場所 (文字列 24 + ポインタ配列 24) が確保
+# されていることを確かめる。v28 からは3本目の LOAD
+# (グローバル + argv) の memsz が filesz より 48 バイト
+# 大きい形で出る。OS 上での実行確認は v24 で済んだ
 # (データセグメント分離の後、Nish から run して argc と
 # グローバル書き込みが動くことを確認)
 "$IWAC" --kosaba 'int main(int argc, char **argv) { putc(64 + argc); }' > "$TMP/v22k.elf"
-set -- $(readelf -l "$TMP/v22k.elf" | awk '/LOAD/{n++; if (n == 2) {getline; print $1, $2; exit}}')
+set -- $(readelf -l "$TMP/v22k.elf" | awk '/LOAD/{n++; if (n == 3) {getline; print $1, $2; exit}}')
 [ $(( $2 - $1 )) -eq 48 ] || fail "v22: kosaba の argv 領域 (memsz - filesz) が 48 でない (filesz=$1 memsz=$2)"
 echo "ok: v22: kosaba の argv 領域 48 バイトが memsz に確保された"
 
@@ -632,18 +632,18 @@ check_error 'int f(int x); int main() { putc(f(1)); }' "定義のない関数の
 check_error 'int g = 1; int h = g + 1; int main() { putc(65); }' "非定数のファイル範囲初期化子"
 check_error 'int f(int a, int b); int f(int a) { return a; }' "宣言と定義で引数の数が違う"
 
-# --- v24: KosabaOS の ELF は PT_LOAD 2本 (コードとデータ) ---
+# --- v24: KosabaOS の ELF は PT_LOAD 分割 (v28 で3本) ---
 "$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v24k.elf"
-[ "$(readelf -l "$TMP/v24k.elf" | grep -c 'LOAD')" -eq 2 ] || fail "v24: PT_LOAD が2本でない"
-readelf -l "$TMP/v24k.elf" | awk '/LOAD/{n++; getline; if (n == 1) code_ok = ($3 == "R" && $4 == "E"); if (n == 2) data_ok = ($3 == "RW")} END{exit !(code_ok && data_ok)}' || fail "v24: 1本目は R E、2本目は RW のはず"
+[ "$(readelf -l "$TMP/v24k.elf" | grep -c 'LOAD')" -eq 3 ] || fail "v24: PT_LOAD が3本でない"
+readelf -l "$TMP/v24k.elf" | awk '/LOAD/{n++; getline; if (n == 1) code_ok = ($3 == "R" && $4 == "E"); if (n == 2) data_ok = ($3 == "RW"); if (n == 3) gbl_ok = ($3 == "RW")} END{exit !(code_ok && data_ok && gbl_ok)}' || fail "v24: 1本目は R E、2本目と3本目は RW のはず"
 set -- $(readelf -l "$TMP/v24k.elf" | awk '/LOAD/{n++; if (n == 2) print $3; }')
 [ "$1" = "0x0000000040200000" ] || fail "v24: データセグメントの vaddr が 0x40200000 でない ($1)"
-echo "ok: v24: kosaba ELF は PT_LOAD 2本 (コード R+X / データ 0x40200000 R+W)"
+echo "ok: v24: kosaba ELF は PT_LOAD 3本 (コード R+X / データ 0x40200000 R+W、v28 で分割)"
 # 初期値つきグローバルの初期イメージがデータ側の実体に入る
 "$IWAC" --kosaba 'int g = 72; int main() { putc(g); }' > "$TMP/v24k2.elf"
-set -- $(readelf -l "$TMP/v24k2.elf" | awk '/LOAD/{n++; if (n == 2) {getline; print $1, $2; exit}}')
+set -- $(readelf -l "$TMP/v24k2.elf" | awk '/LOAD/{n++; if (n == 3) {getline; print $1, $2; exit}}')
 [ $(( $1 )) -eq 8 ] || fail "v24: 初期イメージ (グローバル1個=8バイト) が filesz に無い (filesz=$1)"
-echo "ok: v24: 初期イメージがデータセグメントの実体に入った"
+echo "ok: v24: 初期イメージが3本目のセグメントの実体に入った"
 
 # --- v25: 容量の調整と小さい構文の追随 ---
 "$IWAC" 'int calls; int side() { calls = calls + 1; return 66; } int main() { int x = (3 > 2) ? 65 : 66; putc(x); int z = 1 ? 67 : side(); putc(z); if (calls == 0) { putc(48); } int w = 0 ? side() : 68; putc(w); if (calls == 0) { putc(48); } return 0; }' > "$TMP/v25a.bin"
@@ -732,8 +732,25 @@ check_tail "$TMP/v27deref.bin" ABCDE "v27: 関数をまたぐ大きな値と *p 
 # 別途実施 (doc/selfhost.md)
 "$IWAC" --kosaba src/0*.c kosaba/kosaba_rt.c > "$TMP/v27self.elf" || fail "v27: セルフコンパイルに失敗"
 size=$(wc -c < "$TMP/v27self.elf")
-[ "$size" -gt 3000000 ] || fail "v27: セルフコンパイルの出力が小さすぎる ($size バイト)"
+# v28 で ELF は BSS 方式になり、iwac2.elf は約3.0MB から
+# 約127KB に縮んだ。小さすぎても (壊れて空に近い) 駄目
+[ "$size" -gt 100000 ] || fail "v28: セルフコンパイルの出力が小さすぎる ($size バイト)"
+[ "$size" -lt 1000000 ] || fail "v28: セルフコンパイルの出力が大きすぎる ($size バイト。BSS 化されていない?)"
 echo "ok: v27: セルフコンパイル (ホスト側) で $size バイトの iwac2.elf ができた"
+
+# --- v28: ELF の BSS 化 (配列のゼロをファイルに含めない) ---
+# 大きなゼロ配列 + 初期値つきグローバル: ファイルは小さく、
+# 配列の確保分は2本目の p_memsz に、グローバルの実体
+# (8バイト) は3本目の p_filesz に出ること
+printf 'char pad[200000]; int g = 66; int main() { putc(g); return 0; }' > "$TMP/v28bss.c"
+"$IWAC" --kosaba "$TMP/v28bss.c" > "$TMP/v28bss.elf" || fail "v28: BSS テストのコンパイルに失敗"
+size=$(wc -c < "$TMP/v28bss.elf")
+[ "$size" -lt 16384 ] || fail "v28: 大きなゼロ配列がファイルに含まれている ($size バイト)"
+m2=$(od -An -tu8 -j 160 -N 8 "$TMP/v28bss.elf" | tr -d ' ')
+[ "$m2" = "200000" ] || fail "v28: 2本目の p_memsz が配列の確保分でない ($m2)"
+f3=$(od -An -tu8 -j 208 -N 8 "$TMP/v28bss.elf" | tr -d ' ')
+[ "$f3" = "8" ] || fail "v28: 3本目の p_filesz がグローバルの実体でない ($f3)"
+echo "ok: v28: ELF の BSS 化 (ファイル $size バイト、配列 200000 バイトはゼロ埋め分)"
 
 # --- 小容量ビルド「shirasu」(K210 プロファイル、v15 の節と同じ流儀) ---
 # RISC-V 用 gcc が見つかるときだけ、kosaba/iwac-shirasu.elf が

@@ -255,46 +255,45 @@ static void out64le(unsigned long v) {
     out32le((unsigned int)(v >> 32));
 }
 
-/* KosabaOS 用 ELF のデータセグメントのファイル内オフセット
- * (v24): コードの後ろを 4096 境界に切り上げた位置。
- * p_offset と p_vaddr (0x40200000) の剰余を 4096 で揃える
- * ELF の約束のため、データはページ境界から始める */
+/* KosabaOS 用 ELF のデータのファイル内オフセット (v24):
+ * コードの後ろを 4096 境界に切り上げた位置 (p_offset と
+ * p_vaddr の剰余を揃える ELF の約束のため) */
 static long elf_data_offset(void) {
     long end = 4096 + (long)code_insts * 4;
     return (end + 4095) & ~4095L;
 }
 
-/* KosabaOS 用の ELF ヘッダを書く (v14、v24 で2本化)。
+/* KosabaOS 用の ELF ヘッダを書く (v14、v24 で2本化、v28 で3本化)。
  * OS の ELF ローダ (elf.c) が読む約束に合わせた最小形:
  *   ELF64 / リトルエンディアン / ET_EXEC / RISC-V
- *   プログラムヘッダ2本 (どちらも PT_LOAD):
+ *   プログラムヘッダ3本 (どれも PT_LOAD):
  *     1本目 (コード): ファイルの 4096 バイト目からを
- *       仮想アドレス 0x40000000 へ置く。入口も同じ住所。
- *       権限は読み＋実行 (R+X)。中身は命令だけ
- *     2本目 (データ): 仮想アドレス 0x40200000 へ置く。
- *       権限は読み＋書き (R+W)。中身は文字列プールと、
- *       初期値つきグローバルがあるときだけ初期イメージ
- *       (配列のゼロ＋グローバルの初期値)。残り (配列・
- *       グローバル・argv の領域) は p_memsz との差分を
- *       ローダがゼロ埋めする
+ *       仮想アドレス 0x40000000 へ。入口も同じ住所。
+ *       権限 R+X、中身は命令だけ
+ *     2本目 (文字列と配列): 0x40200000 へ、権限 R+W。
+ *       実体は文字列プールだけ。配列の領域は p_memsz
+ *       との差分をローダがゼロ埋めする (v28。中身は
+ *       ゼロしか無いのでファイルに含める意味が無い)
+ *     3本目 (グローバルと argv): 配列の直後へ。実体は
+ *       グローバルの初期イメージ (初期値つきのとき
+ *       だけ)、argv の領域はゼロ埋めに任せる。
+ *       ファイル内では文字列プールの直後に置く
  *   v23 までは1本 (権限 RWE) で、静的データがコード領域
  *   (R+X) に載って書き込みが fault していた。2本に分けた
  *   ことで W^X を保ったまま書き込めるようになる */
 static void write_elf_header(void) {
     unsigned long code_filesz = (unsigned long)code_insts * 4ul;
-    /* データ側のファイル実体: 文字列プールは常に入る。
-     * 初期イメージ (配列＋グローバル) は初期値つき
-     * グローバルがあるときだけ付ける */
+    /* データ側の実体と確保量 (v28): 2本目は文字列の
+     * 実体 + 配列の確保分、3本目はグローバルの実体
+     * + argv の確保分。差分はローダがゼロ埋めする */
     unsigned long data_filesz = (unsigned long)str_used;
-    if (has_var_inits)
-        data_filesz += (unsigned long)arr_used +
-                       (unsigned long)var_nglobal * 8ul;
-    /* データ側の確保量: 文字列＋配列＋グローバル＋argv。
-     * 差分はローダがゼロ埋めする = 0 で始まる */
     unsigned long data_memsz = (unsigned long)str_used +
-                               (unsigned long)arr_used +
-                               (unsigned long)var_nglobal * 8ul +
-                               (unsigned long)argv_used;
+                               (unsigned long)arr_used;
+    unsigned long gbl_filesz = 0;
+    if (has_var_inits)
+        gbl_filesz = (unsigned long)var_nglobal * 8ul;
+    unsigned long gbl_memsz = (unsigned long)var_nglobal * 8ul +
+                              (unsigned long)argv_used;
     /* ELF ヘッダ (64 バイト) */
     out_byte(0x7f);
     out_byte('E');
@@ -315,7 +314,7 @@ static void write_elf_header(void) {
     out32le(0);       /* e_flags */
     out16le(64);      /* e_ehsize */
     out16le(56);      /* e_phentsize */
-    out16le(2);       /* e_phnum = 2 本 (v24) */
+    out16le(3);       /* e_phnum = 3 本 (v28) */
     out16le(0);       /* e_shentsize */
     out16le(0);       /* e_shnum */
     out16le(0);       /* e_shstrndx */
@@ -328,31 +327,35 @@ static void write_elf_header(void) {
     out64le(code_filesz);   /* p_filesz */
     out64le(code_filesz);   /* p_memsz (コードは差分なし) */
     out64le(0x1000);  /* p_align */
-    /* プログラムヘッダ2本目 (56 バイト): データ */
+    /* プログラムヘッダ2本目 (56 バイト): 文字列と配列 */
     out32le(1);       /* p_type = PT_LOAD */
     out32le(6);       /* p_flags = 読み＋書き (R+W) */
     out64le((unsigned long)elf_data_offset());  /* p_offset */
     out64le(0x40200000ul);  /* p_vaddr */
     out64le(0x40200000ul);  /* p_paddr */
     out64le(data_filesz);   /* p_filesz */
-    out64le(data_memsz);    /* p_memsz (残りはゼロ埋め) */
+    out64le(data_memsz);    /* p_memsz (配列分はゼロ埋め) */
     out64le(0x1000);  /* p_align */
+    /* プログラムヘッダ3本目 (56 バイト): グローバルと argv */
+    out32le(1);       /* p_type = PT_LOAD */
+    out32le(6);       /* p_flags = 読み＋書き (R+W) */
+    out64le((unsigned long)elf_data_offset() +
+            (unsigned long)str_used);  /* p_offset (文字列の直後) */
+    out64le(0x40200000ul + data_memsz);  /* p_vaddr (配列の直後) */
+    out64le(0x40200000ul + data_memsz);  /* p_paddr */
+    out64le(gbl_filesz);   /* p_filesz */
+    out64le(gbl_memsz);    /* p_memsz (argv 分はゼロ埋め) */
+    out64le(1);       /* p_align (開始位置はページ境界とは限らない) */
     /* 実データの開始 (4096 バイト目) まで 0 で埋める。
-     * ヘッダ部は 64 + 56 x 2 = 176 バイト */
-    for (int i = 176; i < 4096; i++)
+     * ヘッダ部は 64 + 56 x 3 = 232 バイト */
+    for (int i = 232; i < 4096; i++)
         out_byte(0);
 }
 
-/* グローバル変数の初期イメージを書く (v24): 静的領域の
- * うち、配列の分 (arr_used バイト、ゼロ) の後ろに、
- * グローバル変数を枠 (slot) の順に8バイトずつ並べる。
- * 初期値のあるものはその値を (文字列なら、生成で確定
- * したその住所を)、無いものは 0 を書く。ベアメタル版
- * (静的領域がコードの後ろに連続する形) と KosabaOS 版
- * (データセグメントの実体) で共用する */
-static void write_global_image(void) {
-    for (int i = 0; i < arr_used; i++)
-        out_byte(0);
+/* グローバル変数の枠のイメージを書く (v24、v28 で
+ * 配列分と分離): 枠の順に8バイトずつ。初期値のある
+ * ものはその値を、無いものは 0 を書く */
+static void write_var_image(void) {
     for (int s = 0; s < var_nglobal; s++) {
         unsigned long val = 0;
         for (int v = 0; v < nvar; v++) {
@@ -366,6 +369,15 @@ static void write_global_image(void) {
         }
         out64le(val);
     }
+}
+
+/* ベアメタル版の初期イメージ: 配列のゼロの後ろに
+ * グローバルの枠を並べる (バイナリそのものがメモリ
+ * イメージなので、ゼロも含めて全部書く) */
+static void write_global_image(void) {
+    for (int i = 0; i < arr_used; i++)
+        out_byte(0);
+    write_var_image();
 }
 
 static void write_binary(void) {
@@ -383,11 +395,16 @@ static void write_binary(void) {
     }
     for (int i = 0; i < str_used; i++)
         out_byte((unsigned char)str_pool[i]);
-    /* 初期値つきグローバルがあるときだけ、配列＋
-     * グローバルの初期イメージを実体として付ける (v24)。
-     * 無いときは従来どおり付けない (ベアメタル版の出力
-     * は v23 とバイト単位で同じまま) */
-    if (has_var_inits)
-        write_global_image();
+    /* 初期値つきグローバルがあるときだけ初期イメージを
+     * 付ける (v24)。ベアメタル版はバイナリそのものが
+     * メモリイメージなので配列のゼロも全部書く。
+     * KosabaOS 版は枠だけを続けて書き、配列のゼロは
+     * ローダのゼロ埋めに任せる (v28) */
+    if (has_var_inits) {
+        if (target_kosaba)
+            write_var_image();
+        else
+            write_global_image();
+    }
 }
 

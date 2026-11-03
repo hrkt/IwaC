@@ -1549,7 +1549,7 @@ static int gen_program(void) {
      *               領域 (0x40000000、読み・実行のみ) と
      *               分けることで、静的データへの書き
      *               込みが OS 上でもできるようになる
-     *               (ELF は PT_LOAD 2本で申告する) */
+     *               (ELF は PT_LOAD 3本で申告する) */
     unsigned int data_base;
     if (target_kosaba)
         data_base = 0x40200000u;
