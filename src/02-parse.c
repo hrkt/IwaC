@@ -128,11 +128,11 @@ static int NODE_STORE = 13; /* メモリ書き込み文。
                              * (変数 = ポインタ、数 = 絶対アドレス)、
                              * node_rhs = 書く値の式 */
 
-static int node_kind[16384];
-static int node_val[16384];
-static int node_lhs[16384];
-static int node_rhs[16384];
-static int node_next[16384]; /* 文の並び用: 次の文ノード (-1 で終わり)。
+static int node_kind[20480];
+static int node_val[20480];
+static int node_lhs[20480];
+static int node_rhs[20480];
+static int node_next[20480]; /* 文の並び用: 次の文ノード (-1 で終わり)。
                             * 式のノードでは使わない */
 static int nnode;  /* 作ったノードの数 */
 
@@ -168,7 +168,7 @@ static int has_var_inits;  /* 初期値つきグローバルがあるか */
 static int nvar;       /* 登録された変数の数 (全スコープ合計) */
 static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
 static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
-static int func_nlocals[128];  /* 関数ごとのフレーム枠数。
+static int func_nlocals[192];  /* 関数ごとのフレーム枠数。
                              * 本体は関数の名簿の節で説明する */
 
 /* 名前の一致だけを見る小物 */
@@ -273,20 +273,20 @@ static int prog_main;
  *   func_entry[i]     : 命令列の中での入口の命令番号
  *                       (第2層が生成のたびに決める)
  * 関数は最大128個まで */
-static char func_names[128][32];
-static int func_name_len[128];
-static int func_nparams[128];
-static int func_param_var[128][8];
-static int func_body[128];
-static int func_entry[128];
+static char func_names[192][32];
+static int func_name_len[192];
+static int func_nparams[192];
+static int func_param_var[192][8];
+static int func_body[192];
+static int func_entry[192];
 /* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
  *   func_has_body[i]: 本体まで読めたら 1
  *   func_called[i]  : 呼び出しが現れたら 1。最後まで
  *                     本体が無い関数が呼ばれていたら、
  *                     生成の入口でエラーにする */
-static int func_has_body[128];
-static int func_called[128];
-/* func_nlocals[128] : フレームの枠数 (引数を含む、v21)。
+static int func_has_body[192];
+static int func_called[192];
+/* func_nlocals[192] : フレームの枠数 (引数を含む、v21)。
  * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
 
@@ -331,7 +331,7 @@ static int arr_used;  /* グローバル配列領域の使用済みバイト数 
 /* func_arr_bytes[f]: 関数 f のフレームに入るローカル
  * 配列の合計バイト数 (v26)。フレーム長の計算 (第2層の
  * func_frame_size) が使う */
-static int func_arr_bytes[128];
+static int func_arr_bytes[192];
 
 /* 名前の一致だけを見る小物 (変数の var_name_eq と同じ) */
 static int arr_name_eq(int i, char *name, int len) {
@@ -453,7 +453,7 @@ static unsigned int str_addr[512];  /* 第2層が確定させる住所 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
-    if (nnode >= 16384) {
+    if (nnode >= 20480) {
         errmsg = "プログラムが大きすぎます (ノード数上限)";
         return -1;
     }
@@ -1532,7 +1532,7 @@ static int parse_funcdef(void) {
             return 0;
         }
     } else {
-        if (nfunc >= 128) {
+        if (nfunc >= 192) {
             errmsg = "関数は128個までです";
             return 0;
         }

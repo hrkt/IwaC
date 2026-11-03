@@ -28,7 +28,7 @@ static char def_text[16][128];
 static int def_text_len[16];
 static int ndef;
 
-static char exp_buf[262144];
+static char exp_buf[393216];
 static int exp_len;
 static int exp_failed;
 
@@ -98,7 +98,7 @@ static int cond_active(void) {
 
 /* 展開先へ1文字書く (あふれたら印だけ付ける) */
 static void exp_ch(char c) {
-    if (exp_len >= 262143) {
+    if (exp_len >= 393215) {
         exp_failed = 1;
         return;
     }

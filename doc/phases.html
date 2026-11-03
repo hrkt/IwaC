@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v29 まで</title>
+<title>IwaC の歩み — v0 から v30 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v29 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v30 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -349,7 +349,8 @@
   <a class="done" href="#v26">v26 ローカル配列</a>
   <a class="done" href="#v27">v27 セルフホスト</a>
   <a class="done" href="#v28">v28 ELF の BSS 化</a><span class="arrow">→</span>
-  <a class="done" href="#v29">v29 入口と出口の約束</a>
+  <a class="done" href="#v29">v29 入口と出口の約束</a><span class="arrow">→</span>
+  <a class="done" href="#v30">v30 容量の引き上げ</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1582,11 +1583,34 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   片方だけでは変えられず、OS 側の引数渡しと終了ステータスが
   揃ってはじめて、コンパイラ側が追随できました。</p></div>
 </section>
+<!-- ================= v30 ================= -->
+<section class="phase" id="v30">
+  <div class="head"><span class="badge b-v4">v30</span><h2>容量の引き上げ — 次の階段のための器</h2></div>
+  <p class="goal-line">目標：<b>「ソースを少しずつコンパイルする」分割コンパイルへの階段（doc/linking.md）の段0として、コンパイラの器を広げる。</b></p>
+  <p>v29 の時点で、iwac 自身のソースは入力バッファの 99.5%
+  （260,843 / 262,144 バイト）まで育っていました。この先の仕事
+  （オブジェクト出力やリンカ）でソースが増えると、まず自分の
+  ソースが読めなくなります。そこで実測（ノード 11,783、
+  命令 28,118、関数 109）に基づいて器を広げました：
+  入力・展開バッファ 約256KB → 約384KB、ノード 16,384 → 20,480、
+  命令 32,768 → 40,960、関数 128 → 192。</p>
+  <p>広げるとコンパイラ自身の静的データも育ちます。
+  約2.96MB → 約3.79MB。KosabaOS のデータ領域（4MB）に収まる
+  ことを実測で確かめました。生成されるプログラムの振る舞いは
+  変わらず、固定点も再確認済みです。</p>
+  <div>
+    <span class="chip">入力上限 約384KB</span><span class="chip">静的データ 約3.79MB</span><span class="chip">固定点を再確認</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  容量は「大きければよい」ではなく、載せる舞台（OS のデータ
+  領域）との釣り合いで決まります。実測して、使う分と少し先の
+  分だけ広げるのがこのプロジェクトのやり方です。</p></div>
+</section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v29 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v30 時点）</p>
 </footer>
 
 </div>

@@ -14,9 +14,9 @@
  *
  * 容量の約束: 命令は最大でもノード数の数倍程度 (演算
  * ノード1つが数命令、住所作りも命令を使う)。ノード
- * 16384 に対し命令表 32768 を用意する (v25 で実測に
- * 合わせて拡大: iwac 自身のコンパイルでノード約1.1万、
- * 命令約2.6万を使った)。
+ * 20480 に対し命令表 40960 を用意する (v30 で実測に
+ * 合わせて拡大: iwac 自身のコンパイルでノード
+ * 11,783、命令 28,118、関数 109 を使った)。
  * ================================================================ */
 
 static int OP_LUI = 0;
@@ -77,11 +77,11 @@ static int OP_SRLI = 29; /* 論理右シフト即値 (v27)。I 形式、
                           * 32ビット定数を 0 埋めで 64 ビットに
                           * 広げる (gen_load_u32) ときに使う */
 
-static int asm_op[32768];
-static int asm_rd[32768];
-static int asm_rs1[32768];
-static int asm_rs2[32768];
-static int asm_imm[32768];
+static int asm_op[40960];
+static int asm_rd[40960];
+static int asm_rs1[40960];
+static int asm_rs2[40960];
+static int asm_imm[40960];
 static int nasm;  /* 並べた命令の数 */
 
 /* 命令を1つ、命令列の末尾に積む */
@@ -111,7 +111,7 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
  * 指す。届く分岐は従来どおり beq 1命令のままなので、
  * 今まで正しく作れていたプログラムの出力は変わらない */
 static int branch_ord;         /* 条件分岐の通し番号 */
-static char branch_long[32768]; /* 伸ばす分岐の印 */
+static char branch_long[40960]; /* 伸ばす分岐の印 */
 
 /* 「t1 が 0 なら飛ぶ」条件分岐を置く。戻り値は、飛び先
  * (命令番号) を asm_imm に書き込むべき命令の番号:
@@ -893,7 +893,7 @@ static int gen_elem_addr(int node) {
 static int loop_depth;
 static int loop_break_head[32];
 static int loop_cont_head[32];
-static int patch_next[32768];
+static int patch_next[40960];
 
 /* 関数の return の飛び先 (出口は関数の生成の最後まで
  * 分からない) も同じ道具で積む */
@@ -1509,7 +1509,7 @@ static int gen_program(void) {
      * 伸ばす。伸ばすと別の分岐が届かなくなることがある
      * ので、印が増えなくなるまで1回目の生成を繰り返す
      * (emit_beq_t1z の説明参照) */
-    for (int i = 0; i < 32768; i++)
+    for (int i = 0; i < 40960; i++)
         branch_long[i] = 0;
     for (;;) {
         if (!gen_all())
