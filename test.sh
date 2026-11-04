@@ -771,7 +771,8 @@ grep -q '^init g 65$' "$TMP/v31a.iwo" || fail "v31: 初期値が init になら�
 grep -q '^iptr msg str 0$' "$TMP/v31a.iwo" || fail "v31: 文字列の初期値が iptr にならない"
 grep -Eq '^addr [0-9]+ g 0$' "$TMP/v31a.iwo" || fail "v31: 住所作りの穴 (addr) が無い"
 "$IWAC" --object "$TMP/v31a.c" >/dev/null 2>&1 && fail "v31: --kosaba 無しの --object が通ってしまった"
-"$IWAC" --kosaba --object "$TMP/v31a.c" "$TMP/v31b.c" >/dev/null 2>&1 && fail "v31: 2ファイルの --object が通ってしまった"
+"$IWAC" --kosaba --object "$TMP/v31a.c" "$TMP/v31b.c" > "$TMP/v31ab.iwo" || fail "v33: 複数ファイルの --object に失敗"
+[ "$(grep -c '^iwacobj 1$' "$TMP/v31ab.iwo")" = 1 ] || fail "v33: 複数ファイルでもオブジェクトは1つのはず"
 echo "ok: v31: オブジェクトの形と決まり"
 if command -v python3 >/dev/null 2>&1; then
     cat > "$TMP/mini_nori.py" <<'MININORI'
@@ -972,6 +973,47 @@ MININORI
     echo "ok: v31: オブジェクト経由でも一括と同じ出力 (参照リンカで確認)"
 else
     echo "skip: v31: 参照リンカの確認 (python3 が無いため)"
+fi
+
+# --- v32: リンカ nori 本体 (iwac の言語で書いたもの) ---
+# gcc で nori を組み立て、オブジェクトをリンクして一括
+# コンパイルとバイト一致することと、未定義で止まることを確かめる
+if cc -std=c11 -O2 -o "$TMP/nori" nori/nori.c 2>/dev/null; then
+    "$IWAC" --kosaba --object "$TMP/v31b.c" > "$TMP/v32b.iwo" || fail "v32: オブジェクト出力 (b) に失敗"
+    "$IWAC" --kosaba --object "$TMP/v31a.c" > "$TMP/v32a.iwo" || fail "v32: オブジェクト出力 (a) に失敗"
+    "$IWAC" --kosaba "$TMP/v31b.c" "$TMP/v31a.c" > "$TMP/v32one.elf" || fail "v32: 一括コンパイルに失敗"
+    "$TMP/nori" "$TMP/v32b.iwo" "$TMP/v32a.iwo" > "$TMP/v32split.elf" || fail "v32: nori でのリンクに失敗"
+    cmp -s "$TMP/v32one.elf" "$TMP/v32split.elf" || fail "v32: nori と一括で出力が違う"
+    "$IWAC" --kosaba --object examples/hello-kosaba.c > "$TMP/v32h.iwo" || fail "v32: hello のオブジェクト化に失敗"
+    "$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v32h.elf" || fail "v32: hello の一括に失敗"
+    "$TMP/nori" "$TMP/v32h.iwo" > "$TMP/v32h2.elf" || fail "v32: hello のリンクに失敗"
+    cmp -s "$TMP/v32h.elf" "$TMP/v32h2.elf" || fail "v32: hello で nori と一括が違う"
+    printf 'int nosuch();\nint main() { return nosuch(); }\n' > "$TMP/v32u.c"
+    "$IWAC" --kosaba --object "$TMP/v32u.c" > "$TMP/v32u.iwo" || fail "v32: 未定義テスト用オブジェクトに失敗"
+    "$TMP/nori" "$TMP/v32u.iwo" >/dev/null 2>&1 && fail "v32: 未定義の関数でリンクが通ってしまった"
+    echo "ok: v32: nori でリンクして一括と同じ出力、未定義はエラー"
+else
+    echo "skip: v32: nori の確認 (cc が無いため)"
+fi
+
+# --- v33: 再宣言の合併と、分割セルフホスト ---
+# ファイル範囲の再宣言 (変数・配列・関数のプロトタイプ) が
+# C の仮定義と同じく合併すること、初期値の二重は止まること
+"$IWAC" --kosaba 'int x; int x; int a[3]; int a[3]; int f(); int f() { return 41; } int f(); int main() { x = 1; a[0] = f(); return a[0] + x; }' > "$TMP/v33r.elf" || fail "v33: 再宣言の合併ができない"
+"$IWAC" --kosaba 'int x = 1; int x = 2; int main() { return x; }' >/dev/null 2>&1 && fail "v33: 初期値の二重が通ってしまった"
+echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
+# 分割セルフホスト: 断片ごとにオブジェクト化し、nori で
+# つないだ iwac2 が、一括の iwac2 (v27 の節) とバイト一致
+if [ -x "$TMP/nori" ]; then
+    for f in 01-head 02-parse 03-gen 04-encode 05-input 06-preproc 07-main; do
+        "$IWAC" --kosaba --object "src/decls.c" "src/$f.c" > "$TMP/v33-$f.iwo" || fail "v33: 断片 $f のオブジェクト化に失敗"
+    done
+    "$IWAC" --kosaba --object kosaba/kosaba_rt.c > "$TMP/v33-rt.iwo" || fail "v33: rt のオブジェクト化に失敗"
+    "$TMP/nori" "$TMP/v33-01-head.iwo" "$TMP/v33-02-parse.iwo" "$TMP/v33-03-gen.iwo" "$TMP/v33-04-encode.iwo" "$TMP/v33-05-input.iwo" "$TMP/v33-06-preproc.iwo" "$TMP/v33-07-main.iwo" "$TMP/v33-rt.iwo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
+    cmp -s "$TMP/v27self.elf" "$TMP/v33split.elf" || fail "v33: 分割と一括で iwac2 が違う"
+    echo "ok: v33: 分割セルフホスト (断片→nori) が一括とバイト一致"
+else
+    echo "skip: v33: 分割セルフホスト (nori が無いため)"
 fi
 
 # --- 小容量ビルド「shirasu」(K210 プロファイル、v15 の節と同じ流儀) ---

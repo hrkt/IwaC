@@ -32,12 +32,8 @@ int main(int argc, char **argv) {
         print_str(2, "iwac: --object は --kosaba と一緒に使います\n");
         return 1;
     }
-    if (obj_mode && argc - argi >= 2) {
-        print_str(2, "iwac: オブジェクト出力は入力ファイル1つずつです\n");
-        return 1;
-    }
     if (argc < argi + 1) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す。1ファイルずつ)\n");
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す (複数ファイルは連結して1つに))\n");
         return 1;
     }
     if (target_kosaba)

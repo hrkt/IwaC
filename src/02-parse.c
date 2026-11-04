@@ -374,6 +374,19 @@ static int define_array(char *name, int len, int rows, int cols,
     for (int i = 0; i < narr; i++) {
         if (arr_owner[i] == parse_cur_func &&
             arr_name_eq(i, name, len)) {
+            /* ファイル範囲の配列は、大きさが同じなら
+             * 再宣言を合併する (v33、C の仮定義と
+             * 同じ考え方。分割コンパイルで共有の表を
+             * 宣言し直すために要る)。大きさが違う
+             * 再宣言は食い違いとして止める */
+            if (parse_cur_func < 0 &&
+                arr_size[i] == rows && arr_cols[i] == cols &&
+                arr_esize[i] == esize)
+                return i;
+            if (parse_cur_func < 0) {
+                errmsg = "配列の大きさが宣言ごとに違います";
+                return -1;
+            }
             errmsg = "その名前は既に使われています";
             return -1;
         }
@@ -1526,12 +1539,7 @@ static int parse_funcdef(void) {
      * 来たことになる、v24)。本体が既にあれば二重定義 */
     int f = find_func(name_buf, name_len);
     int is_new = 0;
-    if (f >= 0) {
-        if (func_has_body[f]) {
-            errmsg = "同じ名前の関数が二つあります";
-            return 0;
-        }
-    } else {
+    if (f < 0) {
         if (nfunc >= 192) {
             errmsg = "関数は128個までです";
             return 0;
@@ -1631,6 +1639,13 @@ static int parse_funcdef(void) {
     }
     if (!expect_char('{', "関数の本体は { で始めるか、宣言は ; で終えます"))
         return 0;
+    /* 定義が来た。既に本体があれば二重定義 (v33:
+     * プロトタイプは定義の前でも後でもよいが、
+     * 本体は1つだけ。C の作法と同じ) */
+    if (func_has_body[f]) {
+        errmsg = "同じ名前の関数が二つあります";
+        return 0;
+    }
     /* 定義: 引数の変数を登録する (名前が必須) */
     int save_cur_func = parse_cur_func;
     parse_cur_func = f;
@@ -2061,6 +2076,12 @@ static int parse_decl_stmt(void) {
             int kind = eval_const(expr, &v);
             if (kind == 0) {
                 errmsg = "ファイル範囲の初期化子は定数 (数や文字列) だけです";
+                return -1;
+            }
+            if (var_init_kind[var] != 0) {
+                /* 仮定義の後に初期値が来るのはよいが、
+                 * 初期値が二つは食い違い (v33) */
+                errmsg = "初期値は一つだけです";
                 return -1;
             }
             var_init_kind[var] = kind;
