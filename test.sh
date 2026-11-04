@@ -1016,6 +1016,22 @@ else
     echo "skip: v33: 分割セルフホスト (nori が無いため)"
 fi
 
+# --- 段5: ドライバ Misoni ---
+# マニフェスト (misoni.txt) を misoni.sh に回させ、
+# 出来た iwac2 が一括 (v27 の節) とバイト一致すること。
+# リポジトリを $TMP に写して、その中で回す
+if [ -x "$TMP/nori" ]; then
+    mkdir -p "$TMP/v34/nori"
+    cp -r src kosaba misoni misoni.txt "$TMP/v34/"
+    cp "$IWAC" "$TMP/v34/iwac"
+    cp "$TMP/nori" "$TMP/v34/nori/nori"
+    (cd "$TMP/v34" && ./misoni/misoni.sh > misoni.log 2>&1) || fail "段5: Misoni での分割ビルドに失敗"
+    cmp -s "$TMP/v27self.elf" "$TMP/v34/iwac2.elf" || fail "段5: Misoni の iwac2 が一括と違う"
+    echo "ok: 段5: Misoni (マニフェスト駆動) でも iwac2 がバイト一致"
+else
+    echo "skip: 段5: Misoni の確認 (nori が無いため)"
+fi
+
 # --- 小容量ビルド「shirasu」(K210 プロファイル、v15 の節と同じ流儀) ---
 # RISC-V 用 gcc が見つかるときだけ、kosaba/iwac-shirasu.elf が
 # 作れて、データ量が 1MB に収まることを確かめる (スクリプト

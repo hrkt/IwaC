@@ -1675,10 +1675,33 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   出来上がりが1バイトもずれません。</p></div>
 </section>
 
+<!-- ================= 段5 ================= -->
+<section class="phase" id="misoni">
+  <div class="head"><span class="badge b-v4">段5</span><h2>Misoni — 手順を回す係</h2></div>
+  <p class="goal-line">目標：<b>バラバラに訳してつなぐ手順を、1つの命令で回せるようにする。</b></p>
+  <p>ドライバの名前は <b>Misoni</b>（サバの味噌煮）。手順は
+  「マニフェスト」というテキストに書きます。成果物の名前と、
+  「どのファイルの組を、どの名前のオブジェクトにするか」の
+  並びだけです。ホスト用のドライバ <code>misoni/misoni.sh</code> が
+  それを読んで、iwac と nori を順番に起動します。</p>
+  <p>OS の上では事情が違いました。プログラムが別のプログラムを
+  起動する仕組み（exec）は1段までと決まっていて、ドライバの
+  プログラムが iwac を起動する形は作れません。そこで OS 上では、
+  シェル（Nish）自身の機能として組み込む案を、OS 側と相談する
+  ことにしました。</p>
+  <div>
+    <span class="chip">マニフェスト形式 misoni.txt</span><span class="chip">ホストドライバ実装済み</span><span class="chip">OS 上の形は相談中</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「道具は揃ったのに、置き場所がない」ということがあります。
+  制約は OS のソース（exec の親の退避先が1組だけ）を読んで
+  初めて確定しました。計画の前提は、実物で確かめるに限ります。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-04（v33 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-04（段5 時点）</p>
 </footer>
 
 </div>

@@ -1,0 +1,14 @@
+# misoni.txt -- iwac 自身を分割ビルドするためのマニフェスト
+# 使い方: misoni/misoni.sh (このファイルが既定)
+# 出来上がる iwac2.elf は、一括コンパイル
+# (iwac --kosaba src/0*.c kosaba/kosaba_rt.c) と
+# バイト一致する (doc/linking.md の段4・段5)
+out iwac2.elf
+obj 01-head.iwo src/decls.c src/01-head.c
+obj 02-parse.iwo src/decls.c src/02-parse.c
+obj 03-gen.iwo src/decls.c src/03-gen.c
+obj 04-encode.iwo src/decls.c src/04-encode.c
+obj 05-input.iwo src/decls.c src/05-input.c
+obj 06-preproc.iwo src/decls.c src/06-preproc.c
+obj 07-main.iwo src/decls.c src/07-main.c
+obj rt.iwo kosaba/kosaba_rt.c

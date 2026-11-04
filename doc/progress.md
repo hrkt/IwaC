@@ -1,3 +1,28 @@
+## 2026-11-04: 段5 Misoni の形とホストドライバ — branch `misoni`
+
+（branch `linking` はユーザーの判断で main へ
+マージ済み。段5 は新しい branch `misoni` で開始）
+
+段5（OS 上での駆動）の形を決めた。まず制約を
+実物で確かめた: OS の exec は親の退避先が1組で、
+exec されたプログラムからの exec は -1 になる
+（trap.c の exec_parent）。よって Misoni を
+普通のプログラムにはできない。
+
+決めた形は「マニフェスト」（テキスト）:
+`out <成果物>` と `obj <名前.iwo> <file.c>...`
+の並びで手順を書き、並びがリンク順になる。
+ホスト側ドライバ `misoni/misoni.sh` がこれを
+読んで iwac → nori を起動する。iwac 自身の
+マニフェスト `misoni.txt` で iwac2.elf を作り、
+一括とバイト一致を確認した。
+
+OS 上の形は、Nish の組み込みコマンドにする
+案を OS 側への相談事項として用意した（Nish は
+exec する側なので全手順が1段目になる。iwac の
+出力 hello.elf を手順ごとの名前へ写し替える
+仕事が Nish 側に要る）。
+
 ## 2026-11-04: v33 / v32（分割セルフホストと nori）— 階段の段4・段3、branch `linking`
 
 段3（v32）: リンカ **nori** を実装した

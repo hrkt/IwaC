@@ -5,3 +5,6 @@
 serial*.log
 iwac.elf
 /iwac_all.c
+/iwac2.elf
+/misoni-tmp/
+/nori/nori

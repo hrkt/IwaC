@@ -17,7 +17,7 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v33（分割セルフホスト、branch `linking` で開発中）
+## 現在地: v33 + 段5 Misoni（ホスト側。branch `misoni` で開発中）
 
 v33 で「分割コンパイル＋リンカ」への階段
 （doc/linking.md）の段4まで来た。iwac の7断片と
@@ -29,8 +29,14 @@ kosaba_rt.c を別々にオブジェクト（.iwo）化し、
 ファイル範囲の再宣言を C の仮定義と同じく
 合併するよう追随した。nori は KosabaOS の上
 でも動く（OS 上でリンクして実行できるところ
-まで確認済み）。本文の作業は branch `linking`
-で進め、確認が済んでから main へ取り込む。
+まで確認済み）。v31〜v33 は main へ取り込み済み。
+
+段5（駆動係 Misoni）は branch `misoni` で進行中。
+手順を書くマニフェスト形式（`misoni.txt`）と
+ホスト用ドライバ `misoni/misoni.sh` ができており、
+iwac2 が一括とバイト一致する。OS の exec が
+1段までのため、OS 上の形は Nish の組み込み
+コマンドにする案を OS 側と相談する予定。
 
 その前の v31（オブジェクト出力）:
 
