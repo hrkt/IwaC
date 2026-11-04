@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IwaC の歩み — v0 から v30 まで</title>
+<title>IwaC の歩み — v0 から v31 まで</title>
 <style>
   :root {
     --ink: #2b2620;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <span class="kicker">IwaC プロジェクト</span>
-  <h1>コンパイラの育て方 — v0 から v30 まで</h1>
+  <h1>コンパイラの育て方 — v0 から v31 まで</h1>
   <p class="sub">
     <b>IwaC</b>（いわっく）は、C言語の小さなサブセットを自作するコンパイラです。
     普通のコンパイラと違うのは、<b>アセンブラを使わずに、いきなり実行できるバイナリ（機械語）を出す</b>こと。
@@ -350,7 +350,8 @@
   <a class="done" href="#v27">v27 セルフホスト</a>
   <a class="done" href="#v28">v28 ELF の BSS 化</a><span class="arrow">→</span>
   <a class="done" href="#v29">v29 入口と出口の約束</a><span class="arrow">→</span>
-  <a class="done" href="#v30">v30 容量の引き上げ</a>
+  <a class="done" href="#v30">v30 容量の引き上げ</a><span class="arrow">→</span>
+  <a class="done" href="#v31">v31 オブジェクト出力</a>
 </nav>
 
 <!-- ================= v0 ================= -->
@@ -1606,11 +1607,36 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   領域）との釣り合いで決まります。実測して、使う分と少し先の
   分だけ広げるのがこのプロジェクトのやり方です。</p></div>
 </section>
+<!-- ================= v31 ================= -->
+<section class="phase" id="v31">
+  <div class="head"><span class="badge b-v4">v31</span><h2>オブジェクト出力 — ファイルごとに訳す</h2></div>
+  <p class="goal-line">目標：<b>分割コンパイルの段2として、1ファイルを「オブジェクト」に訳せるようにする。</b></p>
+  <p>オブジェクトは「あとでつなぐ前提の、半分できたプログラム」です。
+  <code>iwac --kosaba --object file.c</code> で出します。中身はテキストで、
+  コードとデータの材料に、名前表と「穴のメモ」が付いています。
+  別ファイルの関数の呼び出し先や、グローバルの住所はこの時点では
+  決まらないので、穴として空けておき、埋めるのはリンカ（段3 の nori）の
+  仕事になります。</p>
+  <p>確かめ方は「物差し」でやりました。Python で書いた参照リンカで
+  オブジェクトをつなぎ、一括コンパイルの出力とバイト単位で比べます。
+  単一ファイルでも、複数ファイルでも、ピタリ一致しました。
+  実装の途中で分かったこともあります。関数の並びは「登録された順」が
+  正しく、数字で書いた住所（機械の窓口）も配置に依存するので穴に
+  する必要がある、などです。</p>
+  <div>
+    <span class="chip">--object で .iwo を出力</span><span class="chip">参照リンカでバイト一致</span><span class="chip">設計は doc/object-format.md</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「コンパイル」と思っていた仕事は、実は「訳す」と「つなぐ」の
+  合わせ技でした。分けてみると、コンパイラは自分のファイルの
+  ことだけ考えればよくなり、決められないことはメモ（リロケーション）
+  として渡す、という役割分担が見えてきます。</p></div>
+</section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-03（v30 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-04（v31 時点）</p>
 </footer>
 
 </div>

@@ -223,6 +223,35 @@ static int code_insts;  /* 1回目の生成で数えた命令の総数 */
  * main が --kosaba の指定で切り替える */
 static int target_kosaba;
 
+/* オブジェクト出力 (v31、分割コンパイルの段2。
+ * 設計は doc/object-format.md) のための控え。
+ * main が --object で obj_mode を立てる。生成の
+ * やり方は一括と同じだが、ファイルの外のことは
+ * 決めず、穴の場所をここへ控えて encode の
+ * オブジェクト書き出しに渡す */
+static int obj_mode;
+static int obj_prefix_insts;  /* 入口の断片の命令数
+                               * (最終パスの値が残る) */
+static int obj_flush_site;    /* 入口の kosaba_flush
+                               * 呼び出しの命令番号。
+                               * 無ければ -1 */
+/* 住所作りの穴 (auipc + addi の組) の控え。
+ * 種類 (番号は命令番号、idx は対象の番号):
+ *   1 = 文字列 (文字列番号)、2 = グローバル変数、
+ *   3 = グローバル配列。
+ * 絶対アドレス (デバイスの窓口) は数が少ないので
+ * 別の小さな表に分ける (値そのものを持つ) */
+static int RLOC_STR = 1;
+static int RLOC_VAR = 2;
+static int RLOC_ARR = 3;
+static int obj_reloc_site[8192];
+static int obj_reloc_kind[8192];
+static int obj_reloc_idx[8192];
+static int obj_nreloc;
+static int obj_abs_site[256];
+static int obj_abs_val[256];
+static int obj_nabs;
+
 static void gen_load_addr(int reg, unsigned int addr) {
     /* この auipc 命令自身が置かれる住所 (命令列の今の末尾) */
     unsigned int pc = LOAD_BASE + (unsigned int)nasm * 4u;
@@ -231,6 +260,44 @@ static void gen_load_addr(int reg, unsigned int addr) {
     long lo = diff - (hi << 12);
     asm_push(OP_AUIPC, reg, 0, 0, (int)hi);
     asm_push(OP_ADDI, reg, reg, 0, (int)lo);
+}
+
+/* 住所作りを「何の住所か」付きで出す (v31)。
+ * 一括では gen_load_addr と同じ (今のパスで確定
+ * している住所を使う)。オブジェクト出力では
+ * 住所はまだ決まらないので、即値を 0 にした組を
+ * 出し、穴として控える (埋めるのはリンカ)。
+ * kind は RLOC_*、idx は対象の番号。絶対アドレス
+ * (kind の代わりに 0) は idx が住所そのもの */
+static void gen_load_addr_sym(int reg, int kind, int idx) {
+    if (!obj_mode) {
+        if (kind == RLOC_STR)
+            gen_load_addr(reg, str_addr[idx]);
+        else if (kind == RLOC_VAR)
+            gen_load_addr(reg, var_global_addr(idx));
+        else if (kind == RLOC_ARR)
+            gen_load_addr(reg, arr_addr[idx]);
+        else
+            gen_load_addr(reg, (unsigned int)idx);
+        return;
+    }
+    if (kind == 0) {
+        /* 絶対アドレスは別の小さな表へ */
+        if (obj_nabs < 256) {
+            obj_abs_site[obj_nabs] = nasm;
+            obj_abs_val[obj_nabs] = idx;
+            obj_nabs++;
+        } else
+            obj_nabs = -1;  /* あふれの印 (gen_program が止める) */
+    } else if (obj_nreloc < 8192) {
+        obj_reloc_site[obj_nreloc] = nasm;
+        obj_reloc_kind[obj_nreloc] = kind;
+        obj_reloc_idx[obj_nreloc] = idx;
+        obj_nreloc++;
+    } else
+        obj_nreloc = -1;    /* あふれの印 */
+    asm_push(OP_AUIPC, reg, 0, 0, 0);
+    asm_push(OP_ADDI, reg, reg, 0, 0);
 }
 
 /* 小さな定数をレジスタに作る (v23): 2次元の列数や行の
@@ -337,7 +404,7 @@ static int elem_esize(int node) {
  * 定数を作って足す形に分ける */
 static void gen_load_arr_base(int reg, int a) {
     if (arr_owner[a] < 0) {
-        gen_load_addr(reg, arr_addr[a]);
+        gen_load_addr_sym(reg, RLOC_ARR, a);
         return;
     }
     int off = func_nlocals[arr_owner[a]] * 8 + arr_foff[a] -
@@ -356,7 +423,7 @@ static void gen_load_arr_base(int reg, int a) {
 /* 変数の住所をレジスタに作る (v21) */
 static void gen_var_addr(int reg, int var) {
     if (var_owner[var] < 0)
-        gen_load_addr(reg, var_global_addr(var));
+        gen_load_addr_sym(reg, RLOC_VAR, var);
     else
         asm_push(OP_ADDI, reg, REG_FP, 0, var_frame_off(var));
 }
@@ -365,7 +432,7 @@ static void gen_var_addr(int reg, int var) {
  * 使うので、葉の読み出しから呼べる */
 static void gen_load_var(int reg, int var) {
     if (var_owner[var] < 0) {
-        gen_load_addr(reg, var_global_addr(var));
+        gen_load_addr_sym(reg, RLOC_VAR, var);
         asm_push(OP_LD, reg, reg, 0, 0);
     } else {
         asm_push(OP_LD, reg, REG_FP, 0, var_frame_off(var));
@@ -376,7 +443,7 @@ static void gen_load_var(int reg, int var) {
  * 住所作りに t2 を使う */
 static void gen_store_var(int var, int reg) {
     if (var_owner[var] < 0) {
-        gen_load_addr(REG_T2, var_global_addr(var));
+        gen_load_addr_sym(REG_T2, RLOC_VAR, var);
         asm_push(OP_SD, 0, REG_T2, reg, 0);
     } else {
         asm_push(OP_SD, 0, REG_FP, reg, var_frame_off(var));
@@ -413,7 +480,7 @@ static void gen_load_leaf(int reg, int leaf) {
         /* 変数の値はメモリから読む (v21) */
         gen_load_var(reg, node_val[leaf]);
     else if (k == NODE_STR)
-        gen_load_addr(reg, str_addr[node_val[leaf]]);
+        gen_load_addr_sym(reg, RLOC_STR, node_val[leaf]);
     else if (k == NODE_ARRAY)
         /* 配列の名前の「値」は先頭アドレス */
         gen_load_arr_base(reg, node_val[leaf]);
@@ -432,11 +499,11 @@ static void gen_load_leaf(int reg, int leaf) {
              * 住所の材料は auipc 相対なので、0x10000005 の
              * ようなデバイスの住所でも壊れない */
             if (node_kind[operand] == NODE_NUM)
-                gen_load_addr(reg, (unsigned int)node_val[operand]);
+                gen_load_addr_sym(reg, 0, node_val[operand]);
             else if (node_kind[operand] == NODE_ARRAY)
                 gen_load_arr_base(reg, node_val[operand]);
             else /* NODE_STR: 文字列の住所から読む */
-                gen_load_addr(reg, str_addr[node_val[operand]]);
+                gen_load_addr_sym(reg, RLOC_STR, node_val[operand]);
             asm_push(op, reg, reg, 0, 0);
         }
     }
@@ -1002,7 +1069,7 @@ static int gen_stmt(int node) {
             return 0;
         int addr = node_lhs[node];
         if (node_kind[addr] == NODE_NUM)
-            gen_load_addr(REG_T2, (unsigned int)node_val[addr]);
+            gen_load_addr_sym(REG_T2, 0, node_val[addr]);
         else /* NODE_VAR: 変数の値そのものが住所 (ポインタ) */
             gen_load_var(REG_T2, node_val[addr]);
         if (deref_esize(addr) == 8)
@@ -1192,6 +1259,14 @@ static unsigned int stack_top_addr;
  * さらに別の関数を呼んでも (ra が上書きされても)
  * 自分の戻り先を失わない。失敗したら 0 */
 static int gen_func(int f) {
+    /* オブジェクト出力 (v31) では、宣言だけの関数に
+     * 中身を作らない (一括では空の体ができるが、
+     * オブジェクトでは「定義は別ファイル」が普通で、
+     * 空の体が場所を取ると配置がずれる) */
+    if (obj_mode && !func_has_body[f]) {
+        func_entry[f] = nasm;
+        return 1;
+    }
     func_entry[f] = nasm;
     int frame = func_frame_size(f);
     /* 序文 (v21): フレームを取り、ra と呼び出し側の fp を
@@ -1349,6 +1424,9 @@ static int list_needs_stack(int head) {
  * 書き直す。失敗したら 0 */
 static int gen_all(void) {
     nasm = 0;
+    obj_nreloc = 0;    /* 穴の控えも数え直す (v31) */
+    obj_nabs = 0;
+    obj_flush_site = -1;
     loop_depth = 0;    /* 2パス生成のたびに数え直す (v20) */
     branch_ord = 0;    /* 条件分岐の通し番号も数え直す (v27) */
     gen_in_func = 0;
@@ -1434,10 +1512,40 @@ static int gen_all(void) {
                     break;
                 }
             }
-            if (flush_f >= 0) {
+            /* オブジェクト出力 (v31) では、flush が
+             * 「このファイルで宣言されている」場合も
+             * 呼び出しの形を残す (定義は別ファイルが
+             * 持つ。宣言も無いファイルは、flush の
+             * ない一括版と出力が一致するよう、従来
+             * どおり mv だけにする) */
+            int flush_decl = -1;
+            if (obj_mode && flush_f < 0) {
+                char *want = "kosaba_flush";
+                for (int f = 0; f < nfunc && flush_decl < 0; f++) {
+                    if (func_name_len[f] != 12)
+                        continue;
+                    int same = 1;
+                    for (int k = 0; k < 12; k++)
+                        if (func_names[f][k] != want[k])
+                            same = 0;
+                    if (same)
+                        flush_decl = f;
+                }
+            }
+            if (flush_f >= 0 || flush_decl >= 0) {
                 asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
                 asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
-                asm_push(OP_JAL, REG_RA, 0, 0, -(flush_f + 1));
+                /* オブジェクト出力 (v31) では、この
+                 * ファイルに flush が無くても呼び出し
+                 * の形を残す (相手は別ファイルかも
+                 * しれない)。行き先はダミーの印
+                 * -1000003 で置き、リンカへのメモは
+                 * callopt になる */
+                asm_push(OP_JAL, REG_RA, 0, 0,
+                         flush_f >= 0 ? -(flush_f + 1)
+                                      : -1000003);
+                if (obj_mode)
+                    obj_flush_site = nasm - 1;
                 asm_push(OP_LD, REG_A0, REG_SP, 0, 0);
                 asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
             } else {
@@ -1461,14 +1569,21 @@ static int gen_all(void) {
         /* wfi -- 止まる */
         asm_push(OP_WFI, 0, 0, 0, 0);
     }
+    /* 入口の断片はここまで (オブジェクト出力が
+     * 先頭の長さとして使う。v31) */
+    obj_prefix_insts = nasm;
     for (int f = 0; f < nfunc; f++) {
         if (!gen_func(f))
             return 0;
     }
-    /* 呼び出しの飛び先を書き直す (印: -(関数番号+1)) */
-    for (int i = 0; i < nasm; i++) {
-        if (asm_op[i] == OP_JAL && asm_imm[i] < 0)
-            asm_imm[i] = func_entry[-asm_imm[i] - 1];
+    /* 呼び出しの飛び先を書き直す (印: -(関数番号+1))。
+     * オブジェクト出力では書き直さず、印のまま
+     * リンカへのメモ (call) にする */
+    if (!obj_mode) {
+        for (int i = 0; i < nasm; i++) {
+            if (asm_op[i] == OP_JAL && asm_imm[i] < 0)
+                asm_imm[i] = func_entry[-asm_imm[i] - 1];
+        }
     }
     return 1;
 }
@@ -1489,11 +1604,16 @@ static int gen_program(void) {
     /* 宣言だけで定義のない関数が呼ばれていたら、ここで
      * 止める (v24)。行き先のない呼び出しは作れない。
      * 外部の関数は、ソースの連結で定義が一緒に入って
-     * くる形でのみ解決する (v26 のランタイム結合) */
-    for (int f = 0; f < nfunc; f++) {
-        if (func_called[f] && !func_has_body[f]) {
-            errmsg = "定義のない関数が呼ばれています (宣言だけの関数です)";
-            return 0;
+     * くる形でのみ解決する (v26 のランタイム結合)。
+     * オブジェクト出力 (v31) では止めない: 定義は
+     * 別ファイルが持っているのが普通で、点検は
+     * リンカの仕事になる (メモは undef として出す) */
+    if (!obj_mode) {
+        for (int f = 0; f < nfunc; f++) {
+            if (func_called[f] && !func_has_body[f]) {
+                errmsg = "定義のない関数が呼ばれています (宣言だけの関数です)";
+                return 0;
+            }
         }
     }
     /* スタックが要るかは生成の前に AST から決める */
@@ -1518,6 +1638,10 @@ static int gen_program(void) {
             break;
     }
     code_insts = nasm;
+    if (obj_mode && (obj_nreloc < 0 || obj_nabs < 0)) {
+        errmsg = "穴のメモが多すぎます (オブジェクト出力の上限)";
+        return 0;
+    }
     /* 静的データ (文字列 → 配列 → グローバル) の
      * 置き場所の先頭 (v24 でターゲット別になった):
      *   ベアメタル: コードの後ろ (従来どおり連続配置)

@@ -755,6 +755,225 @@ f3=$(od -An -tu8 -j 208 -N 8 "$TMP/v28bss.elf" | tr -d ' ')
 [ "$f3" = "8" ] || fail "v28: 3本目の p_filesz がグローバルの実体でない ($f3)"
 echo "ok: v28: ELF の BSS 化 (ファイル $size バイト、配列 200000 バイトはゼロ埋め分)"
 
+# --- v31: オブジェクト出力 (分割コンパイルの段2) ---
+# --object の形と決まりを確かめる。あわせて、参照
+# リンカ (mini-nori、Python。nori 本体の物差し) で
+# つないだ結果が一括コンパイルとバイト一致すること
+# を確かめる (設計は doc/object-format.md)
+printf 'int getg();\nint main() { return getg(); }\n' > "$TMP/v31b.c"
+printf 'int g = 65;\nchar *msg = "Hi";\nint getg() { return g; }\n' > "$TMP/v31a.c"
+"$IWAC" --kosaba --object "$TMP/v31b.c" > "$TMP/v31b.iwo" || fail "v31: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba --object "$TMP/v31a.c" > "$TMP/v31a.iwo" || fail "v31: オブジェクト出力 (a) に失敗"
+head -1 "$TMP/v31b.iwo" | grep -qx 'iwacobj 1' || fail "v31: 題字が iwacobj 1 でない"
+grep -q '^entry ' "$TMP/v31b.iwo" || fail "v31: main のあるファイルに entry が無い"
+grep -q '^decl getg$' "$TMP/v31b.iwo" || fail "v31: 宣言だけの関数が decl にならない"
+grep -q '^init g 65$' "$TMP/v31a.iwo" || fail "v31: 初期値が init にならない"
+grep -q '^iptr msg str 0$' "$TMP/v31a.iwo" || fail "v31: 文字列の初期値が iptr にならない"
+grep -Eq '^addr [0-9]+ g 0$' "$TMP/v31a.iwo" || fail "v31: 住所作りの穴 (addr) が無い"
+"$IWAC" --object "$TMP/v31a.c" >/dev/null 2>&1 && fail "v31: --kosaba 無しの --object が通ってしまった"
+"$IWAC" --kosaba --object "$TMP/v31a.c" "$TMP/v31b.c" >/dev/null 2>&1 && fail "v31: 2ファイルの --object が通ってしまった"
+echo "ok: v31: オブジェクトの形と決まり"
+if command -v python3 >/dev/null 2>&1; then
+    cat > "$TMP/mini_nori.py" <<'MININORI'
+#!/usr/bin/env python3
+"""mini-nori: doc/object-format.md の参照リンカ (検証用)。
+使い方: mini_nori.py out.elf in1.iwo in2.iwo ...
+配置規則と ELF の形は iwac の encode (v31) と同じに作り、
+一括コンパイルの出力とバイト比較できるようにする。"""
+import sys, struct
+
+CODE_BASE = 0x40000000
+DATA_BASE = 0x40200000
+
+def parse_obj(text):
+    lines = text.splitlines()
+    o = {'entry': None, 'code': b'', 'strings': b'', 'arrays': 0,
+         'funcs': {}, 'funorder': [], 'vars': [], 'arrs': [],
+         'inits': {}, 'relocs': [], 'undef': []}
+    assert lines[0] == 'iwacobj 1', '題字が違います'
+    i = 1
+    def read_hex(nbytes, i):
+        buf = ''
+        while len(buf) < nbytes * 2:
+            buf += lines[i].strip(); i += 1
+        return bytes.fromhex(buf[:nbytes*2]), i
+    while i < len(lines):
+        ln = lines[i]; i += 1
+        if ln == 'end': break
+        p = ln.split()
+        k = p[0]
+        if k == 'target': assert p[1] == 'kosaba'
+        elif k == 'entry': o['entry'] = int(p[1])
+        elif k == 'code': o['code'], i = read_hex(int(p[1]), i)
+        elif k == 'strings': o['strings'], i = read_hex(int(p[1]), i)
+        elif k == 'arrays': o['arrays'] = int(p[1])
+        elif k == 'func':
+            o['funcs'][p[1]] = (int(p[2]), int(p[3])); o['funorder'].append(p[1])
+        elif k == 'decl': o['funorder'].append(p[1])
+        elif k in ('var', 'varc'): o['vars'].append((p[1], k == 'var'))
+        elif k == 'arr': o['arrs'].append((p[1], int(p[2]), int(p[3])))
+        elif k == 'init': o['inits'][p[1]] = ('init', int(p[2]))
+        elif k == 'iptr':
+            if p[2] == 'str': o['inits'][p[1]] = ('str', int(p[3]))
+            else: o['inits'][p[1]] = ('sym', p[3], int(p[4]))
+        elif k == 'call': o['relocs'].append(('call', int(p[1]), p[2]))
+        elif k == 'callopt': o['relocs'].append(('callopt', int(p[1]), p[2]))
+        elif k == 'addr': o['relocs'].append(('addr', int(p[1]), p[2], int(p[3])))
+        elif k == 'addrstr': o['relocs'].append(('addrstr', int(p[1]), int(p[2])))
+        elif k == 'addabs': o['relocs'].append(('addabs', int(p[1]), int(p[2])))
+        elif k == 'undef': o['undef'].append(p[1])
+        else: raise ValueError('知らないレコード: ' + ln)
+    return o
+
+def main():
+    out_path, in_paths = sys.argv[1], sys.argv[2:]
+    objs = [parse_obj(open(p).read()) for p in in_paths]
+
+    # コード配置: 入口の断片 → 関数本体を登録順に
+    entries = [o for o in objs if o['entry'] is not None]
+    assert len(entries) == 1, '入口はちょうど1つ必要です'
+    ent = entries[0]
+    code = bytearray(ent['code'][:ent['entry']])
+    body_src = {}
+    for o in objs:
+        for name, (off, size) in o['funcs'].items():
+            assert name not in body_src, '関数の二重定義: ' + name
+            body_src[name] = (o, off, size)
+    body_final = {}   # (id(obj), off) -> 最終オフセット
+    func_addr = {}
+    for o in objs:
+        for name in o['funorder']:
+            if name in func_addr or name not in body_src: continue
+            bo, boff, bsize = body_src[name]
+            func_addr[name] = CODE_BASE + len(code)
+            body_final[(id(bo), boff)] = len(code)
+            code += bo['code'][boff:boff+bsize]
+    def site_final(o, x):
+        if o is ent and x < ent['entry']: return x
+        for name, (off, size) in o['funcs'].items():
+            if off <= x < off + size:
+                return body_final[(id(o), off)] + (x - off)
+        raise ValueError('どの本体にも属さない穴: %d' % x)
+
+    # データ配置: 文字列 → 配列 → グローバル (初出の順)
+    str_base = {}
+    spos = 0
+    for o in objs:
+        str_base[id(o)] = DATA_BASE + spos; spos += len(o['strings'])
+    arr_addr = {}
+    apos = spos
+    for o in objs:
+        for name, off, size in o['arrs']:
+            if name in arr_addr:
+                assert arr_addr[name][1] == size, '配列の大きさが食い違います: ' + name
+            else:
+                arr_addr[name] = (DATA_BASE + apos, size); apos += size
+    arr_total = apos - spos
+    var_addr = {}
+    order = []
+    inits = {}
+    init_owner = {}
+    for o in objs:
+        for name, firm in o['vars']:
+            if name not in var_addr:
+                var_addr[name] = DATA_BASE + spos + arr_total + len(order) * 8
+                order.append(name)
+            if name in o['inits']:
+                inits[name] = o['inits'][name]; init_owner[name] = o
+
+    def sym(name):
+        if name in func_addr: return func_addr[name]
+        if name in var_addr: return var_addr[name]
+        if name in arr_addr: return arr_addr[name][0]
+        raise KeyError('未定義の名前: ' + name)
+
+    # 穴埋め
+    for o in objs:
+        for r in o['relocs']:
+            kind, off = r[0], r[1]
+            place = site_final(o, off)
+            pc = CODE_BASE + place
+            if kind in ('call', 'callopt'):
+                name = r[2]
+                if name not in func_addr:
+                    assert kind == 'callopt', '未定義の関数: ' + name
+                    struct.pack_into('<I', code, place, 0x00000013)  # nop
+                    continue
+                o2 = func_addr[name] - pc
+                w = int.from_bytes(code[place:place+4], 'little') & 0x00000FFF
+                w |= ((o2 >> 20) & 1) << 31
+                w |= ((o2 >> 1) & 0x3FF) << 21
+                w |= ((o2 >> 11) & 1) << 20
+                w |= ((o2 >> 12) & 0xFF) << 12
+                struct.pack_into('<I', code, place, w & 0xFFFFFFFF)
+            else:
+                if kind == 'addr': target = sym(r[2]) + r[3]
+                elif kind == 'addrstr': target = str_base[id(o)] + r[2]
+                else: target = r[2]
+                diff = target - pc
+                hi = (diff + 0x800) >> 12
+                lo = diff - (hi << 12)
+                w0 = int.from_bytes(code[place:place+4], 'little')
+                w0 = (w0 & 0x000FFFFF) | ((hi & 0xFFFFF) << 12)
+                struct.pack_into('<I', code, place, w0 & 0xFFFFFFFF)
+                w1 = int.from_bytes(code[place+4:place+8], 'little')
+                w1 = (w1 & 0x000FFFFF) | ((lo & 0xFFF) << 20)
+                struct.pack_into('<I', code, place+4, w1 & 0xFFFFFFFF)
+
+    # グローバルの初期イメージ
+    gbl = bytearray()
+    for name in order:
+        v = 0
+        if name in inits:
+            it = inits[name]
+            if it[0] == 'init': v = it[1]
+            elif it[0] == 'str': v = str_base[id(init_owner[name])] + it[1]
+            else: v = sym(it[1]) + it[2]
+        gbl += struct.pack('<q', v)
+    has_inits = 1 if inits else 0
+    str_all = b''.join(o['strings'] for o in objs)
+
+    # ELF (iwac の encode と同じ形)
+    code_bytes = bytes(code)
+    data_off = (4096 + len(code_bytes) + 4095) & ~4095
+    out = bytearray()
+    def u8(x): out.append(x & 0xFF)
+    def u16(x): out.extend(struct.pack('<H', x))
+    def u32(x): out.extend(struct.pack('<I', x))
+    def u64(x): out.extend(struct.pack('<Q', x))
+    out.extend(b'\x7fELF'); u8(2); u8(1); u8(1); u8(0)
+    for _ in range(8): u8(0)
+    u16(2); u16(243); u32(1); u64(CODE_BASE); u64(64); u64(0); u32(0)
+    u16(64); u16(56); u16(3); u16(0); u16(0); u16(0)
+    def phdr(flags, off, va, fsz, msz, align):
+        u32(1); u32(flags); u64(off); u64(va); u64(va); u64(fsz); u64(msz); u64(align)
+    phdr(5, 4096, CODE_BASE, len(code_bytes), len(code_bytes), 0x1000)
+    phdr(6, data_off, DATA_BASE, len(str_all), spos + arr_total, 0x1000)
+    phdr(6, data_off + spos, DATA_BASE + spos + arr_total,
+         len(gbl) if has_inits else 0, len(gbl), 1)
+    out.extend(bytes(4096 - len(out)))
+    out.extend(code_bytes)
+    out.extend(bytes(data_off - len(out)))
+    out.extend(str_all)
+    if has_inits: out.extend(gbl)
+    open(out_path, 'wb').write(bytes(out))
+    print(f'linked: code {len(code_bytes)} bytes, globals {len(order)}')
+
+if __name__ == '__main__':
+    main()
+MININORI
+    "$IWAC" --kosaba "$TMP/v31b.c" "$TMP/v31a.c" > "$TMP/v31one.elf" || fail "v31: 一括コンパイルに失敗"
+    python3 "$TMP/mini_nori.py" "$TMP/v31split.elf" "$TMP/v31b.iwo" "$TMP/v31a.iwo" >/dev/null || fail "v31: 参照リンカでのリンクに失敗"
+    cmp -s "$TMP/v31one.elf" "$TMP/v31split.elf" || fail "v31: 分割と一括で出力が違う"
+    "$IWAC" --kosaba --object examples/hello-kosaba.c > "$TMP/v31h.iwo" || fail "v31: hello のオブジェクト出力に失敗"
+    "$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v31h.elf" || fail "v31: hello の一括に失敗"
+    python3 "$TMP/mini_nori.py" "$TMP/v31h2.elf" "$TMP/v31h.iwo" >/dev/null || fail "v31: hello のリンクに失敗"
+    cmp -s "$TMP/v31h.elf" "$TMP/v31h2.elf" || fail "v31: hello で分割と一括が違う"
+    echo "ok: v31: オブジェクト経由でも一括と同じ出力 (参照リンカで確認)"
+else
+    echo "skip: v31: 参照リンカの確認 (python3 が無いため)"
+fi
+
 # --- 小容量ビルド「shirasu」(K210 プロファイル、v15 の節と同じ流儀) ---
 # RISC-V 用 gcc が見つかるときだけ、kosaba/iwac-shirasu.elf が
 # 作れて、データ量が 1MB に収まることを確かめる (スクリプト

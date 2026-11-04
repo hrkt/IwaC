@@ -435,6 +435,15 @@ iwac.c が使っていないので不要（% はついでに入れる）。
   （digest len=126910 sum=0000000000745079
   hash=a49c5905e971559d）。shirasu のプロファイル
   も新しい定数に追随（静的データ 271,320 バイト）
+- v31 オブジェクト出力（済み、2026-11-04。
+  branch `linking`）: 分割コンパイルへの階段の
+  段2。`iwac --kosaba --object` で1ファイルを
+  オブジェクト（.iwo）にする。名前表と穴の
+  メモ（call / callopt / addr / addrstr /
+  addabs / iptr）を付け、配置はリンカに委ねる。
+  参照リンカ（Python）で一括とバイト一致を
+  確認。設計は doc/object-format.md、計画は
+  doc/linking.md
 
 実機移植はこの階段とは独立に、OS 側の進行と合わせて
 別途進める。

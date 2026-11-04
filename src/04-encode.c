@@ -379,7 +379,248 @@ static void write_global_image(void) {
     write_var_image();
 }
 
+
+/* ================================================================
+ * オブジェクト出力 (v31、分割コンパイルの段2)
+ * 設計は doc/object-format.md。1ファイル分の
+ * コードとデータの材料を、名前と穴のメモ付きの
+ * テキストとして標準出力へ書く。最終形 (配置と
+ * 住所) は知らないので、穴は即値 0 のまま。
+ * 埋めるのはリンカ (段3 の nori) の仕事
+ * ================================================================ */
+
+/* 10進数を書く (負もあり) */
+static void obj_num(long v) {
+    char buf[24];
+    int n = 0;
+    if (v < 0) {
+        out_byte('-');
+        v = -v;
+    }
+    if (v == 0)
+        buf[n++] = '0';
+    while (v > 0) {
+        buf[n++] = (char)('0' + (int)(v % 10));
+        v /= 10;
+    }
+    for (int i = n - 1; i >= 0; i--)
+        out_byte(buf[i]);
+}
+
+static void obj_str(char *s) {
+    print_str(1, s);
+}
+
+/* バイト列を16進数で書く (1行に32バイトまで) */
+static void obj_hex(unsigned char *p, long n) {
+    char *hex = "0123456789abcdef";
+    for (long i = 0; i < n; i++) {
+        if (i > 0 && i % 32 == 0)
+            out_byte('\n');
+        out_byte(hex[(p[i] >> 4) & 15]);
+        out_byte(hex[p[i] & 15]);
+    }
+    if (n > 0)
+        out_byte('\n');
+}
+
+static void write_object(void) {
+    /* 入口の断片を持つか: main か、トップレベルの
+     * 文か、最後の式があるファイルが持つ。持たない
+     * ファイル (ライブラリだけ) の出口命令は
+     * オブジェクトには含めない */
+    int has_entry = (prog_main >= 0 || prog_stmts != -1 ||
+                     prog_has_final);
+    int start = has_entry ? 0 : obj_prefix_insts;
+
+    obj_str("iwacobj 1\n");
+    obj_str("target kosaba\n");
+    if (has_entry) {
+        obj_str("entry ");
+        obj_num((long)obj_prefix_insts * 4);
+        obj_str("\n");
+    }
+    /* コード (穴は encode_inst が印のまま符号化
+     * するので、呼び出しと住所作りは即値 0 の形に
+     * なる。呼び出しの印は下の call のメモで読む) */
+    obj_str("code ");
+    obj_num((long)(nasm - start) * 4);
+    obj_str("\n");
+    {
+        /* 1命令ずつ符号化して16進に */
+        unsigned char wb[4];
+        long col = 0;
+        char *hex = "0123456789abcdef";
+        for (int i = start; i < nasm; i++) {
+            unsigned int w = encode_inst(i);
+            wb[0] = (unsigned char)(w & 0xff);
+            wb[1] = (unsigned char)((w >> 8) & 0xff);
+            wb[2] = (unsigned char)((w >> 16) & 0xff);
+            wb[3] = (unsigned char)((w >> 24) & 0xff);
+            for (int j = 0; j < 4; j++) {
+                if (col > 0 && col % 32 == 0)
+                    out_byte('\n');
+                out_byte(hex[(wb[j] >> 4) & 15]);
+                out_byte(hex[wb[j] & 15]);
+                col++;
+            }
+        }
+        if (col > 0)
+            out_byte('\n');
+    }
+    /* 文字列の実体 */
+    obj_str("strings ");
+    obj_num(str_used);
+    obj_str("\n");
+    obj_hex((unsigned char *)str_pool, str_used);
+    /* グローバル配列の合計 (実体はゼロだけ) */
+    obj_str("arrays ");
+    obj_num(arr_used);
+    obj_str("\n");
+    /* 関数 (名簿の順)。定義は func (位置と大きさ)、
+     * 宣言だけのものは decl。この並び順が、リンク時
+     * の配置順 (登録順) の材料になる: 一括では本体は
+     * 登録順に並ぶので、宣言が先にあった関数の本体は
+     * 宣言のあった場所に置かれる */
+    for (int f = 0; f < nfunc; f++) {
+        if (func_has_body[f]) {
+            /* 大きさは次の定義までの距離 (最後は末尾まで) */
+            long size = (long)(nasm - func_entry[f]);
+            for (int g = f + 1; g < nfunc; g++) {
+                if (func_has_body[g]) {
+                    size = (long)(func_entry[g] - func_entry[f]);
+                    break;
+                }
+            }
+            obj_str("func ");
+            obj_str(func_names[f]);
+            obj_str(" ");
+            obj_num((long)(func_entry[f] - start) * 4);
+            obj_str(" ");
+            obj_num(size * 4);
+            obj_str("\n");
+        } else {
+            obj_str("decl ");
+            obj_str(func_names[f]);
+            obj_str("\n");
+        }
+    }
+    /* グローバルの定義 (枠の順)。初期値があれば
+     * 本定義 (var)、無ければ仮定義 (varc) */
+    for (int s = 0; s < var_nglobal; s++) {
+        for (int v = 0; v < nvar; v++) {
+            if (var_owner[v] >= 0 || var_slot[v] != s)
+                continue;
+            obj_str(var_init_kind[v] != 0 ? "var " : "varc ");
+            obj_str(var_names[v]);
+            obj_str("\n");
+            break;
+        }
+    }
+    /* グローバル配列の定義 (登録順) */
+    for (int a = 0; a < narr; a++) {
+        if (arr_owner[a] >= 0)
+            continue;
+        /* 大きさは次の配列までの距離 (最後は合計まで) */
+        long bytes = (long)arr_used - (long)arr_off[a];
+        for (int b = 0; b < narr; b++) {
+            if (arr_owner[b] >= 0 || b == a)
+                continue;
+            if (arr_off[b] > arr_off[a] &&
+                (long)arr_off[b] - (long)arr_off[a] < bytes)
+                bytes = (long)arr_off[b] - (long)arr_off[a];
+        }
+        obj_str("arr ");
+        obj_str(arr_names[a]);
+        obj_str(" ");
+        obj_num(arr_off[a]);
+        obj_str(" ");
+        obj_num(bytes);
+        obj_str("\n");
+    }
+    /* 初期値 (枠の順)。文字列は iptr として出す */
+    for (int s = 0; s < var_nglobal; s++) {
+        for (int v = 0; v < nvar; v++) {
+            if (var_owner[v] >= 0 || var_slot[v] != s)
+                continue;
+            if (var_init_kind[v] == 1) {
+                obj_str("init ");
+                obj_str(var_names[v]);
+                obj_str(" ");
+                obj_num(var_init_val[v]);
+                obj_str("\n");
+            } else if (var_init_kind[v] == 2) {
+                obj_str("iptr ");
+                obj_str(var_names[v]);
+                obj_str(" str ");
+                obj_num(str_off[var_init_val[v]]);
+                obj_str("\n");
+            }
+            break;
+        }
+    }
+    /* 穴: 呼び出し (命令の印を読む) */
+    for (int i = start; i < nasm; i++) {
+        if (asm_op[i] != OP_JAL || asm_imm[i] >= 0)
+            continue;
+        if (i == obj_flush_site || asm_imm[i] == -1000003) {
+            obj_str("callopt ");
+            obj_num((long)(i - start) * 4);
+            obj_str(" kosaba_flush\n");
+        } else {
+            obj_str("call ");
+            obj_num((long)(i - start) * 4);
+            obj_str(" ");
+            obj_str(func_names[-asm_imm[i] - 1]);
+            obj_str("\n");
+        }
+    }
+    /* 穴: 住所作り (gen の控えの順) */
+    for (int r = 0; r < obj_nreloc; r++) {
+        long off = (long)(obj_reloc_site[r] - start) * 4;
+        if (obj_reloc_kind[r] == RLOC_STR) {
+            obj_str("addrstr ");
+            obj_num(off);
+            obj_str(" ");
+            obj_num(str_off[obj_reloc_idx[r]]);
+            obj_str("\n");
+        } else if (obj_reloc_kind[r] == RLOC_VAR) {
+            obj_str("addr ");
+            obj_num(off);
+            obj_str(" ");
+            obj_str(var_names[obj_reloc_idx[r]]);
+            obj_str(" 0\n");
+        } else {
+            obj_str("addr ");
+            obj_num(off);
+            obj_str(" ");
+            obj_str(arr_names[obj_reloc_idx[r]]);
+            obj_str(" 0\n");
+        }
+    }
+    for (int r = 0; r < obj_nabs; r++) {
+        obj_str("addabs ");
+        obj_num((long)(obj_abs_site[r] - start) * 4);
+        obj_str(" ");
+        obj_num((long)(unsigned int)obj_abs_val[r]);
+        obj_str("\n");
+    }
+    /* 外に頼る名前 (宣言だけの関数のうち呼ばれたもの) */
+    for (int f = 0; f < nfunc; f++) {
+        if (func_called[f] && !func_has_body[f]) {
+            obj_str("undef ");
+            obj_str(func_names[f]);
+            obj_str("\n");
+        }
+    }
+    obj_str("end\n");
+}
+
 static void write_binary(void) {
+    if (obj_mode) {
+        write_object();
+        return;
+    }
     if (target_kosaba)
         write_elf_header();
     for (int i = 0; i < nasm; i++)

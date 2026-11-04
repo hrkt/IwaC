@@ -16,12 +16,28 @@ int main(int argc, char **argv) {
      * KosabaOS のユーザープログラム用 (ELF) に切り替える */
     int argi = 1;
     target_kosaba = 0;
+    obj_mode = 0;
     if (argc >= 2 && str_eq(argv[1], "--kosaba")) {
         target_kosaba = 1;
         argi = 2;
     }
+    /* オブジェクト出力 (v31、分割コンパイルの段2):
+     * --kosaba の後ろに --object があれば、ELF では
+     * なくオブジェクト (doc/object-format.md) を出す */
+    if (argc >= argi + 1 && str_eq(argv[argi], "--object")) {
+        obj_mode = 1;
+        argi++;
+    }
+    if (obj_mode && !target_kosaba) {
+        print_str(2, "iwac: --object は --kosaba と一緒に使います\n");
+        return 1;
+    }
+    if (obj_mode && argc - argi >= 2) {
+        print_str(2, "iwac: オブジェクト出力は入力ファイル1つずつです\n");
+        return 1;
+    }
     if (argc < argi + 1) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n");
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す。1ファイルずつ)\n");
         return 1;
     }
     if (target_kosaba)
