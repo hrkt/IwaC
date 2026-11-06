@@ -61,7 +61,11 @@ int close(int fd) {
 
 /* ---- 書き側: fd=2 はコンソール、fd=1 は hello.elf ---- */
 
-static int out_fd = -1;          /* hello.elf の書き用 fd */
+static int out_fd = -1;          /* 出力ファイルの
+                                    書き用 fd */
+/* 出力ファイルの名前。iwac 本体 (01-head.c) が持ち、
+ * --out で上書きされる。無指定なら hello.elf (v34) */
+extern char *kosaba_out_name;
 static char out_buf[8192];       /* まとめて書くための貯め場所 */
 static long out_used;            /* 貯まっているバイト数 */
 
@@ -100,7 +104,10 @@ long write(int fd, char *buf, long len) {
             /* 最初の1バイトが来た時点でファイルを作る。
              * コンパイルが失敗したら出力は始まらないので、
              * 半端なファイルは残らない */
-            out_fd = (int)syscall3(SYS_CREATE, (long)"hello.elf", 0, 0);
+            out_fd = (int)syscall3(SYS_CREATE,
+                                    (long)(kosaba_out_name ?
+                                           kosaba_out_name :
+                                           "hello.elf"), 0, 0);
             if (out_fd < 0)
                 return -1;
         }

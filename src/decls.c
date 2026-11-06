@@ -26,6 +26,7 @@ int close(int fd);
 void print_str(int fd, char *s);
 void out_byte(int byte);
 char *errmsg;
+char *kosaba_out_name;
 int lex_failed;
 int REG_ZERO;
 int REG_T0;

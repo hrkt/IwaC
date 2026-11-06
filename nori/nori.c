@@ -56,6 +56,7 @@ static int str_eq(char *a, char *b) {
 
 /* エラー: 理由を置いて 0 を返す (main が表示する) */
 static char *errmsg;
+char *kosaba_out_name;  /* --out の名前。rt が読む (v34) */
 static int fail(char *msg) {
     errmsg = msg;
     return 0;
@@ -731,18 +732,25 @@ static void write_elf(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        puts_fd(2, "usage: nori <obj.iwo> ... > prog.elf\n");
+    int base;
+    base = 1;
+    /* nori --out <名前> obj... : OS 上での出力名 (v34) */
+    if (argc >= 4 && str_eq(argv[1], "--out")) {
+        kosaba_out_name = argv[2];
+        base = 3;
+    }
+    if (argc - base < 1) {
+        puts_fd(2, "usage: nori [--out <name>] <obj.iwo> ... > prog.elf\n");
         return 1;
     }
-    if (argc - 1 > MAX_OBJ) {
+    if (argc - base > MAX_OBJ) {
         puts_fd(2, "nori: オブジェクトが多すぎます\n");
         return 1;
     }
     err_sym = -1;
-    nobj = argc - 1;
+    nobj = argc - base;
     for (int i = 0; i < nobj; i++) {
-        if (!read_object(i, argv[i + 1])) {
+        if (!read_object(i, argv[i + base])) {
             puts_fd(2, "nori: ");
             puts_fd(2, errmsg);
             if (err_sym >= 0) {

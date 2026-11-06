@@ -651,6 +651,19 @@ arena 8MB / 予約 4MB に広げて行った（iwac の ELF
   控えの表はこの2つに合わせて大きさを決めた
   （実測の全体の穴は 3,164 件）
 
+### v34 Misoni 駆動の固定点（済み、2026-11-06。branch `misoni`）
+
+digest は len=135824 sum=00000000007c4911
+hash=7fac456d4420909f。新しく、OS の上で
+Misoni が駆動する分割ビルドでも固定点を
+確認した: OS 上で Misoni が作った iwac2d
+（digest 版 rt 入り）に全ソースを訳させると
+`digest len=135873 sum=00000000007de5f8
+hash=49f1b7893d8f044e` と出て、ホスト一括で
+作った digest 版の値と一致した。Misoni 製の
+通常版 iwac2 で hello.c を訳して実行できる
+ことも OS 上で確認済み。
+
 ### v33 分割セルフホスト（済み、2026-11-04。branch `linking`）
 
 - 階段の段4: 7断片 + kosaba_rt.c を別々に

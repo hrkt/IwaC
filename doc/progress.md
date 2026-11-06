@@ -1,3 +1,38 @@
+## 2026-11-06: v34 --out と Misoni 本体 — branch `misoni`
+
+段5 の決着。OS 側に exec の多段化とファイル
+システム（ディレクトリ・cwd）が入ったので、
+Misoni を普通のユーザープログラムとして
+実装した: `misoni/misoni.c`（iwac の言語、
+約250行）。マニフェストを読み、obj 行ごとに
+iwac.elf を、最後に nori.elf を exec する。
+
+土台として v34 で出力名の指定を足した:
+iwac と nori に `--out <名前>`。KosabaOS 上で
+fd 1 へ書くときの宛先を、大域変数
+kosaba_out_name（プログラム側が入れる）を
+rt / kosaba_lib が読んで hello.elf と
+差し替える。ホストでは --out は出力内容を
+変えない（test.sh で確認）。
+
+実装中に踏んだ約束ごと: OS の exec の引数
+文字列は「プログラム名から始まる行全体」を
+渡す（argv[0] はその先頭。空文字列のときだけ
+カーネルが名前を argv[0] に入れる）。Misoni
+の駆動行はその形に直した。
+
+OS 上の通し確認（QEMU virt、OS は exec 多段化
+後の版）: Nish → `run misoni.elf` で8つの
+オブジェクト化＋リンクが通り iwac2.elf が
+完成。その iwac2 で hello.c を訳して
+`Hello, World!` を実行できた。digest 版の
+マニフェストでも回し、Misoni 製 iwac2d の
+自己コンパイルの digest がホスト一括の参照値
+（len=135873 sum=00000000007de5f8
+hash=49f1b7893d8f044e）と一致した。
+v34 の通常 digest は len=135824
+sum=00000000007c4911 hash=7fac456d4420909f。
+
 ## 2026-11-04: 段5 Misoni の形とホストドライバ — branch `misoni`
 
 （branch `linking` はユーザーの判断で main へ

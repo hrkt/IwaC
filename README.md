@@ -17,7 +17,7 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v33 + 段5 Misoni（ホスト側。branch `misoni` で開発中）
+## 現在地: v34（段5 Misoni 決着。branch `misoni` で開発中）
 
 v33 で「分割コンパイル＋リンカ」への階段
 （doc/linking.md）の段4まで来た。iwac の7断片と
@@ -35,9 +35,11 @@ kosaba_rt.c を別々にオブジェクト（.iwo）化し、
 手順を書くマニフェスト形式（`misoni.txt`）と
 ホスト用ドライバ `misoni/misoni.sh` ができており、
 iwac2 が一括とバイト一致する。OS の exec が
-1段までのため、OS 上の形は OS 側で exec の
-多段化を計画してもらうことになった（Nish への
-組み込みは密結合との判断で見送り、2026-11-05）。
+多段化（OS 側で実装済み、2026-11-06）の上に、
+Misoni 本体を普通のプログラムとして実装した
+（`misoni/misoni.c`）。出力名の指定 `--out` を
+iwac と nori に追加し、OS 上で Nish → Misoni →
+iwac / nori の駆動と固定点を確認済み。
 
 その前の v31（オブジェクト出力）:
 

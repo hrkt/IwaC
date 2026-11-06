@@ -28,12 +28,18 @@ int main(int argc, char **argv) {
         obj_mode = 1;
         argi++;
     }
+    /* --out <名前>: KosabaOS 上での出力ファイル名
+     * (v34。rt が hello.elf の代わりに使う) */
+    if (argc >= argi + 2 && str_eq(argv[argi], "--out")) {
+        kosaba_out_name = argv[argi + 1];
+        argi += 2;
+    }
     if (obj_mode && !target_kosaba) {
         print_str(2, "iwac: --object は --kosaba と一緒に使います\n");
         return 1;
     }
     if (argc < argi + 1) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す (複数ファイルは連結して1つに))\n");
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す (複数ファイルは連結して1つに)\n       iwac --kosaba --out <名前> <ファイル.c>   (OS 上の出力名を指定))\n");
         return 1;
     }
     if (target_kosaba)

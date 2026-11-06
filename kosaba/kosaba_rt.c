@@ -35,7 +35,10 @@
  * 確かめるために使う。通常のビルドでは定義しない。
  */
 
-int out_fd;       /* hello.elf の書き用 fd */
+char *kosaba_out_name;  /* 出力ファイルの名前。
+                         * プログラム側 (iwac の --out 等)
+                         * が入れなければ hello.elf (v34) */
+int out_fd;       /* 出力ファイルの書き用 fd */
 int out_started;  /* 0 = まだ create していない */
 long out_used;    /* バッファに貯まっているバイト数 */
 char out_buf[8192];
@@ -158,7 +161,9 @@ long write(int fd, char *buf, long len) {
             /* 最初の1バイトが来た時点でファイルを作る。
              * コンパイルが失敗したら出力は始まらないので、
              * 半端なファイルは残らない */
-            out_fd = syscall3(9, "hello.elf", 0, 0);
+            out_fd = syscall3(9, kosaba_out_name ?
+                              kosaba_out_name : "hello.elf",
+                              0, 0);
             if (out_fd < 0)
                 return -1;
             out_started = 1;

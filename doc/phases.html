@@ -1686,22 +1686,31 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   それを読んで、iwac と nori を順番に起動します。</p>
   <p>OS の上では事情が違いました。プログラムが別のプログラムを
   起動する仕組み（exec）は1段までと決まっていて、ドライバの
-  プログラムが iwac を起動する形は作れません。そこで OS 上では、
-  シェル（Nish）自身の機能として組み込む案を、OS 側と相談する
-  ことにしました。</p>
+  プログラムが iwac を起動する形は作れません。シェル（Nish）への
+  組み込み案は「密結合すぎる」と見送られ、代わりに OS 側で exec が
+  何段でも使えるようになりました（2026-11-06）。</p>
+  <p>そこで Misoni 本体も、nori と同じく iwac の言葉で書いた
+  普通のプログラムになりました（<code>misoni/misoni.c</code>）。
+  土台として、出力ファイルの名前を指定する <code>--out</code> を
+  iwac と nori に足しました（v34）。OS の上で Misoni が iwac 自身を
+  分割ビルドし、その成果物が自己コンパイルで同じバイト列を出す
+  （固定点）ところまで確認できました。</p>
   <div>
-    <span class="chip">マニフェスト形式 misoni.txt</span><span class="chip">ホストドライバ実装済み</span><span class="chip">OS 上の形は相談中</span>
+    <span class="chip">マニフェスト形式 misoni.txt</span><span class="chip">ホストドライバ実装済み</span><span class="chip">OS 上の本体も実装済み (v34)</span>
   </div>
   <div class="learn"><p><b class="title">ここでの学び：</b>
   「道具は揃ったのに、置き場所がない」ということがあります。
   制約は OS のソース（exec の親の退避先が1組だけ）を読んで
-  初めて確定しました。計画の前提は、実物で確かめるに限ります。</p></div>
+  初めて確定しました。計画の前提は、実物で確かめるに限ります。
+  そして、無理な置き場所（シェルへの組み込み）を選ばず、
+  土台（exec）のほうを育てる決断が、結果として全体を
+  すっきりさせました。</p></div>
 </section>
 
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-04（段5 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-06（v34 時点）</p>
 </footer>
 
 </div>

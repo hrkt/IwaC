@@ -1028,6 +1028,14 @@ if [ -x "$TMP/nori" ]; then
     (cd "$TMP/v34" && ./misoni/misoni.sh > misoni.log 2>&1) || fail "段5: Misoni での分割ビルドに失敗"
     cmp -s "$TMP/v27self.elf" "$TMP/v34/iwac2.elf" || fail "段5: Misoni の iwac2 が一括と違う"
     echo "ok: 段5: Misoni (マニフェスト駆動) でも iwac2 がバイト一致"
+    # v34: --out は出力そのものを変えない (名前は OS 上でのみ効く)
+    "$IWAC" --kosaba --object examples/hello-kosaba.c > "$TMP/v34/plain.iwo" || fail "v34: オブジェクト化に失敗"
+    "$IWAC" --kosaba --object --out zzz.iwo examples/hello-kosaba.c > "$TMP/v34/named.iwo" || fail "v34: --out つきオブジェクト化に失敗"
+    cmp -s "$TMP/v34/plain.iwo" "$TMP/v34/named.iwo" || fail "v34: --out で出力が変わった"
+    echo "ok: v34: --out は出力内容を変えない"
+    # v34: Misoni 本体 (OS 上のプログラム) が iwac で訳せる
+    "$IWAC" --kosaba misoni/misoni.c kosaba/kosaba_rt.c > "$TMP/v34/misoni.elf" || fail "v34: misoni.c が訳せない"
+    echo "ok: v34: Misoni 本体 (misoni.c) が iwac で訳せる"
 else
     echo "skip: 段5: Misoni の確認 (nori が無いため)"
 fi

@@ -1,4 +1,4 @@
-/* iwac -- Cコンパイラのサブセット (v33)
+/* iwac -- Cコンパイラのサブセット (v34)
  *
  * === このコンパイラの内部構成 (3つの層) ===
  *
@@ -318,6 +318,17 @@
  *   型の語彙に long / unsigned / signed / short を追加
  *     (unsigned long のような並びも受ける。型は従来
  *     どおり読み捨てる)
+ *
+ * v34 は Misoni 駆動の土台 (階段の段5 の続き):
+ * 出力ファイルの名前を指定できるようにした。
+ * `--out <名前>` を受け、KosabaOS 上で fd 1 へ
+ * 書くときの宛先を hello.elf から差し替える
+ * (置き場は大域変数 kosaba_out_name、読むのは
+ * kosaba_rt.c / kosaba_lib.c)。nori にも同じ
+ * --out を付け、ドライバ Misoni 本体
+ * (misoni/misoni.c、iwac の言語で書いた普通の
+ * プログラム) が exec の多段化の上で iwac と
+ * nori を順に起動できるようになった
  *
  * v33 は分割セルフホスト (階段の段4): 言語側の
  * 追随として、ファイル範囲の再宣言を C の仮定義と
@@ -671,6 +682,12 @@ static void out_byte(int byte) {
  * 解析や生成の段階では何も出力されていないので、失敗しても
  * 半端なバイナリが残ることはない */
 static char *errmsg;
+
+/* 出力ファイルの名前 (KosabaOS 上で fd 1 へ書く
+ * ときの宛先)。NULL なら hello.elf。iwac の --out
+ * が入れる。実体はこの翻訳単位に置き、相手は
+ * kosaba_rt.c / kosaba_lib.c が読む (v34) */
+char *kosaba_out_name;
 
 /* 字句レベルの失敗の印 (v16)。skip_spaces は戻り値で失敗を
  * 伝えられないので、ブロックコメントの閉じ忘れはこちらに
