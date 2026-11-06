@@ -1707,10 +1707,33 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   すっきりさせました。</p></div>
 </section>
 
+<!-- ================= 段6 ================= -->
+<section class="phase" id="frag">
+  <div class="head"><span class="badge b-v4">段6</span><h2>小メモリでのセルフホスト — 断片プロファイル</h2></div>
+  <p class="goal-line">目標：<b>小さなボード（データ領域 1MB）の上でも、iwac が自分の断片を訳せるようにする。</b></p>
+  <p>まず測るところから始めました。断片ごとのピークは、一括で訳すときの
+  半分以下（ノード最大 6,085 個、命令 12,251 個、入力 113KB）でした。
+  その実測に余裕を乗せた「断片プロファイル」で iwac を作ると、
+  静的データ <b>945,648 バイト</b>で 1MB に収まります。リンカ nori にも
+  対のプロファイル（756,834 バイト）を用意したので、Misoni のチェーン
+  全員が 1MB 級に収まりました。</p>
+  <p>OS の上で断片版の iwac と nori を Misoni に回させると、全断片の
+  コンパイルとリンクが通り、できた iwac が自己コンパイルで同じ
+  バイト列を出す（固定点）ところまで確認できました。残るのは、
+  本物の K210 の 1MB 領域で走らせる確認だけです。</p>
+  <div>
+    <span class="chip">kosaba/build-frag.sh</span><span class="chip">nori/build-frag.sh</span><span class="chip">OS 上で固定点を確認</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「入るかどうか」は、測ってから決める話でした。容量の表は
+  プログラム全体ではなく「一番大きな断片」に合わせればよく、
+  分割コンパイルの形そのものが小メモリへの道になっていました。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-06（v34 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-06（段6 時点）</p>
 </footer>
 
 </div>

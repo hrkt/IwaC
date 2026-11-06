@@ -1040,6 +1040,20 @@ else
     echo "skip: 段5: Misoni の確認 (nori が無いため)"
 fi
 
+# --- 段6: 断片プロファイル (小メモリでのセルフホスト) ---
+# iwac 本体と nori を「断片1つ分の容量」に絞ったプロファイルで
+# 作り、静的データが 1MB 未満に収まることと、容量だけが違う
+# こと (オブジェクト/リンク結果の一致) を確かめる。スクリプト
+# 自身が判定して止まるので、ここでは成功したかだけを見る
+if [ -n "$RISCV_CC" ]; then
+    (cd kosaba && CC="$RISCV_CC" ./build-frag.sh > "$TMP/frag-iwac.log" 2>&1) || fail "段6: iwac の断片プロファイルに失敗"
+    echo "ok: 段6: iwac 断片プロファイル (データ 1MB 未満、全断片のオブジェクト一致)"
+    (cd nori && ./build-frag.sh > "$TMP/frag-nori.log" 2>&1) || fail "段6: nori の断片プロファイルに失敗"
+    echo "ok: 段6: nori 断片プロファイル (データ 1MB 未満、リンク結果一致)"
+else
+    echo "skip: 段6: 断片プロファイル (RISC-V 用 gcc が無いため)"
+fi
+
 # --- 小容量ビルド「shirasu」(K210 プロファイル、v15 の節と同じ流儀) ---
 # RISC-V 用 gcc が見つかるときだけ、kosaba/iwac-shirasu.elf が
 # 作れて、データ量が 1MB に収まることを確かめる (スクリプト
