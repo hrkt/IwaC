@@ -17,7 +17,9 @@
  * hello.elf を作ってしまう)。進捗は fd 2 へ。
  * iwac の言語 (部分集合) で書く。外部関数は
  * open / read / close / write だけを手で宣言し、
- * exec / create などは syscall3 で直接叩く。
+ * exec などは syscall3 で直接叩く。文字列などの
+ * 小物は共通ライブラリ libdashi を使う
+ * (libdashi/libdashi.c、doc/libdashi.md)。
  */
 
 long write(int fd, char *buf, long len);
@@ -25,44 +27,12 @@ int open(char *path, int flags);
 long read(int fd, char *buf, long len);
 int close(int fd);
 
-/* ---- 小物 ---- */
-
-int slen(char *s) {
-    int n;
-    n = 0;
-    while (s[n])
-        n = n + 1;
-    return n;
-}
-
-int seq(char *a, char *b) {
-    int i;
-    i = 0;
-    while (a[i] && a[i] == b[i])
-        i = i + 1;
-    return a[i] == b[i];
-}
-
-void say(char *s) { write(2, s, slen(s)); }
-
-void say_n(long n) {
-    char b[16];
-    int i;
-    if (n == 0) {
-        say("0");
-        return;
-    }
-    i = 0;
-    while (n > 0) {
-        b[i] = 48 + (n - (n / 10) * 10);
-        i = i + 1;
-        n = n / 10;
-    }
-    while (i > 0) {
-        i = i - 1;
-        write(2, b + i, 1);
-    }
-}
+/* libdashi (共通関数の束、doc/libdashi.md) */
+int dashi_strlen(char *s);
+int dashi_streq(char *a, char *b);
+int dashi_append(char *dst, int pos, char *src);
+void dashi_puts(int fd, char *s);
+void dashi_putdec(int fd, long v);
 
 /* ---- マニフェスト ---- */
 
@@ -106,33 +76,20 @@ int split_line(int ls, int le) {
     return nw;
 }
 
-/* 文字列 t を dst の pos から足し、新しい pos を返す */
-int append_str(char *dst, int pos, char *t) {
-    int i;
-    i = 0;
-    while (t[i]) {
-        dst[pos] = t[i];
-        pos = pos + 1;
-        i = i + 1;
-    }
-    dst[pos] = 0;
-    return pos;
-}
-
 int load_manifest(char *path) {
     int fd;
     long n;
     fd = open(path, 0);
     if (fd < 0) {
-        say("misoni: マニフェストが開けません: ");
-        say(path);
-        say("\n");
+        dashi_puts(2, "misoni: マニフェストが開けません: ");
+        dashi_puts(2, path);
+        dashi_puts(2, "\n");
         return 0;
     }
     n = read(fd, mbuf, 8192);
     close(fd);
     if (n < 0) {
-        say("misoni: マニフェストが読めません\n");
+        dashi_puts(2, "misoni: マニフェストが読めません\n");
         return 0;
     }
     mlen = n;
@@ -154,7 +111,7 @@ int load_manifest(char *path) {
             char *w0;
             w0 = words[0];
             if (nw >= 1 && w0[0] != 35) {  /* # は注釈 */
-                if (seq(words[0], "out") && nw == 2) {
+                if (dashi_streq(words[0], "out") && nw == 2) {
                     char *w1;
                     int p;
                     w1 = words[1];
@@ -165,7 +122,7 @@ int load_manifest(char *path) {
                     }
                     out_name[p] = 0;
                     have_out = 1;
-                } else if (seq(words[0], "obj") && nw >= 3) {
+                } else if (dashi_streq(words[0], "obj") && nw >= 3) {
                     if (nobj < 16) {
                         obj_name[nobj] = words[1];
                         /* ソースの並びを1つの文字列に
@@ -176,8 +133,8 @@ int load_manifest(char *path) {
                         p = 0;
                         for (int k = 2; k < nw; k++) {
                             if (k > 2)
-                                p = append_str(dst, p, " ");
-                            p = append_str(dst, p, words[k]);
+                                p = dashi_append(dst, p, " ");
+                            p = dashi_append(dst, p, words[k]);
                         }
                         obj_srcs[nobj] = dst;
                         nobj = nobj + 1;
@@ -202,20 +159,20 @@ int run_iwac(int i) {
     int p;
     long st;
     p = 0;
-    p = append_str(args, p, "iwac.elf --kosaba --object --out ");
-    p = append_str(args, p, obj_name[i]);
-    p = append_str(args, p, " ");
-    p = append_str(args, p, obj_srcs[i]);
-    say("misoni: iwac ");
-    say(args);
-    say("\n");
+    p = dashi_append(args, p, "iwac.elf --kosaba --object --out ");
+    p = dashi_append(args, p, obj_name[i]);
+    p = dashi_append(args, p, " ");
+    p = dashi_append(args, p, obj_srcs[i]);
+    dashi_puts(2, "misoni: iwac ");
+    dashi_puts(2, args);
+    dashi_puts(2, "\n");
     st = syscall3(8, "iwac.elf", args, 0);
     if (st != 0) {
-        say("misoni: コンパイルに失敗しました (status ");
-        say_n(st);
-        say("): ");
-        say(obj_name[i]);
-        say("\n");
+        dashi_puts(2, "misoni: コンパイルに失敗しました (status ");
+        dashi_putdec(2, st);
+        dashi_puts(2, "): ");
+        dashi_puts(2, obj_name[i]);
+        dashi_puts(2, "\n");
         return 0;
     }
     return 1;
@@ -226,20 +183,20 @@ int run_nori(void) {
     int p;
     long st;
     p = 0;
-    p = append_str(args, p, "nori.elf --out ");
-    p = append_str(args, p, out_name);
+    p = dashi_append(args, p, "nori.elf --out ");
+    p = dashi_append(args, p, out_name);
     for (int i = 0; i < nobj; i++) {
-        p = append_str(args, p, " ");
-        p = append_str(args, p, obj_name[i]);
+        p = dashi_append(args, p, " ");
+        p = dashi_append(args, p, obj_name[i]);
     }
-    say("misoni: nori ");
-    say(args);
-    say("\n");
+    dashi_puts(2, "misoni: nori ");
+    dashi_puts(2, args);
+    dashi_puts(2, "\n");
     st = syscall3(8, "nori.elf", args, 0);
     if (st != 0) {
-        say("misoni: リンクに失敗しました (status ");
-        say_n(st);
-        say(")\n");
+        dashi_puts(2, "misoni: リンクに失敗しました (status ");
+        dashi_putdec(2, st);
+        dashi_puts(2, ")\n");
         return 0;
     }
     return 1;
@@ -253,7 +210,7 @@ int main(int argc, char **argv) {
     if (!load_manifest(mpath))
         return 1;
     if (!have_out || nobj == 0) {
-        say("misoni: out 行と obj 行が要ります\n");
+        dashi_puts(2, "misoni: out 行と obj 行が要ります\n");
         return 1;
     }
     for (int i = 0; i < nobj; i++) {
@@ -262,8 +219,8 @@ int main(int argc, char **argv) {
     }
     if (!run_nori())
         return 1;
-    say("misoni: できました: ");
-    say(out_name);
-    say("\n");
+    dashi_puts(2, "misoni: できました: ");
+    dashi_puts(2, out_name);
+    dashi_puts(2, "\n");
     return 0;
 }

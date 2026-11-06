@@ -1099,3 +1099,21 @@ doc/selfhost.md）。test.sh に v32 / v33 の
 - 未確認・意図的にやっていないこと:
   - UART 送信ポーリング無し（QEMU での第一歩として省略。実機向けの課題）
   - UART 初期化（分周比など）無し（同上、QEMU のデフォルトで動作）
+
+## libdashi（2026-11-06、branch `libdashi`）
+
+共通関数の小さいライブラリ **libdashi**
+（doc/libdashi.md）。重複の棚卸しから始め、
+文字列・数値変換・write の上の出力ヘルパを
+`dashi_` 接頭辞で11個そろえた。消費者は
+プロトタイプを手で宣言し、一括では入力に
+libdashi.c を足し、分割では .iwo をつなぐ。
+
+- 移行第1号: Misoni (slen / seq / say /
+  say_n / append_str を廃止)。OS 上で駆動が
+  通り、自己コンパイル digest 一致を確認
+- 移行第2号: nori (puts_fd / str_eq /
+  hex_val を廃止)。ホストでリンク結果が
+  一括とバイト一致、断片プロファイルも
+  再確認 (データ 756,834 バイトで不変)
+- rt と iwac 本体は移行しない (doc の線引き)

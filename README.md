@@ -17,7 +17,7 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v34（段5 Misoni 決着。branch `misoni` で開発中）
+## 現在地: v34 + 段6（main 取り込み済み）。libdashi を branch `libdashi` で追加
 
 v33 で「分割コンパイル＋リンカ」への階段
 （doc/linking.md）の段4まで来た。iwac の7断片と
@@ -40,6 +40,17 @@ Misoni 本体を普通のプログラムとして実装した
 （`misoni/misoni.c`）。出力名の指定 `--out` を
 iwac と nori に追加し、OS 上で Nish → Misoni →
 iwac / nori の駆動と固定点を確認済み。
+段6（小メモリでのセルフホスト）も main 取り込み
+済み: 断片プロファイルで iwac (945,648 バイト) /
+nori (756,834 バイト) ともデータ 1MB 未満に収め、
+OS 上で固定点を確認した。
+
+共通関数の小さいライブラリ **libdashi**
+(`libdashi/libdashi.c`、設計は doc/libdashi.md)
+もできた。文字列・数値変換・出力ヘルパを
+`dashi_` 接頭辞でそろえ、nori と Misoni が
+移行済み。今後の順序は libdashi → Asari の
+別出し → オブジェクトの ELF 化。
 
 その前の v31（オブジェクト出力）:
 

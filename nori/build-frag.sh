@@ -89,8 +89,8 @@ done
 OBJS="$OBJS objs/rt.iwo"
 
 # 標準 nori と断片 nori (どちらもホスト版) でリンクして比べる
-"$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/nori-std" nori.c
-"$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/nori-frag" "$WORK/nori.c"
+"$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/nori-std" nori.c ../libdashi/libdashi.c
+"$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/nori-frag" "$WORK/nori.c" ../libdashi/libdashi.c
 (cd "$WORK" && ./nori-std $OBJS > linked-std.elf)
 (cd "$WORK" && ./nori-frag $OBJS > linked-frag.elf)
 if ! cmp -s "$WORK/linked-std.elf" "$WORK/linked-frag.elf"; then
@@ -100,7 +100,7 @@ fi
 echo "build-frag (nori): 標準と断片でリンク結果が一致"
 
 # KosabaOS 用の ELF を組む (iwac + rt、標準の iwac で)
-"$WORK/iwac-std" --kosaba "$WORK/nori.c" ../kosaba/kosaba_rt.c > nori-frag.elf
+"$WORK/iwac-std" --kosaba "$WORK/nori.c" ../libdashi/libdashi.c ../kosaba/kosaba_rt.c > nori-frag.elf
 echo "build-frag (nori): nori-frag.elf を作りました"
 
 # 判定: データセグメントが 1MB 未満か
