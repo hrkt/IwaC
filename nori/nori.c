@@ -24,9 +24,9 @@ long read(int fd, char *buf, long len);
 int close(int fd);
 
 /* libdashi (共通関数の束、doc/libdashi.md) */
-void dashi_puts(int fd, char *s);
-int dashi_streq(char *a, char *b);
-int dashi_hexval(int c);
+void ds_puts(int fd, char *s);
+int ds_streq(char *a, char *b);
+int ds_hexval(int c);
 
 /* ================= 大きさの約束 ================= */
 static int MAX_OBJ = 32;       /* オブジェクトの数 */
@@ -207,7 +207,7 @@ static void read_tok(void) {
 /* 次の言葉が期待どおりか確かめる */
 static int expect_tok(char *want) {
     read_tok();
-    if (!dashi_streq(tok_buf, want))
+    if (!ds_streq(tok_buf, want))
         return fail("オブジェクトの形が違います");
     return 1;
 }
@@ -240,7 +240,7 @@ static int read_hex_bytes(char *pool, int *used, int max, long n) {
             char c = in_buf[in_pos++];
             if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
                 continue;
-            hi = dashi_hexval(c);
+            hi = ds_hexval(c);
             if (hi < 0)
                 return fail("16進数でない文字があります");
         }
@@ -250,7 +250,7 @@ static int read_hex_bytes(char *pool, int *used, int max, long n) {
             char c = in_buf[in_pos++];
             if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
                 continue;
-            lo = dashi_hexval(c);
+            lo = ds_hexval(c);
             if (lo < 0)
                 return fail("16進数でない文字があります");
         }
@@ -296,30 +296,30 @@ static int read_object(int obj, char *path) {
     if (!expect_tok("target"))
         return 0;
     read_tok();
-    if (!dashi_streq(tok_buf, "kosaba"))
+    if (!ds_streq(tok_buf, "kosaba"))
         return fail("対象が kosaba ではありません");
 
     for (;;) {
         read_tok();
         if (tok_buf[0] == '\0')
             return fail("end がありません");
-        if (dashi_streq(tok_buf, "end"))
+        if (ds_streq(tok_buf, "end"))
             break;
-        if (dashi_streq(tok_buf, "entry")) {
+        if (ds_streq(tok_buf, "entry")) {
             obj_entry[obj] = (int)read_num();
-        } else if (dashi_streq(tok_buf, "code")) {
+        } else if (ds_streq(tok_buf, "code")) {
             long n = read_num();
             obj_code_len[obj] = (int)n;
             if (!read_hex_bytes(code_pool, &code_used, 262144, n))
                 return 0;
-        } else if (dashi_streq(tok_buf, "strings")) {
+        } else if (ds_streq(tok_buf, "strings")) {
             long n = read_num();
             obj_str_len[obj] = (int)n;
             if (!read_hex_bytes(str_pool, &str_used, 131072, n))
                 return 0;
-        } else if (dashi_streq(tok_buf, "arrays")) {
+        } else if (ds_streq(tok_buf, "arrays")) {
             read_num();  /* 合計は記録だけで、配置は arr から */
-        } else if (dashi_streq(tok_buf, "func")) {
+        } else if (ds_streq(tok_buf, "func")) {
             read_tok();
             int s = new_sym(tok_buf);
             if (s < 0)
@@ -336,7 +336,7 @@ static int read_object(int obj, char *path) {
             if (nseq >= MAX_SEQ)
                 return fail("関数が多すぎます");
             seq_sym[nseq++] = s;
-        } else if (dashi_streq(tok_buf, "decl")) {
+        } else if (ds_streq(tok_buf, "decl")) {
             read_tok();
             int s = new_sym(tok_buf);
             if (s < 0)
@@ -346,9 +346,9 @@ static int read_object(int obj, char *path) {
             if (nseq >= MAX_SEQ)
                 return fail("関数が多すぎます");
             seq_sym[nseq++] = s;
-        } else if (dashi_streq(tok_buf, "var") ||
-                   dashi_streq(tok_buf, "varc")) {
-            int firm = dashi_streq(tok_buf, "var");
+        } else if (ds_streq(tok_buf, "var") ||
+                   ds_streq(tok_buf, "varc")) {
+            int firm = ds_streq(tok_buf, "var");
             read_tok();
             int s = new_sym(tok_buf);
             if (s < 0)
@@ -365,7 +365,7 @@ static int read_object(int obj, char *path) {
                     return fail("変数の本定義が二つあります");
                 sym_firm[s] = 1;
             }
-        } else if (dashi_streq(tok_buf, "arr")) {
+        } else if (ds_streq(tok_buf, "arr")) {
             read_tok();
             int s = new_sym(tok_buf);
             if (s < 0)
@@ -383,7 +383,7 @@ static int read_object(int obj, char *path) {
                 sym_off[s] = (int)arr_area;
                 arr_area += size;
             }
-        } else if (dashi_streq(tok_buf, "init")) {
+        } else if (ds_streq(tok_buf, "init")) {
             read_tok();
             int s = new_sym(tok_buf);
             if (s < 0)
@@ -395,7 +395,7 @@ static int read_object(int obj, char *path) {
             sym_hasinit[s] = 1;
             sym_init_kind[s] = 1;
             sym_init_val[s] = read_num();
-        } else if (dashi_streq(tok_buf, "iptr")) {
+        } else if (ds_streq(tok_buf, "iptr")) {
             read_tok();
             int s = new_sym(tok_buf);
             if (s < 0)
@@ -406,11 +406,11 @@ static int read_object(int obj, char *path) {
                 return fail("初期値が二つあります");
             read_tok();
             sym_hasinit[s] = 1;
-            if (dashi_streq(tok_buf, "str")) {
+            if (ds_streq(tok_buf, "str")) {
                 sym_init_kind[s] = 2;
                 sym_init_val[s] = read_num();
                 sym_init_obj[s] = obj;
-            } else if (dashi_streq(tok_buf, "sym")) {
+            } else if (ds_streq(tok_buf, "sym")) {
                 read_tok();
                 int t = new_sym(tok_buf);
                 if (t < 0)
@@ -420,9 +420,9 @@ static int read_object(int obj, char *path) {
                 sym_init_val[s] = read_num();
             } else
                 return fail("iptr の形が違います");
-        } else if (dashi_streq(tok_buf, "call") ||
-                   dashi_streq(tok_buf, "callopt")) {
-            int kind = dashi_streq(tok_buf, "call") ? 1 : 2;
+        } else if (ds_streq(tok_buf, "call") ||
+                   ds_streq(tok_buf, "callopt")) {
+            int kind = ds_streq(tok_buf, "call") ? 1 : 2;
             int off = (int)read_num();
             read_tok();
             int s = new_sym(tok_buf);
@@ -432,7 +432,7 @@ static int read_object(int obj, char *path) {
                 return 0;
             if (!add_rel(obj, off, kind, s, 0))
                 return 0;
-        } else if (dashi_streq(tok_buf, "addr")) {
+        } else if (ds_streq(tok_buf, "addr")) {
             int off = (int)read_num();
             read_tok();
             int s = new_sym(tok_buf);
@@ -441,17 +441,17 @@ static int read_object(int obj, char *path) {
             long add = read_num();
             if (!add_rel(obj, off, 3, s, add))
                 return 0;
-        } else if (dashi_streq(tok_buf, "addrstr")) {
+        } else if (ds_streq(tok_buf, "addrstr")) {
             int off = (int)read_num();
             long v = read_num();
             if (!add_rel(obj, off, 4, -1, v))
                 return 0;
-        } else if (dashi_streq(tok_buf, "addabs")) {
+        } else if (ds_streq(tok_buf, "addabs")) {
             int off = (int)read_num();
             long v = read_num();
             if (!add_rel(obj, off, 5, -1, v))
                 return 0;
-        } else if (dashi_streq(tok_buf, "undef")) {
+        } else if (ds_streq(tok_buf, "undef")) {
             read_tok();
             int s = new_sym(tok_buf);
             if (s < 0)
@@ -716,40 +716,40 @@ int main(int argc, char **argv) {
     int base;
     base = 1;
     /* nori --out <名前> obj... : OS 上での出力名 (v34) */
-    if (argc >= 4 && dashi_streq(argv[1], "--out")) {
+    if (argc >= 4 && ds_streq(argv[1], "--out")) {
         kosaba_out_name = argv[2];
         base = 3;
     }
     if (argc - base < 1) {
-        dashi_puts(2, "usage: nori [--out <name>] <obj.iwo> ... > prog.elf\n");
+        ds_puts(2, "usage: nori [--out <name>] <obj.iwo> ... > prog.elf\n");
         return 1;
     }
     if (argc - base > MAX_OBJ) {
-        dashi_puts(2, "nori: オブジェクトが多すぎます\n");
+        ds_puts(2, "nori: オブジェクトが多すぎます\n");
         return 1;
     }
     err_sym = -1;
     nobj = argc - base;
     for (int i = 0; i < nobj; i++) {
         if (!read_object(i, argv[i + base])) {
-            dashi_puts(2, "nori: ");
-            dashi_puts(2, errmsg);
+            ds_puts(2, "nori: ");
+            ds_puts(2, errmsg);
             if (err_sym >= 0) {
-                dashi_puts(2, ": ");
-                dashi_puts(2, sym_str(err_sym));
+                ds_puts(2, ": ");
+                ds_puts(2, sym_str(err_sym));
             }
-            dashi_puts(2, "\n");
+            ds_puts(2, "\n");
             return 1;
         }
     }
     if (!layout() || !fill_all()) {
-        dashi_puts(2, "nori: ");
-        dashi_puts(2, errmsg);
+        ds_puts(2, "nori: ");
+        ds_puts(2, errmsg);
         if (err_sym >= 0) {
-            dashi_puts(2, ": ");
-            dashi_puts(2, sym_str(err_sym));
+            ds_puts(2, ": ");
+            ds_puts(2, sym_str(err_sym));
         }
-        dashi_puts(2, "\n");
+        ds_puts(2, "\n");
         return 1;
     }
     write_elf();

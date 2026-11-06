@@ -33,7 +33,7 @@ iwac の言語で書いたプログラムが増え、同じ
   つなぐ（Misoni のマニフェストなら
   `obj libdashi.iwo libdashi/libdashi.c` の
   1行が足せる）
-- 関数名は `dashi_` 接頭辞で揃える（rt の
+- 関数名は `ds_` 接頭辞で揃える（rt の
   `rt_` と同じ流儀。ホスト側の libc と名前が
   衝突しないための実利もある）
 
@@ -59,29 +59,29 @@ iwac の言語で書いたプログラムが増え、同じ
 
 文字列:
 
-- `int dashi_strlen(char *s)`
-- `int dashi_streq(char *a, char *b)`
-- `int dashi_strcpy(char *dst, char *src)`
+- `int ds_strlen(char *s)`
+- `int ds_streq(char *a, char *b)`
+- `int ds_strcpy(char *dst, char *src)`
   （写して、写した長さを返す）
-- `int dashi_append(char *dst, int pos, char *src)`
+- `int ds_append(char *dst, int pos, char *src)`
   （pos の位置から足して、新しい pos を返す）
 
 数値と文字列の変換（バッファへ書く純粋関数）:
 
-- `int dashi_dec(char *buf, long v)`
+- `int ds_dec(char *buf, long v)`
   （10進で書いて長さを返す。負数も扱う）
-- `int dashi_hex(char *buf, long v)`
+- `int ds_hex(char *buf, long v)`
   （16進・小文字・ゼロ詰めなしで書き、長さを返す）
-- `long dashi_atoi(char *s)`
+- `long ds_atoi(char *s)`
   （数字が続く間だけ読む。符号も見る）
-- `int dashi_hexval(int c)`（16進1文字 → 値。
+- `int ds_hexval(int c)`（16進1文字 → 値。
   違えば -1）
 
 出力（write の上）:
 
-- `void dashi_puts(int fd, char *s)`
-- `void dashi_putdec(int fd, long v)`
-- `void dashi_puthex(int fd, long v)`
+- `void ds_puts(int fd, char *s)`
+- `void ds_putdec(int fd, long v)`
+- `void ds_puthex(int fd, long v)`
 
 ## 移行の記録
 

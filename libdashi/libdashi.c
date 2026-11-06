@@ -16,7 +16,7 @@ long write(int fd, char *buf, long len);
 
 /* ---- 文字列 ---- */
 
-int dashi_strlen(char *s) {
+int ds_strlen(char *s) {
     int n;
     n = 0;
     while (s[n])
@@ -24,7 +24,7 @@ int dashi_strlen(char *s) {
     return n;
 }
 
-int dashi_streq(char *a, char *b) {
+int ds_streq(char *a, char *b) {
     int i;
     i = 0;
     while (a[i] && a[i] == b[i])
@@ -34,7 +34,7 @@ int dashi_streq(char *a, char *b) {
 
 /* dst へ src を写し (終わりの 0 も)、写した
  * 長さ (0 を除く) を返す */
-int dashi_strcpy(char *dst, char *src) {
+int ds_strcpy(char *dst, char *src) {
     int i;
     i = 0;
     while (src[i]) {
@@ -48,7 +48,7 @@ int dashi_strcpy(char *dst, char *src) {
 /* dst の pos の位置から src を足し、足した後の
  * pos を返す。dst は 0 で終わっている前提で、
  * 続きも 0 で終わらせる */
-int dashi_append(char *dst, int pos, char *src) {
+int ds_append(char *dst, int pos, char *src) {
     int i;
     i = 0;
     while (src[i]) {
@@ -64,7 +64,7 @@ int dashi_append(char *dst, int pos, char *src) {
 
 /* v を10進で buf へ書き、書いた長さを返す。
  * buf には 24 バイト以上あること (符号＋20桁＋0) */
-int dashi_dec(char *buf, long v) {
+int ds_dec(char *buf, long v) {
     char tmp[24];
     int n;
     int i;
@@ -101,7 +101,7 @@ int dashi_dec(char *buf, long v) {
 /* v を16進 (小文字、ゼロ詰めなし) で buf へ
  * 書き、書いた長さを返す。負数は扱わない
  * (ビット列として読めるよう、符号なしで進める) */
-int dashi_hex(char *buf, long v) {
+int ds_hex(char *buf, long v) {
     char tmp[20];
     int n;
     int i;
@@ -135,7 +135,7 @@ int dashi_hex(char *buf, long v) {
 /* ---- 文字列 → 数値 ---- */
 
 /* 数字が続く間だけ読む。先頭の空白と符号も見る */
-long dashi_atoi(char *s) {
+long ds_atoi(char *s) {
     long v;
     int i;
     int neg;
@@ -160,7 +160,7 @@ long dashi_atoi(char *s) {
 }
 
 /* 16進の1文字 → 値。違えば -1 */
-int dashi_hexval(int c) {
+int ds_hexval(int c) {
     if (c >= 48 && c <= 57)
         return c - 48;
     if (c >= 97 && c <= 102)
@@ -172,20 +172,20 @@ int dashi_hexval(int c) {
 
 /* ---- 出力 (write の上) ---- */
 
-void dashi_puts(int fd, char *s) {
-    write(fd, s, dashi_strlen(s));
+void ds_puts(int fd, char *s) {
+    write(fd, s, ds_strlen(s));
 }
 
-void dashi_putdec(int fd, long v) {
+void ds_putdec(int fd, long v) {
     char buf[24];
     int n;
-    n = dashi_dec(buf, v);
+    n = ds_dec(buf, v);
     write(fd, buf, n);
 }
 
-void dashi_puthex(int fd, long v) {
+void ds_puthex(int fd, long v) {
     char buf[20];
     int n;
-    n = dashi_hex(buf, v);
+    n = ds_hex(buf, v);
     write(fd, buf, n);
 }

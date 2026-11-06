@@ -1042,41 +1042,41 @@ fi
 
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る
-cat > "$TMP/dashi_test.c" <<'DASHITEST'
+cat > "$TMP/ds_test.c" <<'DASHITEST'
 #include <stdio.h>
-int dashi_strlen(char *s);
-int dashi_streq(char *a, char *b);
-int dashi_append(char *dst, int pos, char *src);
-int dashi_dec(char *buf, long v);
-int dashi_hex(char *buf, long v);
-long dashi_atoi(char *s);
-int dashi_hexval(int c);
-void dashi_puts(int fd, char *s);
-void dashi_putdec(int fd, long v);
+int ds_strlen(char *s);
+int ds_streq(char *a, char *b);
+int ds_append(char *dst, int pos, char *src);
+int ds_dec(char *buf, long v);
+int ds_hex(char *buf, long v);
+long ds_atoi(char *s);
+int ds_hexval(int c);
+void ds_puts(int fd, char *s);
+void ds_putdec(int fd, long v);
 int main(void) {
     char b[64];
     char dst[64];
     int p;
     p = 0;
-    p = dashi_append(dst, p, "ab");
-    p = dashi_append(dst, p, "cd");
-    printf("%s %d %d %d\n", dst, dashi_strlen(dst),
-           dashi_streq(dst, "abcd"), dashi_streq(dst, "abc"));
-    printf("%d %s\n", dashi_dec(b, -12345), b);
-    printf("%d %s\n", dashi_hex(b, 6699), b);
-    printf("%ld %d %d %d\n", dashi_atoi("  -42x"),
-           dashi_hexval('f'), dashi_hexval('F'),
-           dashi_hexval('z'));
+    p = ds_append(dst, p, "ab");
+    p = ds_append(dst, p, "cd");
+    printf("%s %d %d %d\n", dst, ds_strlen(dst),
+           ds_streq(dst, "abcd"), ds_streq(dst, "abc"));
+    printf("%d %s\n", ds_dec(b, -12345), b);
+    printf("%d %s\n", ds_hex(b, 6699), b);
+    printf("%ld %d %d %d\n", ds_atoi("  -42x"),
+           ds_hexval('f'), ds_hexval('F'),
+           ds_hexval('z'));
     fflush(stdout);
-    dashi_puts(1, "puts-ok\n");
-    dashi_putdec(1, 777);
+    ds_puts(1, "puts-ok\n");
+    ds_putdec(1, 777);
     printf("\n");
     return 0;
 }
 DASHITEST
-if cc -std=c11 -O2 -o "$TMP/dashi_test" "$TMP/dashi_test.c" libdashi/libdashi.c 2>/dev/null; then
-    "$TMP/dashi_test" > "$TMP/dashi_out.txt"
-    cat > "$TMP/dashi_expect.txt" <<'DASHIEXPECT'
+if cc -std=c11 -O2 -o "$TMP/ds_test" "$TMP/ds_test.c" libdashi/libdashi.c 2>/dev/null; then
+    "$TMP/ds_test" > "$TMP/ds_out.txt"
+    cat > "$TMP/ds_expect.txt" <<'DASHIEXPECT'
 abcd 4 1 0
 6 -12345
 4 1a2b
@@ -1084,7 +1084,7 @@ abcd 4 1 0
 puts-ok
 777
 DASHIEXPECT
-    cmp -s "$TMP/dashi_expect.txt" "$TMP/dashi_out.txt" || fail "libdashi: 関数の出力が期待と違う"
+    cmp -s "$TMP/ds_expect.txt" "$TMP/ds_out.txt" || fail "libdashi: 関数の出力が期待と違う"
     echo "ok: libdashi: 文字列・数値変換・出力ヘルパ"
 else
     echo "skip: libdashi (cc が無いため)"

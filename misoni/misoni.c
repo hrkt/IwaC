@@ -28,11 +28,11 @@ long read(int fd, char *buf, long len);
 int close(int fd);
 
 /* libdashi (共通関数の束、doc/libdashi.md) */
-int dashi_strlen(char *s);
-int dashi_streq(char *a, char *b);
-int dashi_append(char *dst, int pos, char *src);
-void dashi_puts(int fd, char *s);
-void dashi_putdec(int fd, long v);
+int ds_strlen(char *s);
+int ds_streq(char *a, char *b);
+int ds_append(char *dst, int pos, char *src);
+void ds_puts(int fd, char *s);
+void ds_putdec(int fd, long v);
 
 /* ---- マニフェスト ---- */
 
@@ -81,15 +81,15 @@ int load_manifest(char *path) {
     long n;
     fd = open(path, 0);
     if (fd < 0) {
-        dashi_puts(2, "misoni: マニフェストが開けません: ");
-        dashi_puts(2, path);
-        dashi_puts(2, "\n");
+        ds_puts(2, "misoni: マニフェストが開けません: ");
+        ds_puts(2, path);
+        ds_puts(2, "\n");
         return 0;
     }
     n = read(fd, mbuf, 8192);
     close(fd);
     if (n < 0) {
-        dashi_puts(2, "misoni: マニフェストが読めません\n");
+        ds_puts(2, "misoni: マニフェストが読めません\n");
         return 0;
     }
     mlen = n;
@@ -111,7 +111,7 @@ int load_manifest(char *path) {
             char *w0;
             w0 = words[0];
             if (nw >= 1 && w0[0] != 35) {  /* # は注釈 */
-                if (dashi_streq(words[0], "out") && nw == 2) {
+                if (ds_streq(words[0], "out") && nw == 2) {
                     char *w1;
                     int p;
                     w1 = words[1];
@@ -122,7 +122,7 @@ int load_manifest(char *path) {
                     }
                     out_name[p] = 0;
                     have_out = 1;
-                } else if (dashi_streq(words[0], "obj") && nw >= 3) {
+                } else if (ds_streq(words[0], "obj") && nw >= 3) {
                     if (nobj < 16) {
                         obj_name[nobj] = words[1];
                         /* ソースの並びを1つの文字列に
@@ -133,8 +133,8 @@ int load_manifest(char *path) {
                         p = 0;
                         for (int k = 2; k < nw; k++) {
                             if (k > 2)
-                                p = dashi_append(dst, p, " ");
-                            p = dashi_append(dst, p, words[k]);
+                                p = ds_append(dst, p, " ");
+                            p = ds_append(dst, p, words[k]);
                         }
                         obj_srcs[nobj] = dst;
                         nobj = nobj + 1;
@@ -159,20 +159,20 @@ int run_iwac(int i) {
     int p;
     long st;
     p = 0;
-    p = dashi_append(args, p, "iwac.elf --kosaba --object --out ");
-    p = dashi_append(args, p, obj_name[i]);
-    p = dashi_append(args, p, " ");
-    p = dashi_append(args, p, obj_srcs[i]);
-    dashi_puts(2, "misoni: iwac ");
-    dashi_puts(2, args);
-    dashi_puts(2, "\n");
+    p = ds_append(args, p, "iwac.elf --kosaba --object --out ");
+    p = ds_append(args, p, obj_name[i]);
+    p = ds_append(args, p, " ");
+    p = ds_append(args, p, obj_srcs[i]);
+    ds_puts(2, "misoni: iwac ");
+    ds_puts(2, args);
+    ds_puts(2, "\n");
     st = syscall3(8, "iwac.elf", args, 0);
     if (st != 0) {
-        dashi_puts(2, "misoni: コンパイルに失敗しました (status ");
-        dashi_putdec(2, st);
-        dashi_puts(2, "): ");
-        dashi_puts(2, obj_name[i]);
-        dashi_puts(2, "\n");
+        ds_puts(2, "misoni: コンパイルに失敗しました (status ");
+        ds_putdec(2, st);
+        ds_puts(2, "): ");
+        ds_puts(2, obj_name[i]);
+        ds_puts(2, "\n");
         return 0;
     }
     return 1;
@@ -183,20 +183,20 @@ int run_nori(void) {
     int p;
     long st;
     p = 0;
-    p = dashi_append(args, p, "nori.elf --out ");
-    p = dashi_append(args, p, out_name);
+    p = ds_append(args, p, "nori.elf --out ");
+    p = ds_append(args, p, out_name);
     for (int i = 0; i < nobj; i++) {
-        p = dashi_append(args, p, " ");
-        p = dashi_append(args, p, obj_name[i]);
+        p = ds_append(args, p, " ");
+        p = ds_append(args, p, obj_name[i]);
     }
-    dashi_puts(2, "misoni: nori ");
-    dashi_puts(2, args);
-    dashi_puts(2, "\n");
+    ds_puts(2, "misoni: nori ");
+    ds_puts(2, args);
+    ds_puts(2, "\n");
     st = syscall3(8, "nori.elf", args, 0);
     if (st != 0) {
-        dashi_puts(2, "misoni: リンクに失敗しました (status ");
-        dashi_putdec(2, st);
-        dashi_puts(2, ")\n");
+        ds_puts(2, "misoni: リンクに失敗しました (status ");
+        ds_putdec(2, st);
+        ds_puts(2, ")\n");
         return 0;
     }
     return 1;
@@ -210,7 +210,7 @@ int main(int argc, char **argv) {
     if (!load_manifest(mpath))
         return 1;
     if (!have_out || nobj == 0) {
-        dashi_puts(2, "misoni: out 行と obj 行が要ります\n");
+        ds_puts(2, "misoni: out 行と obj 行が要ります\n");
         return 1;
     }
     for (int i = 0; i < nobj; i++) {
@@ -219,8 +219,8 @@ int main(int argc, char **argv) {
     }
     if (!run_nori())
         return 1;
-    dashi_puts(2, "misoni: できました: ");
-    dashi_puts(2, out_name);
-    dashi_puts(2, "\n");
+    ds_puts(2, "misoni: できました: ");
+    ds_puts(2, out_name);
+    ds_puts(2, "\n");
     return 0;
 }
