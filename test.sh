@@ -1130,6 +1130,36 @@ python3 "$TMP/mini_nori.py" "$TMP/v37mini.elf" "$TMP/v37sa.iwo" "$TMP/v37sb.iwo"
 cmp -s "$TMP/v37one.elf" "$TMP/v37mini.elf" || fail "v37: 分割 (参照リンカ) と一括で出力が違う"
 echo "ok: v37: 構造体の分割コンパイルが一括と一致"
 
+# --- v38: Asari (encode の別出し) ---
+# 物差しは .iwo のバイト一致: iwac --object の出力と、
+# iwac --asari → Asari の出力が全く同じこと (doc/asari.md)
+gcc -std=c11 -O2 -o "$TMP/asari" asari/asari.c libdashi/libdashi.c || fail "v38: Asari のホストビルドに失敗"
+asari_check() {
+    # $1 = ラベル、残り = ソースファイル
+    label=$1; shift
+    "$IWAC" --kosaba --object "$@" > "$TMP/v38.iwo" || fail "v38: オブジェクト出力に失敗 ($label)"
+    "$IWAC" --kosaba --asari "$@" > "$TMP/v38.ias" || fail "v38: Asari 形式の出力に失敗 ($label)"
+    "$TMP/asari" "$TMP/v38.ias" > "$TMP/v38a.iwo" || fail "v38: Asari が失敗 ($label)"
+    cmp -s "$TMP/v38.iwo" "$TMP/v38a.iwo" || fail "v38: Asari の出力が内部 encode と違う ($label)"
+}
+asari_check hello examples/hello-kosaba.c
+for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+    asari_check "断片 $f" src/decls.c "src/$f.c"
+done
+echo "ok: v38: Asari が全断片で内部 encode とバイト一致"
+asari_check nori nori/nori.c libdashi/libdashi.c
+asari_check asari自身 asari/asari.c libdashi/libdashi.c
+asari_check rt kosaba/kosaba_rt.c
+asari_check 構造体 "$TMP/v37sa.c"
+echo "ok: v38: Asari が nori・Asari 自身・rt・構造体でも一致"
+# チェーン: iwac → Asari → nori が直接の ELF と一致
+"$IWAC" --kosaba --asari examples/hello-kosaba.c > "$TMP/v38h.ias" || fail "v38: チェーン用の出力に失敗"
+"$TMP/asari" "$TMP/v38h.ias" > "$TMP/v38h.iwo" || fail "v38: チェーンで Asari が失敗"
+"$TMP/nori" "$TMP/v38h.iwo" > "$TMP/v38h.elf" || fail "v38: チェーンで nori が失敗"
+"$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v38hd.elf" || fail "v38: 直接の ELF 出力に失敗"
+cmp -s "$TMP/v38h.elf" "$TMP/v38hd.elf" || fail "v38: チェーンの ELF が直接と違う"
+echo "ok: v38: iwac → Asari → nori のチェーンが直接出力と一致"
+
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る
 cat > "$TMP/ds_test.c" <<'DASHITEST'

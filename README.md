@@ -17,7 +17,17 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v37（構造体）を branch `v37` で追加
+## 現在地: v38（Asari の別出し）を branch `asari` で追加
+
+v38 は言語の変更ではなく、ツールチェーンの形の
+仕上げ: 符号化層 (encode) を独立プログラム
+**Asari**（`asari/asari.c`）として切り出した。
+iwac の新しい出口 `--kosaba --asari` が命令列を
+テキスト (.ias) で出し、Asari が符号化して
+オブジェクト (.iwo) を出す。出力が内部 encode と
+バイト一致することが物差しで、iwac → Asari →
+nori のチェーンが完成した（設計は doc/asari.md）。
+v37（構造体）は branch `v37` で追加済み。
 
 v33 で「分割コンパイル＋リンカ」への階段
 （doc/linking.md）の段4まで来た。iwac の7断片と

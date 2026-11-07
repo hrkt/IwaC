@@ -240,6 +240,9 @@ static int target_kosaba;
  * 決めず、穴の場所をここへ控えて encode の
  * オブジェクト書き出しに渡す */
 static int obj_mode;
+static int asari_mode;  /* Asari 形式で出す (v38、doc/asari.md)。
+                         * 立て方は obj_mode と同じで、出口だけ
+                         * write_asari に替わる */
 static int obj_prefix_insts;  /* 入口の断片の命令数
                                * (最終パスの値が残る) */
 static int obj_flush_site;    /* 入口の kosaba_flush

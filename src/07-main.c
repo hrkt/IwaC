@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
     int argi = 1;
     target_kosaba = 0;
     obj_mode = 0;
+    asari_mode = 0;
     if (argc >= 2 && str_eq(argv[1], "--kosaba")) {
         target_kosaba = 1;
         argi = 2;
@@ -28,6 +29,15 @@ int main(int argc, char **argv) {
         obj_mode = 1;
         argi++;
     }
+    /* Asari 形式 (v38、doc/asari.md): --object の代わりに
+     * --asari とすると、符号化する前の命令列をテキストで
+     * 出す。符号化は独立プログラム Asari の仕事になる。
+     * 生成の作法はオブジェクト出力と同じ (obj_mode も立てる) */
+    if (argc >= argi + 1 && str_eq(argv[argi], "--asari")) {
+        obj_mode = 1;
+        asari_mode = 1;
+        argi++;
+    }
     /* --out <名前>: KosabaOS 上での出力ファイル名
      * (v34。rt が hello.elf の代わりに使う) */
     if (argc >= argi + 2 && str_eq(argv[argi], "--out")) {
@@ -35,11 +45,11 @@ int main(int argc, char **argv) {
         argi += 2;
     }
     if (obj_mode && !target_kosaba) {
-        print_str(2, "iwac: --object は --kosaba と一緒に使います\n");
+        print_str(2, "iwac: --object / --asari は --kosaba と一緒に使います\n");
         return 1;
     }
     if (argc < argi + 1) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す (複数ファイルは連結して1つに)\n       iwac --kosaba --out <名前> <ファイル.c>   (OS 上の出力名を指定))\n");
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す (複数ファイルは連結して1つに)\n       iwac --kosaba --asari <ファイル.c>   (Asari 形式 (命令列のテキスト) を出す\n       iwac --kosaba --out <名前> <ファイル.c>   (OS 上の出力名を指定))\n");
         return 1;
     }
     if (target_kosaba)

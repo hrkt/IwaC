@@ -1809,10 +1809,35 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   詰める工夫が要りました。</p></div>
 </section>
 
+<!-- ================= v38 ================= -->
+<section class="phase" id="v38">
+  <div class="head"><span class="badge b-v4">v38</span><h2>Asari — 符号化を独立プログラムに</h2></div>
+  <p class="goal-line">目標：<b>コンパイラの第3層（符号化）を独立プログラムに切り出し、古典的なツールチェーンの形を完成させる。</b></p>
+  <p>iwac に新しい出口 <code>--asari</code> を足しました。命令列を
+  テキスト（.ias）で出し、独立プログラム <b>Asari</b> がそれを
+  符号化してオブジェクト（.iwo）にします。iwac → Asari → nori と
+  3つの道具がつながり、KosabaOS の上でもそのチェーンで
+  プログラムが作れるようになりました。</p>
+  <p>受け渡しの約束（どの即値が「命令番号」で、どれが
+  「名前で渡す穴」か）がこの版の設計の中心で、
+  <code>doc/asari.md</code> に書き切りました。Asari の出力が
+  iwac 内部の符号化とバイト単位で一致することが物差しです。
+  ついでに、将来ほかの CPU 向けの Asari を書くときの
+  見通し（Arm は近い、x86 は遠い）も設計書に残しました。
+  ただし本流のターゲットは RISC-V のままです。</p>
+  <div>
+    <span class="chip">命令列のテキスト化</span><span class="chip">バイト一致が物差し</span><span class="chip">チェーンの完成</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「リンカがどうせ捨てる桁」でも、出す側と受ける側で形を
+  揃えると決めないと、一致の物差しが使えませんでした。
+  境界の設計は、意味のない部分の決め方が一番効きます。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-07（v37 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-07（v38 時点）</p>
 </footer>
 
 </div>

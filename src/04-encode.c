@@ -498,7 +498,18 @@ static void write_object(void) {
         long col = 0;
         char *hex = "0123456789abcdef";
         for (int i = start; i < nasm; i++) {
+            /* 呼び出しの jal は、飛び先の代わりに印
+             * (負数) が入っている。符号化すると印の
+             * 値でオフセットの桁が埋まるが、リンカは
+             * その桁を捨てて自分で書き直す (nori は
+             * 下12ビットだけ残す)。そこで、穴の形は
+             * 「オフセット 0」で揃える (Asari の出力と
+             * バイト一致させるための正規化、v38) */
+            int saved_imm = asm_imm[i];
+            if (asm_op[i] == OP_JAL && saved_imm < 0)
+                asm_imm[i] = i;
             unsigned int w = encode_inst(i);
+            asm_imm[i] = saved_imm;
             wb[0] = (unsigned char)(w & 0xff);
             wb[1] = (unsigned char)((w >> 8) & 0xff);
             wb[2] = (unsigned char)((w >> 16) & 0xff);
@@ -673,7 +684,246 @@ static void write_object(void) {
     obj_str("end\n");
 }
 
+/* ================================================================
+ * Asari 形式の出力 (v38、設計は doc/asari.md)
+ * 符号化する前の命令列を、付属情報と一緒にテキストで
+ * 出す。符号化は独立プログラム Asari の仕事になる。
+ * 材料は write_object と同じで、違うのは「コードの
+ * バイト列」の代わりに「命令列そのもの」を書くことと、
+ * 穴の位置をバイト数でなく命令番号で書くこと
+ * ================================================================ */
+
+/* op の名前。番号は iwac 内部の事情なので持ち出さず、
+ * 名前を仕様の通貨にする (doc/asari.md) */
+static char *op_name(int op) {
+    if (op == OP_LUI) return "lui";
+    if (op == OP_ADDI) return "addi";
+    if (op == OP_ADD) return "add";
+    if (op == OP_SUB) return "sub";
+    if (op == OP_SB) return "sb";
+    if (op == OP_WFI) return "wfi";
+    if (op == OP_LBU) return "lbu";
+    if (op == OP_AUIPC) return "auipc";
+    if (op == OP_BEQ) return "beq";
+    if (op == OP_JAL) return "jal";
+    if (op == OP_SD) return "sd";
+    if (op == OP_LD) return "ld";
+    if (op == OP_JALR) return "jalr";
+    if (op == OP_SLTU) return "sltu";
+    if (op == OP_SLTIU) return "sltiu";
+    if (op == OP_AND) return "and";
+    if (op == OP_MUL) return "mul";
+    if (op == OP_DIV) return "div";
+    if (op == OP_SLT) return "slt";
+    if (op == OP_XORI) return "xori";
+    if (op == OP_ECALL) return "ecall";
+    if (op == OP_SLL) return "sll";
+    if (op == OP_SRA) return "sra";
+    if (op == OP_OR) return "or";
+    if (op == OP_XOR) return "xor";
+    if (op == OP_REM) return "rem";
+    if (op == OP_SLLI) return "slli";
+    if (op == OP_BNE) return "bne";
+    if (op == OP_ADDIW) return "addiw";
+    if (op == OP_SRLI) return "srli";
+    if (op == OP_LH) return "lh";
+    if (op == OP_LHU) return "lhu";
+    if (op == OP_LW) return "lw";
+    if (op == OP_LWU) return "lwu";
+    if (op == OP_SH) return "sh";
+    if (op == OP_SW) return "sw";
+    if (op == OP_DIVU) return "divu";
+    if (op == OP_REMU) return "remu";
+    if (op == OP_SRL) return "srl";
+    if (op == OP_SRAI) return "srai";
+    return "?";
+}
+
+static void write_asari(void) {
+    /* 入口の断片を持つか (write_object と同じ判定) */
+    int has_entry = (prog_main >= 0 || prog_stmts != -1 ||
+                     prog_has_final);
+    int start = has_entry ? 0 : obj_prefix_insts;
+
+    obj_str("asari 1\n");
+    obj_str("target kosaba\n");
+    obj_str("prefix ");
+    obj_num(obj_prefix_insts);
+    obj_str("\n");
+    obj_str("flush ");
+    obj_num(obj_flush_site);
+    obj_str("\n");
+    if (has_entry)
+        obj_str("entry 1\n");
+    /* 命令列 (全部を出す。入口の無い断片では、先頭の
+     * prefix 個を Asari が落とす)。呼び出しの jal は
+     * imm を 0 にし、行き先は下の call 注記で渡す */
+    for (int i = 0; i < nasm; i++) {
+        int imm = asm_imm[i];
+        if (asm_op[i] == OP_JAL && imm < 0)
+            imm = 0;
+        obj_str("i ");
+        obj_str(op_name(asm_op[i]));
+        obj_str(" ");
+        obj_num(asm_rd[i]);
+        obj_str(" ");
+        obj_num(asm_rs1[i]);
+        obj_str(" ");
+        obj_num(asm_rs2[i]);
+        obj_str(" ");
+        obj_num(imm);
+        obj_str("\n");
+    }
+    /* 注記: 呼び出し (write_object の振り分けと同じ。
+     * 位置は命令番号) */
+    for (int i = start; i < nasm; i++) {
+        if (asm_op[i] != OP_JAL || asm_imm[i] >= 0)
+            continue;
+        if (i == obj_flush_site || asm_imm[i] == -1000003) {
+            obj_str("callopt ");
+            obj_num(i);
+            obj_str(" kosaba_flush\n");
+        } else {
+            obj_str("call ");
+            obj_num(i);
+            obj_str(" ");
+            obj_str(func_names[-asm_imm[i] - 1]);
+            obj_str("\n");
+        }
+    }
+    /* 注記: 住所作り (gen の控えの順、位置は命令番号) */
+    for (int r = 0; r < obj_nreloc; r++) {
+        if (obj_reloc_kind[r] == RLOC_STR) {
+            obj_str("addrstr ");
+            obj_num(obj_reloc_site[r]);
+            obj_str(" ");
+            obj_num(str_off[obj_reloc_idx[r]]);
+            obj_str("\n");
+        } else if (obj_reloc_kind[r] == RLOC_VAR) {
+            obj_str("addr ");
+            obj_num(obj_reloc_site[r]);
+            obj_str(" var ");
+            obj_str(var_names[obj_reloc_idx[r]]);
+            obj_str("\n");
+        } else {
+            obj_str("addr ");
+            obj_num(obj_reloc_site[r]);
+            obj_str(" arr ");
+            obj_str(arr_names[obj_reloc_idx[r]]);
+            obj_str("\n");
+        }
+    }
+    for (int r = 0; r < obj_nabs; r++) {
+        obj_str("addabs ");
+        obj_num(obj_abs_site[r]);
+        obj_str(" ");
+        obj_num((long)(unsigned int)obj_abs_val[r]);
+        obj_str("\n");
+    }
+    /* データ側の写し (write_object と同じ材料を、
+     * func の位置と大きさだけ命令の単位で書く) */
+    obj_str("strings ");
+    obj_num(str_used);
+    obj_str("\n");
+    obj_hex((unsigned char *)str_pool, str_used);
+    obj_str("arrays ");
+    obj_num(arr_used);
+    obj_str("\n");
+    for (int f = 0; f < nfunc; f++) {
+        if (func_has_body[f]) {
+            long size = (long)(nasm - func_entry[f]);
+            for (int g = f + 1; g < nfunc; g++) {
+                if (func_has_body[g]) {
+                    size = (long)(func_entry[g] - func_entry[f]);
+                    break;
+                }
+            }
+            obj_str("func ");
+            obj_str(func_names[f]);
+            obj_str(" ");
+            obj_num(func_entry[f]);
+            obj_str(" ");
+            obj_num(size);
+            obj_str("\n");
+        } else {
+            obj_str("decl ");
+            obj_str(func_names[f]);
+            obj_str("\n");
+        }
+    }
+    for (int s = 0; s < var_nglobal; s++) {
+        for (int v = 0; v < nvar; v++) {
+            if (var_owner[v] >= 0 || var_slot[v] != s)
+                continue;
+            int ns = var_nglobal - s;
+            for (int w = 0; w < nvar; w++) {
+                if (var_owner[w] >= 0 || var_slot[w] <= s)
+                    continue;
+                if (var_slot[w] - s < ns)
+                    ns = var_slot[w] - s;
+            }
+            obj_str(var_init_kind[v] != 0 ? "var " : "varc ");
+            obj_str(var_names[v]);
+            obj_str(" ");
+            obj_num(ns);
+            obj_str("\n");
+            break;
+        }
+    }
+    for (int a = 0; a < narr; a++) {
+        if (arr_owner[a] >= 0)
+            continue;
+        long bytes = (long)arr_used - (long)arr_off[a];
+        for (int b = 0; b < narr; b++) {
+            if (arr_owner[b] >= 0 || b == a)
+                continue;
+            if (arr_off[b] > arr_off[a] &&
+                (long)arr_off[b] - (long)arr_off[a] < bytes)
+                bytes = (long)arr_off[b] - (long)arr_off[a];
+        }
+        obj_str("arr ");
+        obj_str(arr_names[a]);
+        obj_str(" ");
+        obj_num(arr_off[a]);
+        obj_str(" ");
+        obj_num(bytes);
+        obj_str("\n");
+    }
+    for (int s = 0; s < var_nglobal; s++) {
+        for (int v = 0; v < nvar; v++) {
+            if (var_owner[v] >= 0 || var_slot[v] != s)
+                continue;
+            if (var_init_kind[v] == 1) {
+                obj_str("init ");
+                obj_str(var_names[v]);
+                obj_str(" ");
+                obj_num(var_init_val[v]);
+                obj_str("\n");
+            } else if (var_init_kind[v] == 2) {
+                obj_str("iptr ");
+                obj_str(var_names[v]);
+                obj_str(" str ");
+                obj_num(str_off[var_init_val[v]]);
+                obj_str("\n");
+            }
+            break;
+        }
+    }
+    for (int f = 0; f < nfunc; f++) {
+        if (func_called[f] && !func_has_body[f]) {
+            obj_str("undef ");
+            obj_str(func_names[f]);
+            obj_str("\n");
+        }
+    }
+    obj_str("end\n");
+}
+
 static void write_binary(void) {
+    if (asari_mode) {
+        write_asari();
+        return;
+    }
     if (obj_mode) {
         write_object();
         return;

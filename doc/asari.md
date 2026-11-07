@@ -122,6 +122,14 @@ addabs  <命令番号> <絶対アドレス>
 符号化のときに自分の対応表でバイト位置に直し、
 .iwo 側の再配置レコードとして出す。
 
+呼び出しの jal の符号化は「オフセット 0」を
+正規形とする。リンカは呼び出し位置のオフセットの
+桁を捨てて自分で書き直す (nori は下12ビットだけ
+残す) ので、穴の桁に何が入っていても意味は
+変わらない。そこで iwac 内部の encode も同じ形に
+揃えた (v38 の変更。従来は内部の印 (負数) の値で
+桁が埋まっていた)。
+
 入口の情報:
 
 ```
@@ -221,7 +229,30 @@ target kosaba       現行 .iwo が持つ対象の行と同じ
   なる。形式は x86 を禁止しないが、対応は
   「gen の選択肢」が先で、v1 の射程には入れない
 
-## 実装の段取り (次の仕事)
+## 実装の記録 (v38、2026-11-07)
+
+上の段取りの 1〜3 まで実装済み:
+
+- iwac に `--kosaba --asari` の出口を足した
+  (src/04-encode.c の write_asari。材料は
+  write_object と共有)。内部 encode は残してある
+- Asari 本体は asari/asari.c (iwac の言語で書き、
+  libdashi を使う。nori と同じ作り)。符号化は
+  内部 encode_inst の移植で、計算は long で行い
+  最後に32ビットに丸める
+- test.sh に物差しを入れた: hello、全断片
+  (decls.c + 各断片)、nori、Asari 自身、rt、
+  構造体の断片で「--object と --asari → Asari が
+  バイト一致」、加えて iwac → Asari → nori の
+  チェーンが直接の ELF と一致すること
+- KosabaOS 上 (virt) でもチェーンを通した:
+  Nish から iwac.elf --asari → asari.elf →
+  nori.elf → hello.elf で "Hello, World!"
+- Misoni への差し込み (段取りの 4) はまだ。
+  チェーンは手で回せるようになったので、
+  マニフェストで回す形は必要になってから
+
+## 実装の段取り (当初の計画)
 
 1. iwac に `--asari` 出力を足す (04-encode に
    書き手を1つ足し、材料は write_object と共有
