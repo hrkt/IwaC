@@ -1040,6 +1040,34 @@ else
     echo "skip: 段5: Misoni の確認 (nori が無いため)"
 fi
 
+# --- v35: 幅のある整数型 ---
+# 折り返し・符号拡張・符号なし演算・要素の歩幅・変換を
+# 実行で確かめる (値は putc の並びで比べる)
+"$IWAC" 'int main() { uint32 x = 0xFFFFFFFF; x = x + 1; putc(48 + (x == 0)); uint32 z = 0; z = z - 1; putc(48 + (z == 0xFFFFFFFF)); return 0; }' > "$TMP/v35a.bin"
+check_tail "$TMP/v35a.bin" 11 "v35: uint32 の折り返し (+1 で 0、-1 で最大)"
+"$IWAC" 'int main() { int32 y = -2147483647 - 1; putc(48 + (y == -2147483647 - 1)); y = y >> 31; putc(48 + (y == -1)); int16 s = 32767; s = s + 1; putc(48 + (s == -32767 - 1)); return 0; }' > "$TMP/v35b.bin"
+check_tail "$TMP/v35b.bin" 111 "v35: int32 の最小値と算術シフト、int16 の折り返し"
+"$IWAC" 'int main() { uint32 d = 0x80000000; d = d / 2; putc(48 + (d == 0x40000000)); uint32 m = 0xFFFFFFFF; putc(48 + (m % 7 == 3)); uint32 r = 0x80000000; r = r >> 4; putc(48 + (r == 0x08000000)); return 0; }' > "$TMP/v35c.bin"
+check_tail "$TMP/v35c.bin" 111 "v35: uint32 の除算 (divu)・剰余 (remu)・論理シフト"
+"$IWAC" 'int main() { uint16 b[4]; b[0] = 65535; b[1] = 4660; putc(48 + (b[0] == 65535)); putc(48 + (b[1] == 4660)); uint32 c[2]; uint32 *p = c; *p = 0xDEADBEEF; p[1] = 7; putc(48 + (c[0] % 256 == 239)); putc(48 + (c[1] == 7)); return 0; }' > "$TMP/v35d.bin"
+check_tail "$TMP/v35d.bin" 1111 "v35: uint16 配列の歩幅、uint32 ポインタの読み書き"
+"$IWAC" 'int main() { long v = -1; uint32 u = (uint32)v; putc(48 + (u == 0xFFFFFFFF)); int32 s = (int32)0x80000000; putc(48 + (s < 0)); return 0; }' > "$TMP/v35e.bin"
+check_tail "$TMP/v35e.bin" 11 "v35: 幅つきへのキャスト (切り詰めと符号拡張)"
+"$IWAC" 'int main() { uint64 w = (uint64)-1; w = w / 16; putc(48 + ((w >> 32) == 0x0FFFFFFF)); putc(48 + ((w & 0xFFFFFFFF) == 0xFFFFFFFF)); uint64 b = (uint64)-1; putc(48 + (b > 1)); putc(48 + ((b >> 60) == 0xF)); return 0; }' > "$TMP/v35f.bin"
+check_tail "$TMP/v35f.bin" 1111 "v35: uint64 の除算・符号なし比較・論理シフト"
+"$IWAC" 'uint32 inc32(uint32 a) { return a + 1; } int main() { putc(48 + (inc32(0xFFFFFFFF) == 0)); uint32 g = 0xFFFFFFFF; g++; putc(48 + (g == 0)); return 0; }' > "$TMP/v35g.bin"
+check_tail "$TMP/v35g.bin" 11 "v35: 関数の戻り値と引数の型、++ の折り返し"
+# 幅つきの型でも分割コンパイルが一括と一致する (nori が
+# ある環境では実リンクでも確かめる)
+printf 'uint32 g;\nuint32 getg() { return g; }\nvoid setg(uint32 v) { g = v; }\n' > "$TMP/v35sa.c"
+printf 'uint32 g;\nuint32 getg();\nvoid setg(uint32 v);\nint main() { setg(0xFFFFFFFF); return getg() == 0xFFFFFFFF ? 65 : 66; }\n' > "$TMP/v35sb.c"
+"$IWAC" --kosaba --object "$TMP/v35sa.c" > "$TMP/v35sa.iwo" || fail "v35: オブジェクト出力 (a) に失敗"
+"$IWAC" --kosaba --object "$TMP/v35sb.c" > "$TMP/v35sb.iwo" || fail "v35: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba "$TMP/v35sa.c" "$TMP/v35sb.c" > "$TMP/v35one.elf" || fail "v35: 一括コンパイルに失敗"
+python3 "$TMP/mini_nori.py" "$TMP/v35mini.elf" "$TMP/v35sa.iwo" "$TMP/v35sb.iwo" >/dev/null || fail "v35: 参照リンカでのリンクに失敗"
+cmp -s "$TMP/v35one.elf" "$TMP/v35mini.elf" || fail "v35: 分割 (参照リンカ) と一括で出力が違う"
+echo "ok: v35: 幅つきの型の分割コンパイルが一括と一致"
+
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る
 cat > "$TMP/ds_test.c" <<'DASHITEST'

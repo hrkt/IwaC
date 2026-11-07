@@ -87,6 +87,27 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                (4u << 12) | ((unsigned int)rd << 7) | 0x03u;
     }
+    if (op == OP_LH || op == OP_LHU || op == OP_LW ||
+        op == OP_LWU) {
+        /* lh / lhu / lw / lwu rd, imm(rs1) -- I 形式 (v35)。
+         * lbu と同じ並びで、funct3 が幅と符号を決める:
+         * lh=1 (2バイト符号拡張)、lw=2 (4バイト符号
+         * 拡張)、lhu=5 (2バイトゼロ拡張)、lwu=6
+         * (4バイトゼロ拡張) */
+        unsigned int f3 = op == OP_LH ? 1u :
+                          op == OP_LW ? 2u :
+                          op == OP_LHU ? 5u : 6u;
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (f3 << 12) | ((unsigned int)rd << 7) | 0x03u;
+    }
+    if (op == OP_SH || op == OP_SW) {
+        /* sh / sw rs2, imm(rs1) -- S 形式 (v35)。sb と
+         * 同じ並びで、funct3 が sh=1、sw=2 */
+        unsigned int f3 = op == OP_SH ? 1u : 2u;
+        return ((unsigned int)(imm >> 5) << 25) |
+               ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (f3 << 12) | ((unsigned int)(imm & 31) << 7) | 0x23u;
+    }
     if (op == OP_SD) {
         /* sd rs2, imm(rs1) -- S 形式 (sb と同じ並び)。
          * sb との違いは funct3 が 3 (8バイト幅) なこと */
@@ -156,6 +177,31 @@ static unsigned int encode_inst(int i) {
         return (1u << 25) | ((unsigned int)rs2 << 20) |
                ((unsigned int)rs1 << 15) | (6u << 12) |
                ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_DIVU || op == OP_REMU) {
+        /* divu / remu rd, rs1, rs2 -- R 形式 (v35、
+         * M 拡張)。funct7 が 1、funct3 は divu=5、
+         * remu=7。除数が 0 のときは div 系と同じ
+         * 決まり (divu は全ビット 1、remu は被除数) */
+        unsigned int f3 = op == OP_DIVU ? 5u : 7u;
+        return (1u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (f3 << 12) |
+               ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_SRL) {
+        /* srl rd, rs1, rs2 -- R 形式 (v35)。sra との
+         * 違いは funct7 が 0 (空いた上位は 0 で埋まる) */
+        return ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (5u << 12) |
+               ((unsigned int)rd << 7) | 0x33u;
+    }
+    if (op == OP_SRAI) {
+        /* srai rd, rs1, shamt -- I 形式 (v35)。srli と
+         * の違いは即値の上位 (funct7) が 0x20 で、符号
+         * ビットが空いた上位に入る */
+        return ((unsigned int)(0x400 | (imm & 63)) << 20) |
+               ((unsigned int)rs1 << 15) | (5u << 12) |
+               ((unsigned int)rd << 7) | 0x13u;
     }
     if (op == OP_SLT) {
         /* slt rd, rs1, rs2 -- R 形式。sltu との違いは

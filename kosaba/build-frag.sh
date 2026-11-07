@@ -66,10 +66,10 @@ apply() {
 
 # 02-parse.c: ノード表・変数表・文字列プール
 apply 02-parse.c 'str_pool[16384]' 'str_pool[8192]' 1
-apply 02-parse.c '[20480]' '[8192]' 5
+apply 02-parse.c '[20480]' '[8192]' 6
 apply 02-parse.c 'nnode >= 20480' 'nnode >= 8192' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 8191' 1
-apply 02-parse.c '[1024]' '[512]' 8
+apply 02-parse.c '[1024]' '[512]' 9
 apply 02-parse.c 'nvar >= 1024' 'nvar >= 512' 1
 # 03-gen.c: 命令表 (5つ+パッチ表+緩和の印) と再配置表
 apply 03-gen.c '[40960]' '[16384]' 7

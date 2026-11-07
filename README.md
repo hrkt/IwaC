@@ -17,7 +17,7 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v34 + 段6（main 取り込み済み）。libdashi を branch `libdashi` で追加
+## 現在地: v35（幅のある整数型）を branch `v35` で追加
 
 v33 で「分割コンパイル＋リンカ」への階段
 （doc/linking.md）の段4まで来た。iwac の7断片と

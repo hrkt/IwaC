@@ -111,6 +111,12 @@ static int NODE_SYSCALL3 = 53; /* 組み込み syscall3 (v27)。
                              * 番号、a0、a1、a2)。KosabaOS の
                              * システムコールを直接呼ぶ式で、
                              * 値は戻り値 (a0) */
+static int NODE_CAST = 54;   /* 型変換 (v35)。node_val =
+                             * 変換先の型タグ、node_lhs =
+                             * 相手の式。幅つきの型への
+                             * 変換だけがノードになり、
+                             * 従来の型への変換は今まで
+                             * どおり読み捨てる */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -134,6 +140,7 @@ static int node_lhs[20480];
 static int node_rhs[20480];
 static int node_next[20480]; /* 文の並び用: 次の文ノード (-1 で終わり)。
                             * 式のノードでは使わない */
+static int node_etype[20480]; /* 式の型タグ (生成時に付ける、v35) */
 static int nnode;  /* 作ったノードの数 */
 
 /* --- 変数の名簿 (記号表) ---
@@ -155,6 +162,10 @@ static int var_name_len[1024];
 static int var_owner[1024];
 static int var_slot[1024];
 static int var_bsize[1024];
+/* 型タグ (v35): 基本サイズ (1/2/4/8) に、符号なし
+ * なら 16、幅つきの型なら 32 を足したもの。従来の
+ * 型は char が 1、それ以外は 8 (印なし) */
+static int var_etype[1024];
 static int var_plevel[1024];
 /* グローバル変数の初期値 (v24): ファイル範囲の宣言の
  * 初期化子を定数として記録し、静的領域の初期イメージ
@@ -209,7 +220,7 @@ static int find_array(char *name, int len);
  * is_decl が 0 (代入から) のときは、見えている変数が
  * あればそれ (再代入)、無ければ今の場所に新規作成 */
 static int define_var_typed(char *name, int len, int bsize,
-                            int plevel, int is_decl) {
+                            int plevel, int is_decl, int etype) {
     if (find_array(name, len) >= 0) {
         errmsg = "その名前は配列に使われています";
         return -1;
@@ -235,6 +246,7 @@ static int define_var_typed(char *name, int len, int bsize,
     var_name_len[i] = len;
     var_owner[i] = parse_cur_func;
     var_bsize[i] = bsize;
+    var_etype[i] = etype;
     var_plevel[i] = plevel;
     var_init_kind[i] = 0;  /* 初期値は宣言側が後で付ける */
     if (parse_cur_func >= 0)
@@ -245,7 +257,7 @@ static int define_var_typed(char *name, int len, int bsize,
 }
 
 static int define_var(char *name, int len) {
-    return define_var_typed(name, len, 8, 0, 0);
+    return define_var_typed(name, len, 8, 0, 0, 8);
 }
 
 /* --- プログラムの形 ---
@@ -277,6 +289,7 @@ static char func_names[192][32];
 static int func_name_len[192];
 static int func_nparams[192];
 static int func_param_var[192][8];
+static int func_ret_etype[192]; /* 戻り値の型タグ (v35) */
 static int func_body[192];
 static int func_entry[192];
 /* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
@@ -322,6 +335,7 @@ static int arr_name_len[128];
 static int arr_size[128];
 static int arr_cols[128];
 static int arr_esize[128];
+static int arr_etype[128];   /* 要素の型タグ (v35) */
 static int arr_owner[128];
 static int arr_off[128];
 static int arr_foff[128];
@@ -370,7 +384,7 @@ static int find_array(char *name, int len) {
  * 宣言場所で置き場所が決まる: 関数の中ならフレーム、
  * 外なら静的な領域。失敗したら -1 */
 static int define_array(char *name, int len, int rows, int cols,
-                        int esize) {
+                        int esize, int etype) {
     for (int i = 0; i < narr; i++) {
         if (arr_owner[i] == parse_cur_func &&
             arr_name_eq(i, name, len)) {
@@ -381,7 +395,7 @@ static int define_array(char *name, int len, int rows, int cols,
              * 再宣言は食い違いとして止める */
             if (parse_cur_func < 0 &&
                 arr_size[i] == rows && arr_cols[i] == cols &&
-                arr_esize[i] == esize)
+                arr_esize[i] == esize && arr_etype[i] == etype)
                 return i;
             if (parse_cur_func < 0) {
                 errmsg = "配列の大きさが宣言ごとに違います";
@@ -413,6 +427,7 @@ static int define_array(char *name, int len, int rows, int cols,
     arr_size[i] = rows;
     arr_cols[i] = cols;
     arr_esize[i] = esize;
+    arr_etype[i] = etype;
     arr_owner[i] = parse_cur_func;
     if (parse_cur_func < 0) {
         arr_off[i] = arr_used;
@@ -703,6 +718,8 @@ static int parse_string_node(void) {
  * expect_char も下で定義する道具の先行宣言 */
 static int parse_expr(void);
 static int parse_type(void);  /* キャストの判定で先に使う (v25) */
+static int parse_type_etype;   /* 型タグ (本体は型の節、v35) */
+static int parse_type_plevel;  /* ポインタの段数 (同上) */
 static int parse_rel_expr(void);  /* eq の段から呼ばれる (v11) */
 static int parse_unary_expr(void); /* 単項の段 (v19)。文からも使う */
 static int expect_char(char c, char *msg);
@@ -1011,8 +1028,19 @@ static int parse_unary_expr(void) {
         if (parse_type()) {
             skip_spaces();
             if (*cur == ')') {
+                int et = parse_type_etype;
+                int pl = parse_type_plevel;
                 cur++;
-                return parse_unary_expr();
+                int operand = parse_unary_expr();
+                if (operand < 0)
+                    return -1;
+                /* 幅つきの型への変換は、正規形への
+                 * 切り詰め/拡張が要るのでノードにする
+                 * (v35)。ポインタへの変換と従来の型
+                 * への変換は今までどおり読み捨てる */
+                if ((et & 32) && pl == 0)
+                    return new_node(NODE_CAST, et, operand, 0);
+                return operand;
             }
         }
         cur = save;
@@ -1456,14 +1484,29 @@ static int is_type_word(void) {
     return ident_is("void") || ident_is("char") ||
            ident_is("int") || ident_is("long") ||
            ident_is("short") || ident_is("unsigned") ||
-           ident_is("signed");
+           ident_is("signed") ||
+           ident_is("int16") || ident_is("uint16") ||
+           ident_is("int32") || ident_is("uint32") ||
+           ident_is("int64") || ident_is("uint64");
+}
+
+/* 幅つきの型の言葉なら、その型タグを返す (v35)。
+ * 違えば 0 */
+static int sized_type_etype(void) {
+    if (ident_is("int16"))  return 2 + 32;
+    if (ident_is("uint16")) return 2 + 16 + 32;
+    if (ident_is("int32"))  return 4 + 32;
+    if (ident_is("uint32")) return 4 + 16 + 32;
+    if (ident_is("int64"))  return 8 + 32;
+    if (ident_is("uint64")) return 8 + 16 + 32;
+    return 0;
 }
 
 /* 直前に読んだ型の情報 (v21): 宣言が変数を作るときに使う。
  * 先読みで呼ばれた場合は上書きされるが、本読みで最後に
  * 残るのが正しい値になる */
 static int parse_type_bsize;   /* char を含めば 1、それ以外は 8 */
-static int parse_type_plevel;  /* ポインタの段数 (* の数) */
+/* parse_type_plevel と parse_type_etype は前方で宣言済み */
 
 static int parse_type(void) {
     if (!is_ident_start(*cur))
@@ -1481,6 +1524,7 @@ static int parse_type(void) {
     if (!is_type_word())
         return 0;
     int has_char = ident_is("char");
+    int sized = sized_type_etype();  /* 幅つきの型 (v35) */
     /* 型の言葉が続く間は読み進める (unsigned long や
      * long long のような組み合わせを受けるため) */
     for (;;) {
@@ -1498,6 +1542,9 @@ static int parse_type(void) {
         }
         if (ident_is("char"))
             has_char = 1;
+        int sk = sized_type_etype();
+        if (sk)
+            sized = sk;
     }
     skip_spaces();
     int stars = 0;
@@ -1506,7 +1553,14 @@ static int parse_type(void) {
         cur++;
         skip_spaces();
     }
-    parse_type_bsize = has_char ? 1 : 8;
+    if (sized) {
+        /* 幅つきの型があれば、それが型そのもの */
+        parse_type_etype = sized;
+        parse_type_bsize = sized & 15;
+    } else {
+        parse_type_bsize = has_char ? 1 : 8;
+        parse_type_etype = parse_type_bsize;
+    }
     parse_type_plevel = stars;
     return 1;
 }
@@ -1556,6 +1610,7 @@ static int parse_funcdef(void) {
         func_has_body[f] = 0;
         func_called[f] = 0;
     }
+    func_ret_etype[f] = parse_type_etype;  /* 戻り値の型 (v35) */
     if (!expect_char('(', "関数名の後には ( が必要です"))
         return 0;
     /* 引数はまず「型と名前」を集めるだけにする。変数
@@ -1565,6 +1620,7 @@ static int parse_funcdef(void) {
     char pnames[8][32];
     int plens[8];
     int pbs[8];
+    int pet[8];   /* 引数の型タグ (v35) */
     int ppl[8];
     int np = 0;
     int params_done = 0;  /* (void) は引数なしと同義 (v25) */
@@ -1603,6 +1659,7 @@ static int parse_funcdef(void) {
                 return 0;
             }
             pbs[np] = parse_type_bsize;
+            pet[np] = parse_type_etype;
             ppl[np] = parse_type_plevel;
             plens[np] = 0;
             skip_spaces();
@@ -1655,7 +1712,7 @@ static int parse_funcdef(void) {
             return 0;
         }
         int var = define_var_typed(pnames[k], plens[k], pbs[k],
-                                   ppl[k], 1);
+                                   ppl[k], 1, pet[k]);
         if (var < 0)
             return 0;
         func_param_var[f][k] = var;
@@ -2005,6 +2062,7 @@ static int parse_decl_stmt(void) {
     }
     int bsize = parse_type_bsize;
     int plevel = parse_type_plevel;
+    int etype = parse_type_etype;
     skip_spaces();
     if (!parse_ident()) {
         errmsg = "宣言には名前が必要です";
@@ -2050,7 +2108,9 @@ static int parse_decl_stmt(void) {
          * ポインタなので 8 バイト。そうでなければ型の
          * 基本の大きさ (char は 1、それ以外は 8) */
         int esize = plevel >= 1 ? 8 : bsize;
-        int a = define_array(name_buf, name_len, size, cols, esize);
+        int eet = plevel >= 1 ? 8 : etype;
+        int a = define_array(name_buf, name_len, size, cols,
+                             esize, eet);
         if (a < 0)
             return -1;
         return new_node(NODE_DECL, a, 0, 0);
@@ -2062,7 +2122,7 @@ static int parse_decl_stmt(void) {
         int expr = parse_expr();
         if (expr < 0)
             return -1;
-        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1);
+        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1, etype);
         if (var < 0)
             return -1;
         if (!expect_char(';', "宣言の終わりには ; が必要です"))
@@ -2093,7 +2153,7 @@ static int parse_decl_stmt(void) {
     }
     if (*cur == ';') {
         cur++;
-        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1);
+        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1, etype);
         if (var < 0)
             return -1;
         return new_node(NODE_VDECL, var, 0, 0);

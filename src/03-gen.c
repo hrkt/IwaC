@@ -76,6 +76,16 @@ static int OP_SRLI = 29; /* 論理右シフト即値 (v27)。I 形式、
                           * funct3=5、imm はシフト量。
                           * 32ビット定数を 0 埋めで 64 ビットに
                           * 広げる (gen_load_u32) ときに使う */
+static int OP_LH = 30;   /* 2バイト読み (符号拡張、v35) */
+static int OP_LHU = 31;  /* 2バイト読み (ゼロ拡張、v35) */
+static int OP_LW = 32;   /* 4バイト読み (符号拡張、v35) */
+static int OP_LWU = 33;  /* 4バイト読み (ゼロ拡張、v35) */
+static int OP_SH = 34;   /* 2バイト書き (v35) */
+static int OP_SW = 35;   /* 4バイト書き (v35) */
+static int OP_DIVU = 36; /* 符号なし割り算 (v35、M 拡張) */
+static int OP_REMU = 37; /* 符号なし剰余 (v35、M 拡張) */
+static int OP_SRL = 38;  /* 論理右シフト (v35) */
+static int OP_SRAI = 39; /* 算術右シフト即値 (v35) */
 
 static int asm_op[40960];
 static int asm_rd[40960];
@@ -352,30 +362,6 @@ static void gen_load_u32(int reg, int v) {
     asm_push(OP_SRLI, reg, reg, 0, 32);
 }
 
-/* ポインタ読み書き (*p) で触る先の大きさ (v27)。
- * 先が変数 (ポインタ) なら elem_esize と同じ決め方:
- * 段数 2 以上が指すのはポインタ自体なので 8、段数 1 は
- * 宣言の基本の大きさ (char* は 1、int* / long* は 8)。
- * 先が配列の名前なら要素の大きさ。絶対アドレス (数) と
- * 文字列は従来どおり 1 バイト (デバイスの窓口や文字の
- * 読み書きが前提のため) */
-static int deref_esize(int addr) {
-    if (node_kind[addr] == NODE_VAR) {
-        int var = node_val[addr];
-        if (var_plevel[var] >= 2)
-            return 8;
-        if (var_plevel[var] == 1)
-            return var_bsize[var];
-        /* 段数 0 はポインタとして宣言されていない
-         * 変数 (代入で作られた変数が文字列を持つ、
-         * 昔からの使い方): 従来どおり 1 バイト */
-        return 1;
-    }
-    if (node_kind[addr] == NODE_ARRAY)
-        return arr_esize[node_val[addr]];
-    return 1;
-}
-
 /* 要素ノード (INDEX / INDEX2 / PINDEX / INDEX_STORE) が
  * 指す要素の大きさ (v23)。配列なら宣言で決めた要素の
  * 大きさ、ポインタなら「指す先の大きさ」: ポインタの
@@ -393,6 +379,90 @@ static int elem_esize(int node) {
         return 1;
     }
     return arr_esize[node_val[node]];
+}
+
+/* ---- 型タグ (etype、v35) の道具 ----
+ * etype は基本サイズ (1/2/4/8) + 符号なし 16 +
+ * 幅つき 32。値は正規形 (符号つきは符号拡張、
+ * 符号なしはゼロ拡張した 64ビット) で保持する */
+
+/* 要素ノードが指す要素の型タグ */
+static int elem_etype(int node) {
+    if (node_kind[node] == NODE_PINDEX) {
+        int var = node_val[node];
+        if (var_plevel[var] >= 2)
+            return 8;
+        if (var_plevel[var] == 1)
+            return var_etype[var];
+        return 1;  /* 段数 0 は従来どおり 1バイト */
+    }
+    return arr_etype[node_val[node]];
+}
+
+/* ポインタ読み書きで触る先の型タグ */
+static int deref_etype(int addr) {
+    if (node_kind[addr] == NODE_VAR) {
+        int var = node_val[addr];
+        if (var_plevel[var] >= 2)
+            return 8;
+        if (var_plevel[var] == 1)
+            return var_etype[var];
+        return 1;
+    }
+    if (node_kind[addr] == NODE_ARRAY)
+        return arr_etype[node_val[addr]];
+    return 1;
+}
+
+/* メモリ読みの命令: 幅つきは幅の命令、要素の
+ * 1バイトは lbu、それ以外は ld */
+static int mem_load_op(int et) {
+    if (et & 32) {
+        if ((et & 15) == 2)
+            return (et & 16) ? OP_LHU : OP_LH;
+        if ((et & 15) == 4)
+            return (et & 16) ? OP_LWU : OP_LW;
+    }
+    if ((et & 15) == 1)
+        return OP_LBU;
+    return OP_LD;
+}
+
+/* メモリ書きの命令 (mem_load_op と対) */
+static int mem_store_op(int et) {
+    if (et & 32) {
+        if ((et & 15) == 2)
+            return OP_SH;
+        if ((et & 15) == 4)
+            return OP_SW;
+    }
+    if ((et & 15) == 1)
+        return OP_SB;
+    return OP_SD;
+}
+
+/* 変数の「値」の型タグ: ポインタ変数の値は住所
+ * なので 8、そうでなければ宣言のタグ */
+static int var_value_etype(int var) {
+    return var_plevel[var] > 0 ? 8 : var_etype[var];
+}
+
+/* t1 の値を型タグの正規形に直す (v35)。幅つきで
+ * 8バイト未満のときだけ命令が出る: 符号なしは
+ * slli/srli で上位を落とし、符号つきは slli/srai
+ * で符号を広げる */
+static void emit_canon(int et) {
+    if (!(et & 32))
+        return;
+    int bs = et & 15;
+    if (bs >= 8)
+        return;
+    int sh = 64 - bs * 8;
+    asm_push(OP_SLLI, REG_T1, REG_T1, 0, sh);
+    if (et & 16)
+        asm_push(OP_SRLI, REG_T1, REG_T1, 0, sh);
+    else
+        asm_push(OP_SRAI, REG_T1, REG_T1, 0, sh);
 }
 
 /* 配列の先頭アドレスをレジスタに作る (v26)。
@@ -431,22 +501,32 @@ static void gen_var_addr(int reg, int var) {
 /* 変数の値をレジスタに読む (v21)。読み先のレジスタだけを
  * 使うので、葉の読み出しから呼べる */
 static void gen_load_var(int reg, int var) {
+    /* 読む幅は変数の型で決める (v35: 幅つきの型は
+     * 幅の命令で読み、正規形でレジスタに入る。
+     * それ以外は従来どおり 8バイト読み) */
+    int et = var_value_etype(var);
+    int op = (et & 32) ? mem_load_op(et) : OP_LD;
     if (var_owner[var] < 0) {
         gen_load_addr_sym(reg, RLOC_VAR, var);
-        asm_push(OP_LD, reg, reg, 0, 0);
+        asm_push(op, reg, reg, 0, 0);
     } else {
-        asm_push(OP_LD, reg, REG_FP, 0, var_frame_off(var));
+        asm_push(op, reg, REG_FP, 0, var_frame_off(var));
     }
 }
 
 /* レジスタの値を変数に書く (v21)。グローバルの場合は
  * 住所作りに t2 を使う */
 static void gen_store_var(int var, int reg) {
+    /* 書く幅は変数の型で決める (v35、gen_load_var
+     * と対。幅つきの型は幅の命令で書き、上の桁は
+     * 切り捨てられる) */
+    int et = var_value_etype(var);
+    int op = (et & 32) ? mem_store_op(et) : OP_SD;
     if (var_owner[var] < 0) {
         gen_load_addr_sym(REG_T2, RLOC_VAR, var);
-        asm_push(OP_SD, 0, REG_T2, reg, 0);
+        asm_push(op, 0, REG_T2, reg, 0);
     } else {
-        asm_push(OP_SD, 0, REG_FP, reg, var_frame_off(var));
+        asm_push(op, 0, REG_FP, reg, var_frame_off(var));
     }
 }
 
@@ -488,7 +568,7 @@ static void gen_load_leaf(int reg, int leaf) {
         int operand = node_lhs[leaf];
         /* 読む幅は指す先の大きさで決める (v27: 以前は
          * 常に1バイトで、int* の読みが切れていた) */
-        int op = deref_esize(operand) == 8 ? OP_LD : OP_LBU;
+        int op = mem_load_op(deref_etype(operand));
         if (node_kind[operand] == NODE_VAR) {
             /* 変数の持つ住所から読む: まず変数の値 (住所)
              * を読み、その先を読む (v21) */
@@ -524,6 +604,109 @@ static int gen_elem_addr(int node);
  * 写して左を戻す (v7 で入れた一般形の評価)。
  * スタックが要るプログラムでは、gen_all が先に sp を
  * 用意する (関数のあるプログラムと同じ仕組み) */
+/* 式の型付け (v35): AST を歩いて、各式ノードに
+ * 型タグ (node_etype) を付ける。生成の前に体ごと
+ * 呼ぶ。規則は design.md の v35 の節:
+ *   二項演算 (ビット演算を含む) は、幅つきがあれば
+ *   その型 (両方なら左)、なければ従来の 8
+ *   シフトは左の型、比較と論理演算は従来の 8
+ *   変換 (CAST) は変換先、呼び出しは戻り値の型
+ * 子への歩き方はノードの種類ごとに決める (使わない
+ * 欄に 0 が入っているノードがあるため、一律には
+ * 歩けない) */
+static void type_node(int node);
+static void type_list(int head) {
+    for (int n = head; n != -1; n = node_next[n])
+        type_node(n);
+}
+static void type_node(int node) {
+    if (node < 0)
+        return;
+    int k = node_kind[node];
+    /* まず子を型付けする */
+    if (k == NODE_WHILE) {
+        type_node(node_lhs[node]);
+        type_list(node_rhs[node]);
+    } else if (k == NODE_IF) {
+        type_node(node_lhs[node]);
+        type_list(node_rhs[node]);
+        type_list(node_val[node]);
+    } else if (k == NODE_FOR) {
+        if (node_val[node] >= 0)
+            type_node(node_val[node]);
+        type_node(node_lhs[node]);
+        type_list(node_rhs[node]);
+    } else if (k == NODE_FORSTEP) {
+        type_node(node_val[node]);
+    } else if (k == NODE_COND) {
+        type_node(node_lhs[node]);
+        type_node(node_val[node]);
+        type_node(node_rhs[node]);
+    } else if (k == NODE_CALL || k == NODE_SYSCALL3) {
+        type_list(node_lhs[node]);
+    } else if (k == NODE_NUM || k == NODE_VAR ||
+               k == NODE_STR || k == NODE_ARRAY ||
+               k == NODE_DECL || k == NODE_VDECL ||
+               k == NODE_BREAK || k == NODE_CONTINUE ||
+               k == NODE_PREINC || k == NODE_PREDEC ||
+               k == NODE_POSTINC || k == NODE_POSTDEC) {
+        /* 葉: 子はない */
+    } else {
+        /* 残りの種類は lhs (と rhs) が式 */
+        type_node(node_lhs[node]);
+        if (k == NODE_ADD || k == NODE_SUB || k == NODE_MUL ||
+            k == NODE_DIV || k == NODE_MOD || k == NODE_AND ||
+            k == NODE_OR || k == NODE_XOR || k == NODE_EQ ||
+            k == NODE_NE || k == NODE_LT || k == NODE_GT ||
+            k == NODE_LE || k == NODE_GE || k == NODE_SHL ||
+            k == NODE_SHR || k == NODE_LAND || k == NODE_LOR ||
+            k == NODE_STORE || k == NODE_ELEM_STORE ||
+            k == NODE_INDEX_STORE || k == NODE_INDEX2 ||
+            k == NODE_INDEX || k == NODE_PINDEX ||
+            k == NODE_ROWADDR)
+            type_node(node_rhs[node]);
+    }
+    int et = 8;
+    if (k == NODE_VAR)
+        et = var_value_etype(node_val[node]);
+    else if (k == NODE_INDEX || k == NODE_INDEX2)
+        et = arr_etype[node_val[node]];
+    else if (k == NODE_PINDEX)
+        et = elem_etype(node);
+    else if (k == NODE_DEREF)
+        et = deref_etype(node_lhs[node]);
+    else if (k == NODE_CALL)
+        et = func_ret_etype[node_val[node]];
+    else if (k == NODE_CAST)
+        et = node_val[node];
+    else if (k == NODE_ADD || k == NODE_SUB || k == NODE_MUL ||
+             k == NODE_DIV || k == NODE_MOD || k == NODE_AND ||
+             k == NODE_OR || k == NODE_XOR) {
+        int l = node_etype[node_lhs[node]];
+        int r = node_etype[node_rhs[node]];
+        et = (l & 32) ? l : (r & 32) ? r : 8;
+    }
+    else if (k == NODE_SHL || k == NODE_SHR) {
+        int l = node_etype[node_lhs[node]];
+        et = (l & 32) ? l : 8;
+    }
+    else if (k == NODE_NEG || k == NODE_BITNOT)
+        et = node_etype[node_lhs[node]];
+    else if (k == NODE_ASSIGN)
+        et = var_value_etype(node_val[node]);
+    else if (k == NODE_PREINC || k == NODE_PREDEC ||
+             k == NODE_POSTINC || k == NODE_POSTDEC)
+        et = var_value_etype(node_val[node]);
+    else if (k == NODE_EPRE || k == NODE_EPOST)
+        et = elem_etype(node_lhs[node]);
+    else if (k == NODE_COND) {
+        int t = node_etype[node_val[node]];
+        int e = node_etype[node_rhs[node]];
+        et = (t & 32) ? t : (e & 32) ? e : 8;
+    }
+    node_etype[node] = et;
+}
+
 static int gen_expr(int node) {
     if (is_leaf(node)) {
         /* 葉: t1 にその値 (変数なら今の値、文字列なら住所、
@@ -550,10 +733,8 @@ static int gen_expr(int node) {
          * なら ld */
         if (!gen_elem_addr(node))
             return 0;
-        if (elem_esize(node) == 8)
-            asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
-        else
-            asm_push(OP_LBU, REG_T1, REG_T2, 0, 0);
+        asm_push(mem_load_op(elem_etype(node)),
+                 REG_T1, REG_T2, 0, 0);
         return 1;
     }
     if (node_kind[node] == NODE_ROWADDR) {
@@ -628,6 +809,8 @@ static int gen_expr(int node) {
         }
         asm_push(OP_JAL, REG_RA, 0, 0, -(node_val[node] + 1));
         asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
+        /* 戻り値の型が幅つきなら正規形に直す (v35) */
+        emit_canon(func_ret_etype[node_val[node]]);
         return 1;
     }
     if (node_kind[node] == NODE_LAND) {
@@ -683,11 +866,20 @@ static int gen_expr(int node) {
         asm_push(OP_SLTIU, REG_T1, REG_T1, 0, 1);
         return 1;
     }
+    if (node_kind[node] == NODE_CAST) {
+        /* 幅つきの型への変換 (v35): 相手を計算して、
+         * 変換先の正規形に直す。変換先は node_val */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        emit_canon(node_val[node]);
+        return 1;
+    }
     if (node_kind[node] == NODE_BITNOT) {
         /* ~x (v25): 全ビット反転は -1 との XOR */
         if (!gen_expr(node_lhs[node]))
             return 0;
         asm_push(OP_XORI, REG_T1, REG_T1, 0, -1);
+        emit_canon(node_etype[node]);
         return 1;
     }
     if (node_kind[node] == NODE_COND) {
@@ -718,6 +910,7 @@ static int gen_expr(int node) {
         if (!gen_expr(node_lhs[node]))
             return 0;
         asm_push(OP_SUB, REG_T1, REG_ZERO, REG_T1, 0);
+        emit_canon(node_etype[node]);
         return 1;
     }
     if (node_kind[node] == NODE_ADDR) {
@@ -751,13 +944,18 @@ static int gen_expr(int node) {
         int pre = (node_kind[node] == NODE_PREINC ||
                    node_kind[node] == NODE_PREDEC);
         gen_var_addr(REG_T2, node_val[node]);
-        asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
+        int vet = var_value_etype(node_val[node]);
+        asm_push((vet & 32) ? mem_load_op(vet) : OP_LD,
+                 REG_T1, REG_T2, 0, 0);
         if (pre) {
             asm_push(OP_ADDI, REG_T1, REG_T1, 0, delta);
-            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
+            emit_canon(vet);
+            asm_push((vet & 32) ? mem_store_op(vet) : OP_SD,
+                     0, REG_T2, REG_T1, 0);
         } else {
             asm_push(OP_ADDI, REG_A0, REG_T1, 0, delta);
-            asm_push(OP_SD, 0, REG_T2, REG_A0, 0);
+            asm_push((vet & 32) ? mem_store_op(vet) : OP_SD,
+                     0, REG_T2, REG_A0, 0);
         }
         return 1;
     }
@@ -770,24 +968,15 @@ static int gen_expr(int node) {
         int operand = node_lhs[node];
         if (!gen_elem_addr(operand))
             return 0;
-        int esize = elem_esize(operand);
-        if (esize == 1) {
-            asm_push(OP_LBU, REG_T1, REG_T2, 0, 0);
-        } else {
-            asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
-        }
+        int eet = elem_etype(operand);
+        asm_push(mem_load_op(eet), REG_T1, REG_T2, 0, 0);
         if (node_kind[node] == NODE_EPRE) {
             asm_push(OP_ADDI, REG_T1, REG_T1, 0, node_val[node]);
-            if (esize == 1)
-                asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
-            else
-                asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
+            emit_canon(eet);
+            asm_push(mem_store_op(eet), 0, REG_T2, REG_T1, 0);
         } else {
             asm_push(OP_ADDI, REG_A0, REG_T1, 0, node_val[node]);
-            if (esize == 1)
-                asm_push(OP_SB, 0, REG_T2, REG_A0, 0);
-            else
-                asm_push(OP_SD, 0, REG_T2, REG_A0, 0);
+            asm_push(mem_store_op(eet), 0, REG_T2, REG_A0, 0);
         }
         return 1;
     }
@@ -809,42 +998,68 @@ static int gen_expr(int node) {
         asm_push(OP_LD, REG_T1, REG_SP, 0, 0);
         asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
     }
-    if (node_kind[node] == NODE_ADD)
+    /* 比較の符号 (v35): どちらかが uint64 なら
+     * 符号なしで比べる。それ以外は正規形のおかげで
+     * 符号付き比較がそのまま正しい */
+    int ucmp = (node_etype[node_lhs[node]] == (8 + 16 + 32)) ||
+               (node_etype[rhs] == (8 + 16 + 32));
+    int cmpop = ucmp ? OP_SLTU : OP_SLT;
+    if (node_kind[node] == NODE_ADD) {
         asm_push(OP_ADD, REG_T1, REG_T1, REG_T2, 0);
-    else if (node_kind[node] == NODE_SUB)
+        emit_canon(node_etype[node]);
+    }
+    else if (node_kind[node] == NODE_SUB) {
         asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
-    else if (node_kind[node] == NODE_AND)
+        emit_canon(node_etype[node]);
+    }
+    else if (node_kind[node] == NODE_AND) {
         asm_push(OP_AND, REG_T1, REG_T1, REG_T2, 0);
-    else if (node_kind[node] == NODE_MUL)
+        emit_canon(node_etype[node]);
+    }
+    else if (node_kind[node] == NODE_MUL) {
         asm_push(OP_MUL, REG_T1, REG_T1, REG_T2, 0);
+        emit_canon(node_etype[node]);
+    }
     else if (node_kind[node] == NODE_DIV)
-        asm_push(OP_DIV, REG_T1, REG_T1, REG_T2, 0);
+        /* 割り算は型の符号で命令を出す (v35)。結果は
+         * 正規形の範囲に収まるので正規化は要らない */
+        asm_push((node_etype[node] & 48) == 48 ? OP_DIVU : OP_DIV,
+                 REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_MOD)
-        asm_push(OP_REM, REG_T1, REG_T1, REG_T2, 0);
-    else if (node_kind[node] == NODE_SHL)
+        asm_push((node_etype[node] & 48) == 48 ? OP_REMU : OP_REM,
+                 REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_SHL) {
         asm_push(OP_SLL, REG_T1, REG_T1, REG_T2, 0);
+        emit_canon(node_etype[node]);
+    }
     else if (node_kind[node] == NODE_SHR)
-        /* >> は算術シフト (符号を保つ) */
-        asm_push(OP_SRA, REG_T1, REG_T1, REG_T2, 0);
-    else if (node_kind[node] == NODE_OR)
+        /* >> は型の符号で出す (v35): 符号なしは論理
+         * シフト、それ以外は算術シフト (符号を保つ) */
+        asm_push((node_etype[node] & 48) == 48 ? OP_SRL : OP_SRA,
+                 REG_T1, REG_T1, REG_T2, 0);
+    else if (node_kind[node] == NODE_OR) {
         asm_push(OP_OR, REG_T1, REG_T1, REG_T2, 0);
-    else if (node_kind[node] == NODE_XOR)
+        emit_canon(node_etype[node]);
+    }
+    else if (node_kind[node] == NODE_XOR) {
         asm_push(OP_XOR, REG_T1, REG_T1, REG_T2, 0);
+        emit_canon(node_etype[node]);
+    }
     else if (node_kind[node] == NODE_LT)
-        /* slt: 左 (t1) < 右 (t2) なら 1 (符号付き比較) */
-        asm_push(OP_SLT, REG_T1, REG_T1, REG_T2, 0);
+        /* slt: 左 (t1) < 右 (t2) なら 1 */
+        asm_push(cmpop, REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_GT)
         /* > は両辺を入れ替えた < 。slt の両辺を逆に置く */
-        asm_push(OP_SLT, REG_T1, REG_T2, REG_T1, 0);
+        asm_push(cmpop, REG_T1, REG_T2, REG_T1, 0);
     else if (node_kind[node] == NODE_LE ||
              node_kind[node] == NODE_GE) {
         /* <= は「> でない」、>= は「< でない」。
          * 反対の比較をしてから 1 と XOR して反転する
          * (値は 1 か 0 なので、XOR 1 がちょうど反転になる) */
         if (node_kind[node] == NODE_LE)
-            asm_push(OP_SLT, REG_T1, REG_T2, REG_T1, 0);
+            asm_push(cmpop, REG_T1, REG_T2, REG_T1, 0);
         else
-            asm_push(OP_SLT, REG_T1, REG_T1, REG_T2, 0);
+            asm_push(cmpop, REG_T1, REG_T1, REG_T2, 0);
         asm_push(OP_XORI, REG_T1, REG_T1, 0, 1);
     }
     else {
@@ -888,6 +1103,18 @@ static int gen_call_args(int arg) {
  *   PINDEX:              ポインタの値 + 添字 × 指す先の
  *                        大きさ
  * 要素の大きさが 8 のときの ×8 は slli 3 (左シフト3) */
+/* 添字を要素の大きさ倍に伸ばす (v35 で一般化)。
+ * t1 の添字に掛ける: 大きさ 2/4/8 は 2 の冪なので
+ * 左シフト、1 なら何もしない */
+static void emit_scale(int esize) {
+    if (esize == 2)
+        asm_push(OP_SLLI, REG_T1, REG_T1, 0, 1);
+    else if (esize == 4)
+        asm_push(OP_SLLI, REG_T1, REG_T1, 0, 2);
+    else if (esize == 8)
+        asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+}
+
 static int gen_elem_addr(int node) {
     int k = node_kind[node];
     if (k == NODE_INDEX2) {
@@ -907,8 +1134,7 @@ static int gen_elem_addr(int node) {
         }
         asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
         /* t1 = 線形添字 (行 × 列数 + 列) */
-        if (arr_esize[a] == 8)
-            asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+        emit_scale(arr_esize[a]);
         gen_load_arr_base(REG_T2, a);
         asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
         return 1;
@@ -918,8 +1144,7 @@ static int gen_elem_addr(int node) {
          * 計算する (変数の読みが t2 を使うため) */
         if (!gen_expr(node_rhs[node]))
             return 0;
-        if (elem_esize(node) == 8)
-            asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+        emit_scale(elem_esize(node));
         gen_load_var(REG_T2, node_val[node]);
         asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
         return 1;
@@ -931,8 +1156,7 @@ static int gen_elem_addr(int node) {
                                     : node_lhs[node];
         if (!gen_expr(idx))
             return 0;
-        if (elem_esize(node) == 8)
-            asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+        emit_scale(elem_esize(node));
         gen_load_arr_base(REG_T2, node_val[node]);
         asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
         return 1;
@@ -1010,7 +1234,6 @@ static int gen_stmt(int node) {
         int val_node = node_rhs[node];
         if (!gen_elem_addr(addr_node))
             return 0;
-        int esize = elem_esize(addr_node);
         if (!is_leaf(val_node)) {
             asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
             asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
@@ -1021,10 +1244,8 @@ static int gen_stmt(int node) {
         } else {
             gen_load_leaf(REG_T1, val_node);
         }
-        if (esize == 8)
-            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
-        else
-            asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+        asm_push(mem_store_op(elem_etype(addr_node)),
+                 0, REG_T2, REG_T1, 0);
         return 1;
     }
     if (kind == NODE_VDECL) {
@@ -1072,10 +1293,8 @@ static int gen_stmt(int node) {
             gen_load_addr_sym(REG_T2, 0, node_val[addr]);
         else /* NODE_VAR: 変数の値そのものが住所 (ポインタ) */
             gen_load_var(REG_T2, node_val[addr]);
-        if (deref_esize(addr) == 8)
-            asm_push(OP_SD, 0, REG_T2, REG_T1, 0);
-        else
-            asm_push(OP_SB, 0, REG_T2, REG_T1, 0);
+        asm_push(mem_store_op(deref_etype(addr)),
+                 0, REG_T2, REG_T1, 0);
         return 1;
     }
     if (kind == NODE_CALL || kind == NODE_SYSCALL3) {
@@ -1285,6 +1504,7 @@ static int gen_func(int f) {
                  var_frame_off(func_param_var[f][k]));
     return_patch_head = -1;
     gen_in_func = 1;
+    type_list(func_body[f]);
     for (int s = func_body[f]; s != -1; s = node_next[s]) {
         if (!gen_stmt(s))
             return 0;
@@ -1329,7 +1549,7 @@ static int expr_needs_stack(int node) {
         return expr_needs_stack(node_lhs[node]) ||
                expr_needs_stack(node_rhs[node]);
     if (k == NODE_NOT || k == NODE_NEG || k == NODE_ADDR ||
-        k == NODE_BITNOT)
+        k == NODE_BITNOT || k == NODE_CAST)
         return expr_needs_stack(node_lhs[node]);
     if (k == NODE_COND)
         /* 三項 (v25): 条件と両枝のどこかで退避が要るか */
@@ -1442,6 +1662,9 @@ static int gen_all(void) {
          * スタックは OS が用意するので、これも出さない) */
         gen_load_addr(REG_SP, stack_top_addr);
     }
+    type_list(prog_stmts);
+    if (prog_has_final)
+        type_node(prog_final);
     for (int s = prog_stmts; s != -1; s = node_next[s]) {
         if (!gen_stmt(s))
             return 0;
