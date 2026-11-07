@@ -143,3 +143,41 @@
   現れたときに実物で決める（形式に互換義務は
   無い）。typedef と構造体は命令列の形式を
   変えないので、この切り口には影響しない
+
+## 「2つの軸」: CPU の軸と OS の軸（2026-11-07、検討のみ）
+
+iwac のターゲットは、実は2つの独立な軸の
+組み合わせで決まる:
+
+- CPU の軸（Asari の担当）: 命令の符号化と
+  呼び出し規約。RISC-V / AArch64 / x86-64
+- OS の軸（rt の担当）: システムコールの番号と
+  渡し方、実行形式、入口の約束事。
+  ベアメタル / KosabaOS / Linux
+
+iwac は OS の軸を既に1つ持っている
+（--kosaba、CPU は RISC-V のまま）。だから
+「ラズパイの上で iwac を動かす」ことと
+「iwac が Arm 用バイナリを出す」ことは別の
+話で、前者はホスト版を gcc でビルドすれば
+済み（出力は RISC-V のまま）、後者が CPU の
+軸の仕事。
+
+Linux 用を出すには OS の軸に Linux を足す:
+syscall の番号と渡し方は arch ごとに
+Linux の作法（RISC-V は a7＋ecall で
+KosabaOS と形が同じ、AArch64 は x8＋svc、
+x86-64 は rax＋syscall 命令）、入口は
+「sp の先に argc/argv」が Linux の約束、
+rt は kosaba_rt.c の Linux 版を用意する。
+組み合わせの妙: Arm×Linux ができれば
+iwac 自身をラズパイ上でネイティブに
+セルフホストできる。RISC-V×Linux なら
+Milk-V 系の Linux ボードが同じ立場。
+
+留保: syscall3 で KosabaOS の番号を直接
+書いたプログラムは、Linux ではそのまま
+動かない（C で生の syscall 番号を書いた
+プログラムが移植できないのと同じ）。
+移植できるのは rt 経由の範囲で書かれた
+ものだけ。
