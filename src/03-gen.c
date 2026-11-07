@@ -388,6 +388,18 @@ static int elem_esize(int node) {
 
 /* 要素ノードが指す要素の型タグ */
 static int elem_etype(int node) {
+    if (node_kind[node] == NODE_MEMBER ||
+        node_kind[node] == NODE_MELEM) {
+        /* メンバの型タグ (v37): ポインタ・構造体・配列の
+         * メンバは、値がアドレスかポインタなので 8。
+         * それ以外はメンバの宣言の型タグ */
+        int mi = node_val[node];
+        if (smem_plevel[mi] >= 1 || smem_struct[mi] > 0)
+            return 8;
+        if (node_kind[node] == NODE_MEMBER && smem_count[mi] > 0)
+            return 8;
+        return smem_etype[mi];
+    }
     if (node_kind[node] == NODE_PINDEX) {
         int var = node_val[node];
         if (var_plevel[var] >= 2)
@@ -663,6 +675,7 @@ static void type_node(int node) {
             k == NODE_STORE || k == NODE_ELEM_STORE ||
             k == NODE_INDEX_STORE || k == NODE_INDEX2 ||
             k == NODE_INDEX || k == NODE_PINDEX ||
+            k == NODE_MELEM ||
             k == NODE_ROWADDR)
             type_node(node_rhs[node]);
     }
@@ -672,6 +685,8 @@ static void type_node(int node) {
     else if (k == NODE_INDEX || k == NODE_INDEX2)
         et = arr_etype[node_val[node]];
     else if (k == NODE_PINDEX)
+        et = elem_etype(node);
+    else if (k == NODE_MEMBER || k == NODE_MELEM)
         et = elem_etype(node);
     else if (k == NODE_DEREF)
         et = deref_etype(node_lhs[node]);
@@ -708,6 +723,20 @@ static void type_node(int node) {
 }
 
 static int gen_expr(int node) {
+    if (node_kind[node] == NODE_VAR &&
+        var_struct[node_val[node]] > 0 &&
+        var_plevel[node_val[node]] == 0) {
+        /* 構造体の値そのものを式の値にはできない (v37) */
+        errmsg = "構造体は値として扱えません (メンバかポインタで使ってください)";
+        return 0;
+    }
+    if ((node_kind[node] == NODE_INDEX ||
+         node_kind[node] == NODE_INDEX2) &&
+        arr_struct[node_val[node]] > 0 &&
+        arr_plevel[node_val[node]] == 0) {
+        errmsg = "構造体は値として扱えません (メンバかポインタで使ってください)";
+        return 0;
+    }
     if (is_leaf(node)) {
         /* 葉: t1 にその値 (変数なら今の値、文字列なら住所、
          * ポインタ読みなら指された先の1バイト) が入る */
@@ -733,6 +762,25 @@ static int gen_expr(int node) {
          * なら ld */
         if (!gen_elem_addr(node))
             return 0;
+        asm_push(mem_load_op(elem_etype(node)),
+                 REG_T1, REG_T2, 0, 0);
+        return 1;
+    }
+    if (node_kind[node] == NODE_MEMBER ||
+        node_kind[node] == NODE_MELEM) {
+        /* メンバ読み (v37): 住所を作り、数値・ポインタの
+         * メンバなら読み出す。構造体・配列のメンバは
+         * 住所そのものが値 (配列の decay と同じ) */
+        if (!gen_elem_addr(node))
+            return 0;
+        int mi = node_val[node];
+        int is_addr = (smem_struct[mi] > 0 && smem_plevel[mi] == 0) ||
+                      (node_kind[node] == NODE_MEMBER &&
+                       smem_count[mi] > 0);
+        if (is_addr) {
+            asm_push(OP_ADDI, REG_T1, REG_T2, 0, 0);
+            return 1;
+        }
         asm_push(mem_load_op(elem_etype(node)),
                  REG_T1, REG_T2, 0, 0);
         return 1;
@@ -1115,8 +1163,86 @@ static void emit_scale(int esize) {
         asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
 }
 
+/* 構造体のメンバ1つの大きさ (バイト、v37) */
+static int member_elem_size(int mi) {
+    if (smem_plevel[mi] >= 1)
+        return 8;
+    if (smem_struct[mi] > 0)
+        return stag_size[smem_struct[mi] - 1];
+    return smem_etype[mi] & 15;
+}
+
 static int gen_elem_addr(int node) {
     int k = node_kind[node];
+    if (k == NODE_MEMBER) {
+        /* メンバの住所 (v37): . なら基底の住所、-> なら
+         * 基底の値 (ポインタ) に、メンバのオフセットを足す */
+        int mi = node_val[node];
+        if (node_rhs[node] == 1) {
+            if (!gen_expr(node_lhs[node]))
+                return 0;
+            asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        } else {
+            int b = node_lhs[node];
+            if (node_kind[b] == NODE_VAR)
+                gen_var_addr(REG_T2, node_val[b]);
+            else if (node_kind[b] == NODE_INDEX ||
+                     node_kind[b] == NODE_INDEX2 ||
+                     node_kind[b] == NODE_PINDEX ||
+                     node_kind[b] == NODE_MEMBER ||
+                     node_kind[b] == NODE_MELEM ||
+                     node_kind[b] == NODE_DEREF) {
+                if (!gen_elem_addr(b))
+                    return 0;
+            } else {
+                errmsg = "メンバアクセスの基底が変です";
+                return 0;
+            }
+        }
+        if (smem_off[mi] != 0) {
+            gen_load_const(REG_A0, smem_off[mi]);
+            asm_push(OP_ADD, REG_T2, REG_T2, REG_A0, 0);
+        }
+        return 1;
+    }
+    if (k == NODE_MELEM) {
+        /* 配列メンバの要素の住所 (v37): メンバの住所 +
+         * 添字 × 要素の大きさ。添字の計算で基底 (t2) を
+         * 壊さないよう、スタックへ退避する */
+        if (!gen_elem_addr(node_lhs[node]))
+            return 0;
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        int esz = member_elem_size(node_val[node]);
+        if (esz > 1) {
+            int shift = 0;
+            int e = esz;
+            while ((e & 1) == 0) {
+                e >>= 1;
+                shift++;
+            }
+            if (e == 1) {
+                asm_push(OP_SLLI, REG_T1, REG_T1, 0, shift);
+            } else {
+                gen_load_const(REG_A0, esz);
+                asm_push(OP_MUL, REG_T1, REG_T1, REG_A0, 0);
+            }
+        }
+        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    if (k == NODE_DEREF) {
+        /* *p の住所は、p の値そのもの (v37 で追加。
+         * (*p).メンバ の基底に使う) */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        return 1;
+    }
     if (k == NODE_INDEX2) {
         int a = node_val[node];
         if (!gen_expr(node_lhs[node]))
@@ -1577,6 +1703,11 @@ static int expr_needs_stack(int node) {
         return 1;
     if (k == NODE_ROWADDR || k == NODE_PINDEX)
         return expr_needs_stack(node_rhs[node]);
+    if (k == NODE_MEMBER)
+        return expr_needs_stack(node_lhs[node]);
+    if (k == NODE_MELEM)
+        /* 住所作りがスタックへ退避する (2次元と同じ) */
+        return 1;
     return 0;
 }
 

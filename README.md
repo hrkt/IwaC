@@ -17,7 +17,7 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v36（typedef）を branch `v36` で追加
+## 現在地: v37（構造体）を branch `v37` で追加
 
 v33 で「分割コンパイル＋リンカ」への階段
 （doc/linking.md）の段4まで来た。iwac の7断片と
@@ -282,7 +282,7 @@ iwac hello.c > hello.bin
 ./build.sh
 ```
 
-本体は `src/` の7断片（01-head.c 〜 07-main.c）に分かれて
+本体は `src/` の8断片（01-head.c 〜 07-main.c と 02b-decl.c）に分かれて
 いて、build.sh が番号順に連結した `iwac_all.c` を gcc で
 コンパイルする（`#include` を使わない約束のための形。
 手でやるなら `cat src/0*.c > iwac_all.c` してから

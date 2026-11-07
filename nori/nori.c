@@ -353,12 +353,14 @@ static int read_object(int obj, char *path) {
             int s = new_sym(tok_buf);
             if (s < 0)
                 return 0;
+            int cnt = (int)read_num();  /* 占める枠の数 (v37) */
             if (!set_kind(s, 2))
                 return 0;
             if (sym_obj[s] < 0) {
                 /* 初出: 枠番号を割り当てる (初出の順) */
                 sym_obj[s] = obj;
-                sym_off[s] = var_slots++;
+                sym_off[s] = var_slots;
+                var_slots += cnt;
             }
             if (firm) {
                 if (sym_firm[s])

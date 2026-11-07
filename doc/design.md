@@ -400,7 +400,10 @@ KosabaOS の C 版が `-mcmodel=medany`（auipc 前提）を
 - ファイル構成: 当初は 1 ファイル (`iwac.c`)。v18 の後、
   本体が約3100行・120KBに育ったところで `src/` の7断片
   （01-head / 02-parse / 03-gen / 04-encode / 05-input /
-  06-preproc / 07-main）に分割した。`#include` を使わない
+  06-preproc / 07-main）に分割した。v37 で 02-parse が
+  大きくなり、宣言まわりを 02b-decl として分けた
+  （断片プロファイルのソース容量に TU が収まるように。
+  連結順は 02-parse の直後）。`#include` を使わない
   約束のため、組み立ては「番号順に連結して1つの翻訳単位」
   （build.sh が iwac_all.c を作る）。iwac 自身の複数
   ファイル入力（v17）でも同じ並びを渡せば同じ意味に

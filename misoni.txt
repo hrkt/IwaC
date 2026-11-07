@@ -6,6 +6,7 @@
 out iwac2.elf
 obj 01-head.iwo src/decls.c src/01-head.c
 obj 02-parse.iwo src/decls.c src/02-parse.c
+obj 02b-decl.iwo src/decls.c src/02b-decl.c
 obj 03-gen.iwo src/decls.c src/03-gen.c
 obj 04-encode.iwo src/decls.c src/04-encode.c
 obj 05-input.iwo src/decls.c src/05-input.c

@@ -552,13 +552,24 @@ static void write_object(void) {
         }
     }
     /* グローバルの定義 (枠の順)。初期値があれば
-     * 本定義 (var)、無ければ仮定義 (varc) */
+     * 本定義 (var)、無ければ仮定義 (varc)。占める
+     * 枠の数も書く (v37、構造体は複数枠) */
     for (int s = 0; s < var_nglobal; s++) {
         for (int v = 0; v < nvar; v++) {
             if (var_owner[v] >= 0 || var_slot[v] != s)
                 continue;
+            /* 枠の数 = 次のグローバルまでの距離 */
+            int ns = var_nglobal - s;
+            for (int w = 0; w < nvar; w++) {
+                if (var_owner[w] >= 0 || var_slot[w] <= s)
+                    continue;
+                if (var_slot[w] - s < ns)
+                    ns = var_slot[w] - s;
+            }
             obj_str(var_init_kind[v] != 0 ? "var " : "varc ");
             obj_str(var_names[v]);
+            obj_str(" ");
+            obj_num(ns);
             obj_str("\n");
             break;
         }

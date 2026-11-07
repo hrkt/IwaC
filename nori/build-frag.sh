@@ -81,7 +81,7 @@ cat ../src/0*.c > "$WORK/iwac_all.c"
 "$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/iwac-std" "$WORK/iwac_all.c"
 mkdir -p "$WORK/objs"
 OBJS=""
-for f in 01-head 02-parse 03-gen 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
     "$WORK/iwac-std" --kosaba --object ../src/decls.c ../src/$f.c > "$WORK/objs/$f.iwo"
     OBJS="$OBJS objs/$f.iwo"
 done

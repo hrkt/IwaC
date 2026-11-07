@@ -69,7 +69,7 @@ apply 02-parse.c 'str_pool[16384]' 'str_pool[8192]' 1
 apply 02-parse.c '[20480]' '[8192]' 6
 apply 02-parse.c 'nnode >= 20480' 'nnode >= 8192' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 8191' 1
-apply 02-parse.c '[1024]' '[512]' 9
+apply 02-parse.c '[1024]' '[512]' 10
 apply 02-parse.c 'nvar >= 1024' 'nvar >= 512' 1
 # 03-gen.c: 命令表 (5つ+パッチ表+緩和の印) と再配置表
 apply 03-gen.c '[40960]' '[16384]' 7
@@ -93,7 +93,7 @@ cat ../src/0*.c > "$WORK/iwac_std_all.c"
 # 容量だけが違うことの確認: 全断片のオブジェクトが
 # 標準と一致すること (断片プロファイルの本分)
 mkdir -p "$WORK/objs"
-for f in 01-head 02-parse 03-gen 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
     "$WORK/iwac-std" --kosaba --object ../src/decls.c ../src/$f.c > "$WORK/objs/$f-std.iwo"
     "$WORK/iwac-frag" --kosaba --object ../src/decls.c ../src/$f.c > "$WORK/objs/$f-frag.iwo"
     if ! cmp -s "$WORK/objs/$f-std.iwo" "$WORK/objs/$f-frag.iwo"; then

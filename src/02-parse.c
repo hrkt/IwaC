@@ -117,6 +117,18 @@ static int NODE_CAST = 54;   /* 型変換 (v35)。node_val =
                              * 変換だけがノードになり、
                              * 従来の型への変換は今まで
                              * どおり読み捨てる */
+static int NODE_MEMBER = 55; /* メンバアクセス (v37)。
+                             * node_val = メンバ番号、
+                             * node_lhs = 基底、node_rhs =
+                             * 0 (. 用: 基底は住所の文脈) か
+                             * 1 (-> 用: 基底はポインタ値の式)。
+                             * 値は、数値・ポインタのメンバ
+                             * なら読み出した値、構造体・配列の
+                             * メンバならその先頭アドレス */
+static int NODE_MELEM = 56;  /* 配列メンバの要素 (v37)。
+                             * node_val = メンバ番号、
+                             * node_lhs = 基底 (住所)、
+                             * node_rhs = 添字の式 */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -166,6 +178,12 @@ static int var_bsize[1024];
  * なら 16、幅つきの型なら 32 を足したもの。従来の
  * 型は char が 1、それ以外は 8 (印なし) */
 static int var_etype[1024];
+static char var_struct[1024];  /* 構造体番号 + 1 (v37、0 = 構造体で
+                               * ない。char に詰めるための +1 符号化)。
+                               * plevel 0 ならその構造体の値、
+                               * 1 以上ならその構造体へのポインタ。
+                               * 占めるスロット数は var_slot の差から
+                               * 分かるので表は持たない) */
 static int var_plevel[1024];
 /* グローバル変数の初期値 (v24): ファイル範囲の宣言の
  * 初期化子を定数として記録し、静的領域の初期イメージ
@@ -193,6 +211,7 @@ static int tdef_name_len[64];
 static int tdef_etype[64];
 static int tdef_bsize[64];
 static int tdef_plevel[64];
+static char tdef_struct[64];  /* 構造体番号 + 1 (v37、0 = なし) */
 static int ntdef;
 
 /* 名前の一致だけを見る小物 */
@@ -251,8 +270,9 @@ static int find_array(char *name, int len);
  * 外側 (グローバル) の同名は隠れる (シャドーイング)。
  * is_decl が 0 (代入から) のときは、見えている変数が
  * あればそれ (再代入)、無ければ今の場所に新規作成 */
-static int define_var_typed(char *name, int len, int bsize,
-                            int plevel, int is_decl, int etype) {
+static int define_var_full(char *name, int len, int bsize,
+                           int plevel, int is_decl, int etype,
+                           int strct, int nslots) {
     if (find_array(name, len) >= 0) {
         errmsg = "その名前は配列に使われています";
         return -1;
@@ -260,8 +280,13 @@ static int define_var_typed(char *name, int len, int bsize,
     if (is_decl) {
         for (int i = 0; i < nvar; i++) {
             if (var_owner[i] == parse_cur_func &&
-                var_name_eq(i, name, len))
+                var_name_eq(i, name, len)) {
+                if (var_struct[i] != strct + 1) {
+                    errmsg = "同じ名前で違う型の宣言があります";
+                    return -1;
+                }
                 return i;
+            }
         }
     } else {
         int found = find_var(name, len);
@@ -279,13 +304,25 @@ static int define_var_typed(char *name, int len, int bsize,
     var_owner[i] = parse_cur_func;
     var_bsize[i] = bsize;
     var_etype[i] = etype;
+    var_struct[i] = strct + 1;
     var_plevel[i] = plevel;
     var_init_kind[i] = 0;  /* 初期値は宣言側が後で付ける */
-    if (parse_cur_func >= 0)
-        var_slot[i] = func_nlocals[parse_cur_func]++;
-    else
-        var_slot[i] = var_nglobal++;
+    if (parse_cur_func >= 0) {
+        var_slot[i] = func_nlocals[parse_cur_func];
+        /* 要素への複合代入は無いので展開する (本体の約束) */
+        func_nlocals[parse_cur_func] =
+            func_nlocals[parse_cur_func] + nslots;
+    } else {
+        var_slot[i] = var_nglobal;
+        var_nglobal += nslots;
+    }
     return i;
+}
+
+static int define_var_typed(char *name, int len, int bsize,
+                            int plevel, int is_decl, int etype) {
+    return define_var_full(name, len, bsize, plevel, is_decl,
+                           etype, -1, 1);
 }
 
 static int define_var(char *name, int len) {
@@ -322,6 +359,10 @@ static int func_name_len[192];
 static int func_nparams[192];
 static int func_param_var[192][8];
 static int func_ret_etype[192]; /* 戻り値の型タグ (v35) */
+static char func_ret_struct[192]; /* 戻り値の構造体番号 + 1 (v37、
+                             * 0 = なし。構造体を返す関数はポインタ
+                             * でだけ返せるので、0 でなければ
+                             * 「その構造体へのポインタを返す」) */
 static int func_body[192];
 static int func_entry[192];
 /* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
@@ -368,6 +409,8 @@ static int arr_size[128];
 static int arr_cols[128];
 static int arr_esize[128];
 static int arr_etype[128];   /* 要素の型タグ (v35) */
+static char arr_struct[128];  /* 要素の構造体番号 + 1 (v37、0 = なし) */
+static char arr_plevel[128];  /* 要素のポインタ段数 (v37) */
 static int arr_owner[128];
 static int arr_off[128];
 static int arr_foff[128];
@@ -407,6 +450,58 @@ static int find_array(char *name, int len) {
     return -1;
 }
 
+/* --- 構造体の名簿 (v37、設計は doc/struct.md) ---
+ * タグ表: 名前・大きさ・アラインメント・メンバの範囲。
+ * 大きさは末尾パディング込み (C 互換レイアウト)。
+ * メンバ表: 全タグのメンバを並べた1枚の表で、各メンバは
+ * 名前・オフセット・型タグ・ポインタ段数・構造体番号
+ * (-1 = 構造体でない)・配列の個数 (0 = 配列でない) を持つ */
+static char stag_names[32][32];
+static int stag_name_len[32];
+static int stag_size[32];
+static int stag_align[32];
+static int stag_mfirst[32];
+static int stag_mcount[32];
+static int stag_complete[32];  /* 定義が閉じたか (定義中は 0) */
+static int nstag;
+static char smem_names[160][32];
+static int smem_name_len[160];
+static int smem_off[160];
+static int smem_etype[160];
+static int smem_plevel[160];
+static char smem_struct[160];  /* 構造体番号 + 1 (0 = なし) */
+static int smem_count[160];
+static int nsmem;
+
+/* タグ名から構造体を探す。あれば番号、無ければ -1 */
+static int find_struct_tag(char *name, int len) {
+    for (int i = 0; i < nstag; i++) {
+        if (stag_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && stag_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
+
+/* タグ tg のメンバから名前を探す。あればメンバ番号、
+ * 無ければ -1 */
+static int find_member(int tg, char *name, int len) {
+    for (int i = stag_mfirst[tg]; i < stag_mfirst[tg] + stag_mcount[tg]; i++) {
+        if (smem_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && smem_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
+
 /* 配列を名簿に登録し、番号を返す。rows は最初の [ ] の
  * 数、cols は2つ目の [ ] の数 (1次元なら 0)、esize は
  * 要素の大きさ。確保する大きさは 要素数 × esize バイト。
@@ -415,8 +510,8 @@ static int find_array(char *name, int len) {
  * いる同名の変数があればエラー。外側の同名は隠れる。
  * 宣言場所で置き場所が決まる: 関数の中ならフレーム、
  * 外なら静的な領域。失敗したら -1 */
-static int define_array(char *name, int len, int rows, int cols,
-                        int esize, int etype) {
+static int define_array_s(char *name, int len, int rows, int cols,
+                          int esize, int etype, int strct, int plevel) {
     for (int i = 0; i < narr; i++) {
         if (arr_owner[i] == parse_cur_func &&
             arr_name_eq(i, name, len)) {
@@ -427,7 +522,8 @@ static int define_array(char *name, int len, int rows, int cols,
              * 再宣言は食い違いとして止める */
             if (parse_cur_func < 0 &&
                 arr_size[i] == rows && arr_cols[i] == cols &&
-                arr_esize[i] == esize && arr_etype[i] == etype)
+                arr_esize[i] == esize && arr_etype[i] == etype &&
+                arr_struct[i] == strct + 1 && arr_plevel[i] == plevel)
                 return i;
             if (parse_cur_func < 0) {
                 errmsg = "配列の大きさが宣言ごとに違います";
@@ -460,8 +556,17 @@ static int define_array(char *name, int len, int rows, int cols,
     arr_cols[i] = cols;
     arr_esize[i] = esize;
     arr_etype[i] = etype;
+    arr_struct[i] = strct + 1;
+    arr_plevel[i] = plevel;
     arr_owner[i] = parse_cur_func;
     if (parse_cur_func < 0) {
+        if (strct >= 0) {
+            /* 構造体の配列は先頭を要素のアラインメントに
+             * 揃える (v37。他の配列は従来どおり詰める) */
+            int al = stag_align[strct];
+            if (arr_used % al)
+                arr_used += al - (arr_used % al);
+        }
         arr_off[i] = arr_used;
         arr_used += bytes;
         arr_foff[i] = 0;
@@ -752,6 +857,7 @@ static int parse_expr(void);
 static int parse_type(void);  /* キャストの判定で先に使う (v25) */
 static int parse_type_etype;   /* 型タグ (本体は型の節、v35) */
 static int parse_type_plevel;  /* ポインタの段数 (同上) */
+static int parse_type_struct;  /* 構造体番号 (同上、v37) */
 static int parse_rel_expr(void);  /* eq の段から呼ばれる (v11) */
 static int parse_unary_expr(void); /* 単項の段 (v19)。文からも使う */
 static int expect_char(char c, char *msg);
@@ -886,6 +992,28 @@ static int parse_primary_node(void) {
     if (is_ident_start(*cur)) {
         if (!parse_ident())
             return -1;
+        if (ident_is("sizeof")) {
+            /* sizeof ( 型 ) (v37): 解析時に値が決まる定数。
+             * ポインタは 8、構造体はパディング込みの
+             * 大きさ、それ以外は型の幅 */
+            skip_spaces();
+            if (!expect_char('(', "sizeof の後には ( が必要です"))
+                return -1;
+            if (!parse_type()) {
+                errmsg = "sizeof の中は型で書きます";
+                return -1;
+            }
+            if (!expect_char(')', "sizeof の後には ) が必要です"))
+                return -1;
+            int sz;
+            if (parse_type_plevel >= 1)
+                sz = 8;
+            else if (parse_type_struct >= 0)
+                sz = stag_size[parse_type_struct];
+            else
+                sz = parse_type_etype & 15;
+            return new_node(NODE_NUM, sz, 0, 0);
+        }
         if (ident_is("syscall3")) {
             /* 組み込み syscall3(番号, a0, a1, a2) (v27):
              * KosabaOS のシステムコールを直接呼ぶ式。
@@ -1005,15 +1133,133 @@ static int parse_primary_node(void) {
  * 単項 & の相手の判定に使う (v25) */
 static int is_elem_node(int node) {
     int k = node_kind[node];
-    return k == NODE_INDEX || k == NODE_INDEX2 || k == NODE_PINDEX;
+    return k == NODE_INDEX || k == NODE_INDEX2 || k == NODE_PINDEX ||
+           k == NODE_MEMBER || k == NODE_MELEM;
+}
+
+/* メンバを表すノードが「数値として増減できる」か (v37):
+ * 構造体の値や配列のメンバは相手にできない */
+static int member_is_scalar(int node) {
+    int mi = node_val[node];
+    if (smem_count[mi] > 0 && node_kind[node] == NODE_MEMBER)
+        return 0;
+    if (smem_struct[mi] > 0 && smem_plevel[mi] == 0)
+        return 0;
+    return 1;
 }
 
 static int parse_postfix_expr(void) {
     int node = parse_primary_node();
     if (node < 0)
         return -1;
+    /* メンバアクセス (. / ->) のために、今のノードの値の
+     * 型を追う (v37): ts = 構造体番号 (-1 = 構造体でない)、
+     * tp = ポインタ段数、tarr = 配列か (配列メンバの直後
+     * だけ 1) */
+    int ts = -1;
+    int tp = 0;
+    int tarr = 0;
+    {
+        int k = node_kind[node];
+        if (k == NODE_VAR) {
+            int v = node_val[node];
+            ts = var_struct[v] - 1;
+            tp = var_plevel[v];
+        } else if (k == NODE_ARRAY || k == NODE_ROWADDR) {
+            /* 配列名 (と2次元の行) は先頭要素へのポインタ */
+            int a = node_val[node];
+            ts = arr_struct[a] - 1;
+            tp = arr_plevel[a] + 1;
+        } else if (k == NODE_INDEX || k == NODE_INDEX2) {
+            int a = node_val[node];
+            ts = arr_struct[a] - 1;
+            tp = arr_plevel[a];
+        } else if (k == NODE_PINDEX) {
+            int v = node_val[node];
+            ts = var_struct[v] - 1;
+            tp = var_plevel[v] - 1;
+        } else if (k == NODE_CALL) {
+            int f = node_val[node];
+            ts = func_ret_struct[f] - 1;
+            tp = ts >= 0 ? 1 : 0;
+        } else if (k == NODE_DEREF) {
+            /* *p の形: 相手が変数なら、その指す先の型 */
+            int o = node_lhs[node];
+            if (node_kind[o] == NODE_VAR) {
+                int v = node_val[o];
+                ts = var_struct[v] - 1;
+                tp = var_plevel[v] - 1;
+            }
+        }
+        if (tp < 0) {
+            ts = -1;
+            tp = 0;
+        }
+    }
     for (;;) {
         skip_spaces();
+        if (*cur == '.' && is_ident_start(cur[1])) {
+            /* . メンバ (v37): 構造体の値にだけ付く */
+            if (ts < 0 || tp != 0 || tarr) {
+                errmsg = "メンバアクセス . は構造体の値にだけ付けられます";
+                return -1;
+            }
+            cur++;
+            if (!parse_ident())
+                return -1;
+            int mi = find_member(ts, ident_buf, ident_len);
+            if (mi < 0) {
+                errmsg = "そのメンバはありません";
+                return -1;
+            }
+            node = new_node(NODE_MEMBER, mi, node, 0);
+            if (node < 0)
+                return -1;
+            ts = smem_struct[mi] - 1;
+            tp = smem_plevel[mi];
+            tarr = smem_count[mi] > 0;
+            continue;
+        }
+        if (cur[0] == '-' && cur[1] == '>') {
+            /* -> メンバ (v37): 構造体へのポインタにだけ付く */
+            if (ts < 0 || tp < 1 || tarr) {
+                errmsg = "メンバアクセス -> は構造体へのポインタにだけ付けられます";
+                return -1;
+            }
+            cur += 2;
+            skip_spaces();
+            if (!parse_ident()) {
+                errmsg = "-> の後にはメンバ名が必要です";
+                return -1;
+            }
+            int mi = find_member(ts, ident_buf, ident_len);
+            if (mi < 0) {
+                errmsg = "そのメンバはありません";
+                return -1;
+            }
+            node = new_node(NODE_MEMBER, mi, node, 1);
+            if (node < 0)
+                return -1;
+            ts = smem_struct[mi] - 1;
+            tp = smem_plevel[mi];
+            tarr = smem_count[mi] > 0;
+            continue;
+        }
+        if (*cur == '[' && tarr) {
+            /* 配列メンバの要素 (v37) */
+            int mi = node_val[node];
+            cur++;
+            int idx = parse_expr();
+            if (idx < 0)
+                return -1;
+            if (!expect_char(']', "添字の後には ] が必要です"))
+                return -1;
+            node = new_node(NODE_MELEM, mi, node, idx);
+            if (node < 0)
+                return -1;
+            tarr = 0;  /* 要素の型 (ts / tp) はメンバのまま */
+            continue;
+        }
         int is_post_inc;
         if (cur[0] == '+' && cur[1] == '+')
             is_post_inc = 1;
@@ -1024,10 +1270,27 @@ static int parse_postfix_expr(void) {
         cur += 2;
         if (node_kind[node] == NODE_VAR) {
             /* 変数への後置 (v19) */
+            if (var_struct[node_val[node]] > 0 &&
+                var_plevel[node_val[node]] == 0) {
+                errmsg = "++ / -- の相手は数値だけです";
+                return -1;
+            }
             node = new_node(is_post_inc ? NODE_POSTINC : NODE_POSTDEC,
                             node_val[node], 0, 0);
         } else if (is_elem_node(node)) {
             /* 要素への後置 (v25): a[i]++ の形 */
+            int nk = node_kind[node];
+            if ((nk == NODE_MEMBER || nk == NODE_MELEM) &&
+                !member_is_scalar(node)) {
+                errmsg = "++ / -- の相手は数値のメンバだけです";
+                return -1;
+            }
+            if ((nk == NODE_INDEX || nk == NODE_INDEX2) &&
+                arr_struct[node_val[node]] > 0 &&
+                arr_plevel[node_val[node]] == 0) {
+                errmsg = "++ / -- の相手は数値だけです";
+                return -1;
+            }
             node = new_node(NODE_EPOST, is_post_inc ? 1 : -1,
                             node, 0);
         } else {
@@ -1036,6 +1299,8 @@ static int parse_postfix_expr(void) {
         }
         if (node < 0)
             return -1;
+        ts = -1;  /* 増減の結果は数値。メンバはもう辿れない */
+        tarr = 0;
     }
 }
 
@@ -1122,6 +1387,7 @@ static int parse_unary_expr(void) {
             errmsg = "& の相手は変数か配列か要素だけです";
             return -1;
         }
+        /* is_elem_node にはメンバも含まれる (v37) */
         return new_node(NODE_ADDR, 0, operand, 0);
     }
     if (*cur == '!' && cur[1] != '=') {
@@ -1490,6 +1756,8 @@ static int expect_char(char c, char *msg) {
  * その文にまた while がありうる) ので、先に宣言だけ置く */
 static int parse_stmt(void);
 static int parse_typedef(void);  /* typedef (本体は宣言の節、v36) */
+static int parse_struct_def(void);  /* 構造体の定義 (同上、v37) */
+static int parse_decl_stmt(void);   /* 宣言文 (同上、v37) */
 static int parse_stmt_list(int in_brace);
 static int parse_body(void);  /* 制御文の本体 (v25) */
 
@@ -1544,9 +1812,11 @@ static int is_typedef_name(void) {
 }
 
 static int parse_type_bsize;   /* char を含めば 1、それ以外は 8 */
+/* parse_type_struct は前方で宣言済み (v37) */
 /* parse_type_plevel と parse_type_etype は前方で宣言済み */
 
 static int parse_type(void) {
+    parse_type_struct = -1;
     if (!is_ident_start(*cur))
         return 0;
     if (!parse_ident())
@@ -1558,6 +1828,29 @@ static int parse_type(void) {
         skip_spaces();
         if (!parse_ident())
             return 0;
+    }
+    if (ident_is("struct")) {
+        /* struct タグ (v37): タグ表を引く。型タグと
+         * 大きさは構造体のものを入れ、ポインタ段数は
+         * 後ろの * で数える */
+        skip_spaces();
+        if (!parse_ident())
+            return 0;
+        int tg = find_struct_tag(ident_buf, ident_len);
+        if (tg < 0)
+            return 0;
+        skip_spaces();
+        int stars = 0;
+        while (*cur == '*') {  /* ポインタの印を数える */
+            stars++;
+            cur++;
+            skip_spaces();
+        }
+        parse_type_struct = tg;
+        parse_type_etype = 8;
+        parse_type_bsize = stag_size[tg];
+        parse_type_plevel = stars;
+        return 1;
     }
     if (!is_type_word()) {
         /* typedef 名なら名簿を引く (v36)。型の言葉の
@@ -1576,6 +1869,7 @@ static int parse_type(void) {
         parse_type_etype = tdef_etype[td];
         parse_type_bsize = tdef_bsize[td];
         parse_type_plevel = tdef_plevel[td] + stars;
+        parse_type_struct = tdef_struct[td] - 1;
         return 1;
     }
     int has_char = ident_is("char");
@@ -1666,6 +1960,11 @@ static int parse_funcdef(void) {
         func_called[f] = 0;
     }
     func_ret_etype[f] = parse_type_etype;  /* 戻り値の型 (v35) */
+    func_ret_struct[f] = parse_type_struct + 1;  /* 戻り値の構造体 (v37) */
+    if (parse_type_struct >= 0 && parse_type_plevel == 0) {
+        errmsg = "構造体は値で返せません (ポインタで返してください)";
+        return 0;
+    }
     if (!expect_char('(', "関数名の後には ( が必要です"))
         return 0;
     /* 引数はまず「型と名前」を集めるだけにする。変数
@@ -1677,6 +1976,7 @@ static int parse_funcdef(void) {
     int pbs[8];
     int pet[8];   /* 引数の型タグ (v35) */
     int ppl[8];
+    int pst[8];   /* 引数の構造体番号 (v37) */
     int np = 0;
     int params_done = 0;  /* (void) は引数なしと同義 (v25) */
     skip_spaces();
@@ -1716,6 +2016,11 @@ static int parse_funcdef(void) {
             pbs[np] = parse_type_bsize;
             pet[np] = parse_type_etype;
             ppl[np] = parse_type_plevel;
+            pst[np] = parse_type_struct;
+            if (pst[np] >= 0 && ppl[np] == 0) {
+                errmsg = "構造体は値で渡せません (ポインタで渡してください)";
+                return 0;
+            }
             plens[np] = 0;
             skip_spaces();
             if (is_ident_start(*cur)) {
@@ -1766,8 +2071,8 @@ static int parse_funcdef(void) {
             errmsg = "引数の名前が必要です";
             return 0;
         }
-        int var = define_var_typed(pnames[k], plens[k], pbs[k],
-                                   ppl[k], 1, pet[k]);
+        int var = define_var_full(pnames[k], plens[k], pbs[k],
+                                  ppl[k], 1, pet[k], pst[k], 1);
         if (var < 0)
             return 0;
         func_param_var[f][k] = var;
@@ -1794,511 +2099,6 @@ static int parse_funcdef(void) {
     return 1;
 }
 
-/* 文の並びを読む。in_brace が 1 のときは while の本体で、
- * '}' まで読んで '}' を消費する。0 のときはプログラムの
- * 頭から、最後の式か入力の終わりまで読む。
- * 読めたら先頭の文ノード (文が無ければ -1)、
- * 失敗したら -2 を返す (エラー理由は errmsg)。
- * プログラムの頭 (in_brace=0) では、最後の式に出会ったら
- * prog_final / prog_has_final に置いて終わる */
-static int parse_stmt_list(int in_brace) {
-    int head = -1;
-    int tail = -1;
-    for (;;) {
-        skip_spaces();
-        if (in_brace) {
-            if (*cur == '}') {
-                cur++;
-                return head;
-            }
-            if (*cur == '\0') {
-                errmsg = "文の並びが } で閉じていません";
-                return -2;
-            }
-        } else {
-            if (*cur == '\0')
-                return head;  /* 文だけのプログラムもよい */
-        }
-        /* 裸のブロック (v25): parse_stmt が本体を読む。
-         * 並びは複数ノードの鎖で返るので、末尾も進める */
-        if (*cur == '{') {
-            int stmt = parse_stmt();
-            if (stmt < 0)
-                return -2;
-            if (head < 0)
-                head = stmt;
-            else
-                node_next[tail] = stmt;
-            tail = stmt;
-            while (node_next[tail] >= 0)
-                tail = node_next[tail];
-            continue;
-        }
-        /* '*' で始まる場合の先読み: 相手の後ろに '=' が
-         * あればメモリ書き込み文、無ければ * で始まる式
-         * (プログラムの最後の式) である。相手は変数か数
-         * だけを試す (副作用の無い読み方しかしない) */
-        if (*cur == '*') {
-            char *save_star = cur;
-            cur++;
-            skip_spaces();
-            int is_store = 0;
-            if (is_digit(*cur) || is_ident_start(*cur)) {
-                int operand = parse_primary_node();
-                if (operand >= 0) {
-                    skip_spaces();
-                    if (*cur == '=' && cur[1] != '=')
-                        is_store = 1;
-                }
-            }
-            cur = save_star;
-            if (is_store) {
-                int stmt = parse_stmt();
-                if (stmt < 0)
-                    return -2;
-                if (head < 0)
-                    head = stmt;
-                else
-                    node_next[tail] = stmt;
-                tail = stmt;
-                continue;
-            }
-            /* 式だった。先読みを巻き戻して下へ進む */
-        }
-        /* ++ / -- で始まる文 (前置の増減文、v19) */
-        if ((cur[0] == '+' && cur[1] == '+') ||
-            (cur[0] == '-' && cur[1] == '-')) {
-            int stmt = parse_stmt();
-            if (stmt < 0)
-                return -2;
-            if (head < 0)
-                head = stmt;
-            else
-                node_next[tail] = stmt;
-            tail = stmt;
-            continue;
-        }
-        /* 文の始まりかどうかを先読みする: 識別子で始まる場合、
-         * 名前とその次第で「代入文・while・putc」のどれか、
-         * それ以外 (式の始まり) もありうる */
-        char *save = cur;
-        if (is_ident_start(*cur)) {
-            if (!parse_ident())
-                return -2;
-            if (ident_is("typedef")) {
-                /* typedef はファイルの範囲だけ (v36)。
-                 * 文ではないので並びには入れず、名簿への
-                 * 登録だけして次へ進む */
-                cur = save;
-                if (in_brace) {
-                    errmsg = "typedef は関数の外でだけ書けます";
-                    return -2;
-                }
-                if (parse_typedef() < 0)
-                    return -2;
-                continue;
-            }
-            int is_keyword = ident_is("while") || ident_is("putc") ||
-                             ident_is("if") || ident_is("for") ||
-                             ident_is("break") || ident_is("continue") ||
-                             ident_is("return");
-            int is_type = is_type_word() || ident_is("const") || ident_is("static") ||
-                          is_typedef_name();
-            if (is_type) {
-                /* 型で始まるのは、関数定義か宣言の文。
-                 * 名前の後ろが '[' (配列) か '=' (初期化) か
-                 * ';' (宣言だけ) なら宣言の文で、こちらは
-                 * どこにでも置ける。'(' なら関数定義で、
-                 * 置けるのはプログラムの頭だけ (v21) */
-                cur = save;
-                int is_decl_stmt = 0;
-                if (parse_type()) {
-                    skip_spaces();
-                    if (parse_ident()) {
-                        skip_spaces();
-                        is_decl_stmt = (*cur == '[' || *cur == '=' ||
-                                        *cur == ';');
-                    }
-                }
-                cur = save;
-                if (is_decl_stmt) {
-                    int stmt = parse_stmt();
-                    if (stmt < 0)
-                        return -2;
-                    if (!in_brace) {
-                        /* トップレベルの宣言は実行文では
-                         * ないので、文の並びには入れない
-                         * (v24)。これで宣言と main が
-                         * 混在できる。初期化の値は初期
-                         * イメージに記録済み */
-                        continue;
-                    }
-                    if (head < 0)
-                        head = stmt;
-                    else
-                        node_next[tail] = stmt;
-                    tail = stmt;
-                    continue;
-                }
-                if (in_brace) {
-                    errmsg = "関数定義はプログラムの頭にだけ書けます";
-                    return -2;
-                }
-                if (!parse_funcdef())
-                    return -2;
-                continue;
-            }
-            skip_spaces();
-            int is_assign = (*cur == '=' && cur[1] != '=') ||
-                            (cur[1] == '=' && (*cur == '+' || *cur == '-' ||
-                             *cur == '*' || *cur == '/' || *cur == '%' ||
-                             *cur == '&' || *cur == '|' || *cur == '^')) ||
-                            ((*cur == '<' || *cur == '>') &&
-                             cur[1] == *cur && cur[2] == '=');
-                            /* 複合代入 op= も代入文 (v25) */
-            int is_call = (*cur == '(');
-            int is_incdec = (cur[0] == '+' && cur[1] == '+') ||
-                            (cur[0] == '-' && cur[1] == '-');
-            int is_index_store = 0;
-            if (*cur == '[') {
-                /* 名前 [ ... ] の後ろに '=' があれば、要素への
-                 * 書き込み文 (式の要素読みと見分ける)。
-                 * ']' までを数えて先読みするだけ。2次元の
-                 * [ 行 ] [ 列 ] では、']' の後に '[' が続けば
-                 * もう一段数え直す (v23) */
-                int depth = 0;
-                char *p = cur;
-                for (;;) {
-                    depth = 0;
-                    while (*p != '\0') {
-                        if (*p == '[')
-                            depth++;
-                        else if (*p == ']') {
-                            depth--;
-                            if (depth == 0) {
-                                p++;
-                                break;
-                            }
-                        }
-                        p++;
-                    }
-                    if (depth != 0)
-                        break;
-                    while (*p == ' ' || *p == '\t')
-                        p++;
-                    if (*p != '[')
-                        break;
-                }
-                is_index_store = (depth == 0 && *p == '=' &&
-                                  p[1] != '=');
-                if (depth == 0 &&
-                    ((p[0] == '+' && p[1] == '+') ||
-                     (p[0] == '-' && p[1] == '-')))
-                    is_incdec = 1;  /* 要素への増減文 (v25) */
-            }
-            if (is_keyword || is_assign || is_call || is_index_store ||
-                is_incdec) {
-                cur = save;  /* parse_stmt に頭から読ませる */
-                int stmt = parse_stmt();
-                if (stmt < 0)
-                    return -2;
-                if (head < 0)
-                    head = stmt;
-                else
-                    node_next[tail] = stmt;
-                tail = stmt;
-                continue;
-            }
-            cur = save;  /* 式だった。先読みを巻き戻す */
-        }
-        if (in_brace) {
-            errmsg = "while の本体には文だけが書けます";
-            return -2;
-        }
-        /* 最後の式。プログラムはここで終わる */
-        int expr = parse_expr();
-        if (expr < 0)
-            return -2;
-        skip_spaces();
-        if (*cur != '\0') {
-            errmsg = "最後の式の後に、余分な文字があります";
-            return -2;
-        }
-        prog_final = expr;
-        prog_has_final = 1;
-        return head;
-    }
-}
-
-/* 定数式を評価する (v24): ファイル範囲の初期化子の値を、
- * コンパイルの時点で計算するための小さな評価器。扱える
- * のは数、文字列、単項 - !、二項の算術・ビット演算だけ
- * (変数や呼び出しは定数ではない)。戻り値: 1 = 数値定数
- * (*out に値)、2 = 文字列 (*out に文字列番号。実際の値は
- * 文字列の住所で、生成のときに決まる)、0 = 定数でない */
-static int eval_const(int node, long *out) {
-    int k = node_kind[node];
-    if (k == NODE_NUM) {
-        /* 16進リテラルは parse の時点で int の範囲に
-         * 畳んであるが、値としては符号なし32ビットの
-         * 数 (式の中での作り方、gen_load_u32 と同じ)。
-         * 符号拡張のまま初期値にすると、式で読んだ
-         * ときの値と食い違う (v27 のテストで発覚) */
-        *out = node_val[node] & 0xFFFFFFFFL;
-        return 1;
-    }
-    if (k == NODE_STR) {
-        *out = node_val[node];
-        return 2;
-    }
-    if (k == NODE_NEG) {
-        if (eval_const(node_lhs[node], out) != 1)
-            return 0;
-        *out = -*out;
-        return 1;
-    }
-    if (k == NODE_NOT) {
-        if (eval_const(node_lhs[node], out) != 1)
-            return 0;
-        *out = *out == 0 ? 1 : 0;
-        return 1;
-    }
-    if (k == NODE_BITNOT) {
-        if (eval_const(node_lhs[node], out) != 1)
-            return 0;
-        *out = ~*out;
-        return 1;
-    }
-    if (k == NODE_COND) {
-        /* 三項も定数同士なら畳める (v25)。文字列の枝は
-         * 選ばれた側がそのまま答えになる */
-        long c;
-        if (eval_const(node_lhs[node], &c) != 1)
-            return 0;
-        return eval_const(c != 0 ? node_val[node] : node_rhs[node],
-                          out);
-    }
-    if (k == NODE_ADD || k == NODE_SUB || k == NODE_MUL ||
-        k == NODE_DIV || k == NODE_MOD || k == NODE_SHL ||
-        k == NODE_SHR || k == NODE_AND || k == NODE_OR ||
-        k == NODE_XOR) {
-        long l;
-        long r;
-        if (eval_const(node_lhs[node], &l) != 1 ||
-            eval_const(node_rhs[node], &r) != 1)
-            return 0;
-        if (k == NODE_ADD)
-            *out = l + r;
-        else if (k == NODE_SUB)
-            *out = l - r;
-        else if (k == NODE_MUL)
-            *out = l * r;
-        else if (k == NODE_DIV) {
-            if (r == 0)
-                return 0;
-            *out = l / r;
-        } else if (k == NODE_MOD) {
-            if (r == 0)
-                return 0;
-            *out = l % r;
-        } else if (k == NODE_SHL)
-            *out = l << r;
-        else if (k == NODE_SHR)
-            *out = l >> r;
-        else if (k == NODE_AND)
-            *out = l & r;
-        else if (k == NODE_OR)
-            *out = l | r;
-        else
-            *out = l ^ r;
-        return 1;
-    }
-    return 0;
-}
-
-/* typedef を読む (v36): typedef <型> <名前> ;
- * ファイルの範囲でだけ呼ばれる (振り分けは
- * parse_stmt_list)。名簿に登録するだけで、
- * ノードは作らない。成功したら 0、失敗は -1 */
-static int parse_typedef(void) {
-    if (!parse_ident())  /* "typedef" 自体を読み直す */
-        return -1;
-    skip_spaces();
-    if (!parse_type()) {
-        errmsg = "typedef の後には型が必要です";
-        return -1;
-    }
-    int et = parse_type_etype;
-    int bs = parse_type_bsize;
-    int pl = parse_type_plevel;
-    skip_spaces();
-    if (!parse_ident()) {
-        errmsg = "typedef には付ける名前が必要です";
-        return -1;
-    }
-    char name_buf[32];
-    int name_len = ident_len;
-    for (int i = 0; i < name_len; i++)
-        name_buf[i] = ident_buf[i];
-    skip_spaces();
-    if (*cur != ';') {
-        errmsg = "typedef の終わりには ; が必要です (名前は1つだけ付けられます)";
-        return -1;
-    }
-    cur++;
-    /* 名前の衝突を確かめる: 型の言葉そのもの、既存の
-     * typedef、既存の変数・配列・関数と同名は不可 */
-    if (is_type_word() || ident_is("const") || ident_is("static") ||
-        ident_is("typedef")) {
-        errmsg = "その名前は型の言葉なので typedef 名にできません";
-        return -1;
-    }
-    int existing = find_typedef(name_buf, name_len);
-    if (existing >= 0) {
-        /* 同じ型への付け直しは受ける (C11 と同じ。ヘッダを
-         * 複数のファイルで共有する形のため)。違う型への
-         * 付け直しはエラー */
-        if (tdef_etype[existing] == et && tdef_bsize[existing] == bs &&
-            tdef_plevel[existing] == pl)
-            return 0;
-        errmsg = "その typedef 名は違う型で既にあります";
-        return -1;
-    }
-    if (find_var(name_buf, name_len) >= 0 ||
-        find_array(name_buf, name_len) >= 0 ||
-        find_func(name_buf, name_len) >= 0) {
-        errmsg = "その名前は変数・配列・関数に使われています";
-        return -1;
-    }
-    if (ntdef >= 64) {
-        errmsg = "typedef は64個までです";
-        return -1;
-    }
-    int td = ntdef++;
-    for (int i = 0; i < name_len; i++)
-        tdef_names[td][i] = name_buf[i];
-    tdef_names[td][name_len] = '\0';
-    tdef_name_len[td] = name_len;
-    tdef_etype[td] = et;
-    tdef_bsize[td] = bs;
-    tdef_plevel[td] = pl;
-    return 0;
-}
-
-/* 宣言の文を読む (v21 で変数宣言を追加):
- *   型 名前 [ 大きさ ] ;         配列の宣言 (要素の大きさは
- *   型 名前 [ 行 ] [ 列 ] ;       型から決まる、v23。2次元も)
- *   型 名前 = 式 ;         初期化つきの変数宣言
- *   型 名前 ;              変数の宣言だけ (値は不定。グローバル
- *                          は静的領域で 0 始まり)
- * 変数の宣言は、その場所 (関数の中ならローカル、外なら
- * グローバル) に変数を作る。成功したらノード番号、失敗は -1 */
-static int parse_decl_stmt(void) {
-    if (!parse_type()) {
-        errmsg = "宣言は 型 名前 の形で書きます";
-        return -1;
-    }
-    int bsize = parse_type_bsize;
-    int plevel = parse_type_plevel;
-    int etype = parse_type_etype;
-    skip_spaces();
-    if (!parse_ident()) {
-        errmsg = "宣言には名前が必要です";
-        return -1;
-    }
-    char name_buf[32];
-    int name_len = ident_len;
-    for (int i = 0; i < name_len; i++)
-        name_buf[i] = ident_buf[i];
-    skip_spaces();
-    if (*cur == '[') {
-        /* 配列の宣言: [ 大きさ ] または [ 行 ] [ 列 ] (v23) */
-        cur++;
-        skip_spaces();
-        int size = parse_number_value();
-        if (size < 0)
-            return -1;
-        if (size < 1 || size > 1048576) {
-            errmsg = "配列の大きさは 1 から 1048576 までです";
-            return -1;
-        }
-        if (!expect_char(']', "配列の大きさの後には ] が必要です"))
-            return -1;
-        int cols = 0;
-        skip_spaces();
-        if (*cur == '[') {
-            /* 2次元目: 列の数 */
-            cur++;
-            skip_spaces();
-            cols = parse_number_value();
-            if (cols < 0)
-                return -1;
-            if (cols < 1 || cols > 1048576) {
-                errmsg = "配列の大きさは 1 から 1048576 までです";
-                return -1;
-            }
-            if (!expect_char(']', "配列の大きさの後には ] が必要です"))
-                return -1;
-        }
-        if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
-            return -1;
-        /* 要素の大きさ (v23): 型に * が付いていれば要素は
-         * ポインタなので 8 バイト。そうでなければ型の
-         * 基本の大きさ (char は 1、それ以外は 8) */
-        int esize = plevel >= 1 ? 8 : bsize;
-        int eet = plevel >= 1 ? 8 : etype;
-        int a = define_array(name_buf, name_len, size, cols,
-                             esize, eet);
-        if (a < 0)
-            return -1;
-        return new_node(NODE_DECL, a, 0, 0);
-    }
-    if (*cur == '=') {
-        /* 初期化つき宣言: 式を読んでから名簿に載せる
-         * (代入文と同じ理由。初期化の式の中で自分は使えない) */
-        cur++;
-        int expr = parse_expr();
-        if (expr < 0)
-            return -1;
-        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1, etype);
-        if (var < 0)
-            return -1;
-        if (!expect_char(';', "宣言の終わりには ; が必要です"))
-            return -1;
-        if (parse_cur_func < 0) {
-            /* ファイル範囲の初期化 (v24): 値は実行コード
-             * ではなく、静的領域の初期イメージに埋める。
-             * 埋められるのは定数だけ (C の作法と同じ)。
-             * ノードは「何もしない」宣言として返す */
-            long v;
-            int kind = eval_const(expr, &v);
-            if (kind == 0) {
-                errmsg = "ファイル範囲の初期化子は定数 (数や文字列) だけです";
-                return -1;
-            }
-            if (var_init_kind[var] != 0) {
-                /* 仮定義の後に初期値が来るのはよいが、
-                 * 初期値が二つは食い違い (v33) */
-                errmsg = "初期値は一つだけです";
-                return -1;
-            }
-            var_init_kind[var] = kind;
-            var_init_val[var] = v;
-            has_var_inits = 1;
-            return new_node(NODE_VDECL, var, 0, 0);
-        }
-        return new_node(NODE_ASSIGN, var, expr, 0);
-    }
-    if (*cur == ';') {
-        cur++;
-        int var = define_var_typed(name_buf, name_len, bsize, plevel, 1, etype);
-        if (var < 0)
-            return -1;
-        return new_node(NODE_VDECL, var, 0, 0);
-    }
-    errmsg = "宣言は 型 名前 ; か 型 名前 = 式 ; の形です";
-    return -1;
-}
 
 /* for の更新部を読む (v20): ')' の手前まで。
  * 無ければ -1、エラーは -2、読めたら文のノードを返す。
@@ -2392,7 +2192,7 @@ static int parse_stmt(void) {
         char *tsave = cur;
         if (parse_ident() &&
             (is_type_word() || ident_is("const") || ident_is("static") ||
-             is_typedef_name())) {
+             is_typedef_name() || ident_is("struct"))) {
             cur = tsave;
             return parse_decl_stmt();
         }
@@ -2608,6 +2408,81 @@ static int parse_stmt(void) {
     int name_len = ident_len;
     for (int i = 0; i < name_len; i++)
         name_buf[i] = ident_buf[i];
+
+    /* メンバへの書き込み・増減文 (v37): 名前から始まる
+     * designator に . か -> が含まれていたら (先読みで
+     * 確かめる)、頭に戻して後置の段で読み直し、= なら
+     * 要素への書き込み (ELEM_STORE) にする */
+    {
+        char *p = cur;
+        int has = 0;
+        int ok = 1;
+        for (;;) {
+            while (*p == ' ' || *p == '\t')
+                p++;
+            if (*p == '[') {
+                int d = 0;
+                while (*p != '\0') {
+                    if (*p == '[')
+                        d++;
+                    else if (*p == ']') {
+                        d--;
+                        if (d == 0) {
+                            p++;
+                            break;
+                        }
+                    }
+                    p++;
+                }
+                if (d != 0) {
+                    ok = 0;
+                    break;
+                }
+                continue;
+            }
+            if (*p == '.' || (p[0] == '-' && p[1] == '>')) {
+                has = 1;
+                p += (*p == '.') ? 1 : 2;
+                while (*p == ' ' || *p == '\t')
+                    p++;
+                while (is_ident_start(*p) || is_digit(*p))
+                    p++;
+                continue;
+            }
+            break;
+        }
+        if (ok) {
+            while (*p == ' ' || *p == '\t')
+                p++;
+        }
+        if (ok && has &&
+            ((*p == '=' && p[1] != '=') ||
+             (p[0] == '+' && p[1] == '+') ||
+             (p[0] == '-' && p[1] == '-'))) {
+            cur = stmt_name_start;
+            int d = parse_postfix_expr();
+            if (d < 0)
+                return -1;
+            skip_spaces();
+            if (*cur == '=' && cur[1] != '=') {
+                cur++;
+                int val = parse_expr();
+                if (val < 0)
+                    return -1;
+                if (!expect_char(';', "書き込み文の終わりには ; が必要です"))
+                    return -1;
+                if (node_kind[d] != NODE_MEMBER &&
+                    node_kind[d] != NODE_MELEM) {
+                    errmsg = "メンバへの書き込みの形が違います";
+                    return -1;
+                }
+                return new_node(NODE_ELEM_STORE, 0, d, val);
+            }
+            if (!expect_char(';', "文の終わりには ; が必要です"))
+                return -1;
+            return d;  /* ++ / -- は後置の段が包んだ */
+        }
+    }
 
     /* 名前の次が '[' なら、要素への書き込み文:
      * 配列なら 名前 [ 添字 ] = 式 ; (2次元は [ 行 ] [ 列 ])、
@@ -2829,6 +2704,8 @@ static int parse_program(char *program) {
     nnode = 0;
     nvar = 0;
     ntdef = 0;
+    nstag = 0;  /* 構造体もファイルごとに数え直す (v37) */
+    nsmem = 0;
     var_nglobal = 0;
     parse_cur_func = -1;
     nstr = 0;

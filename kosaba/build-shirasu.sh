@@ -80,7 +80,7 @@ apply 02-parse.c 'str_pool[16384]' 'str_pool[4096]' 1
 apply 02-parse.c '[20480]' '[2048]' 6
 apply 02-parse.c 'nnode >= 20480' 'nnode >= 2048' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 4095' 1
-apply 02-parse.c '[1024]' '[256]' 9
+apply 02-parse.c '[1024]' '[256]' 10
 apply 02-parse.c 'nvar >= 1024' 'nvar >= 256' 1
 # 03-gen.c: 命令表 (5つ) とパッチ表
 apply 03-gen.c '[40960]' '[4096]' 7

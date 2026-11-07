@@ -811,7 +811,7 @@ def parse_obj(text):
         elif k == 'func':
             o['funcs'][p[1]] = (int(p[2]), int(p[3])); o['funorder'].append(p[1])
         elif k == 'decl': o['funorder'].append(p[1])
-        elif k in ('var', 'varc'): o['vars'].append((p[1], k == 'var'))
+        elif k in ('var', 'varc'): o['vars'].append((p[1], k == 'var', int(p[2])))
         elif k == 'arr': o['arrs'].append((p[1], int(p[2]), int(p[3])))
         elif k == 'init': o['inits'][p[1]] = ('init', int(p[2]))
         elif k == 'iptr':
@@ -871,13 +871,17 @@ def main():
                 arr_addr[name] = (DATA_BASE + apos, size); apos += size
     arr_total = apos - spos
     var_addr = {}
+    var_nslots = {}
     order = []
     inits = {}
     init_owner = {}
+    slotpos = 0
     for o in objs:
-        for name, firm in o['vars']:
+        for name, firm, nslots in o['vars']:
             if name not in var_addr:
-                var_addr[name] = DATA_BASE + spos + arr_total + len(order) * 8
+                var_addr[name] = DATA_BASE + spos + arr_total + slotpos * 8
+                var_nslots[name] = nslots
+                slotpos += nslots
                 order.append(name)
             if name in o['inits']:
                 inits[name] = o['inits'][name]; init_owner[name] = o
@@ -931,6 +935,8 @@ def main():
             elif it[0] == 'str': v = str_base[id(init_owner[name])] + it[1]
             else: v = sym(it[1]) + it[2]
         gbl += struct.pack('<q', v)
+        for _ in range(var_nslots[name] - 1):
+            gbl += struct.pack('<q', 0)
     has_inits = 1 if inits else 0
     str_all = b''.join(o['strings'] for o in objs)
 
@@ -1005,11 +1011,11 @@ echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
 # 分割セルフホスト: 断片ごとにオブジェクト化し、nori で
 # つないだ iwac2 が、一括の iwac2 (v27 の節) とバイト一致
 if [ -x "$TMP/nori" ]; then
-    for f in 01-head 02-parse 03-gen 04-encode 05-input 06-preproc 07-main; do
+    for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
         "$IWAC" --kosaba --object "src/decls.c" "src/$f.c" > "$TMP/v33-$f.iwo" || fail "v33: 断片 $f のオブジェクト化に失敗"
     done
     "$IWAC" --kosaba --object kosaba/kosaba_rt.c > "$TMP/v33-rt.iwo" || fail "v33: rt のオブジェクト化に失敗"
-    "$TMP/nori" "$TMP/v33-01-head.iwo" "$TMP/v33-02-parse.iwo" "$TMP/v33-03-gen.iwo" "$TMP/v33-04-encode.iwo" "$TMP/v33-05-input.iwo" "$TMP/v33-06-preproc.iwo" "$TMP/v33-07-main.iwo" "$TMP/v33-rt.iwo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
+    "$TMP/nori" "$TMP/v33-01-head.iwo" "$TMP/v33-02-parse.iwo" "$TMP/v33-02b-decl.iwo" "$TMP/v33-03-gen.iwo" "$TMP/v33-04-encode.iwo" "$TMP/v33-05-input.iwo" "$TMP/v33-06-preproc.iwo" "$TMP/v33-07-main.iwo" "$TMP/v33-rt.iwo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
     cmp -s "$TMP/v27self.elf" "$TMP/v33split.elf" || fail "v33: 分割と一括で iwac2 が違う"
     echo "ok: v33: 分割セルフホスト (断片→nori) が一括とバイト一致"
 else
@@ -1092,6 +1098,37 @@ printf 'typedef uint32 u32;\nu32 g;\nu32 getg();\nvoid setg(u32 v);\nint main() 
 python3 "$TMP/mini_nori.py" "$TMP/v36mini.elf" "$TMP/v36sa.iwo" "$TMP/v36sb.iwo" >/dev/null || fail "v36: 参照リンカでのリンクに失敗"
 cmp -s "$TMP/v36one.elf" "$TMP/v36mini.elf" || fail "v36: 分割 (参照リンカ) と一括で出力が違う"
 echo "ok: v36: typedef の分割コンパイルが一括と一致"
+
+# --- v37: 構造体 ---
+# 定義とレイアウトは C 互換 (doc/struct.md)。sizeof は
+# gcc の値と一致するはず (Point 8、Flags 16、Rect 16)
+"$IWAC" 'struct Point { int32 x; int32 y; }; struct Flags { char kind; uint32 mask; char name[8]; }; struct Rect { struct Point tl; struct Point br; }; int main() { putc(48 + sizeof(struct Point) - 8 + 1); putc(48 + (sizeof(struct Flags) == 16)); putc(48 + (sizeof(struct Rect) == 16)); putc(48 + (sizeof(char) == 1)); putc(48 + (sizeof(int) == 8)); return 0; }' > "$TMP/v37a.bin"
+check_tail "$TMP/v37a.bin" 11111 "v37: sizeof が C と同じレイアウト"
+"$IWAC" 'struct Point { int32 x; int32 y; }; struct Flags { char kind; uint32 mask; char name[8]; }; struct Point p; struct Flags f; int main() { p.x = 3; p.y = 4; putc(48 + p.x + p.y); f.kind = 65; f.mask = 0x12345678; f.name[2] = 122; putc(f.kind); putc(48 + (f.mask == 0x12345678)); putc(f.name[2]); return 0; }' > "$TMP/v37b.bin"
+check_tail "$TMP/v37b.bin" "7A1z" "v37: メンバの読み書き・配列メンバ・パディング"
+"$IWAC" 'struct Point { int32 x; int32 y; }; struct Node { int32 value; struct Node *next; }; struct Point pts[4]; struct Node n1; struct Node n2; int main() { struct Point *q = &pts[0]; q->x = 9; pts[3].y = 2; putc(48 + pts[0].x); putc(48 + pts[3].y); n1.value = 7; n1.next = &n2; n2.value = 8; putc(48 + n1.next->value - 1); return 0; }' > "$TMP/v37c.bin"
+check_tail "$TMP/v37c.bin" "927" "v37: -> ・構造体の配列・リンクリスト"
+"$IWAC" 'struct Mix { char a; int32 b; char c; int64 d; int16 e; char f; }; struct Mix m; typedef struct Mix Mix; int main() { m.a = 97; m.b = 0x11223344; m.c = 99; m.d = 0x01020304; m.e = 0x5566; m.f = 102; putc(m.a); putc(48 + (m.b == 0x11223344)); putc(m.c); putc(48 + (m.d == 0x01020304)); putc(48 + (m.e == 0x5566)); putc(m.f); m.c = 88; m.f = 90; putc(48 + (m.b == 0x11223344)); Mix loc; loc.b = 5; putc(48 + loc.b); return 0; }' > "$TMP/v37d.bin"
+check_tail "$TMP/v37d.bin" "a1c11f15" "v37: パディングで隣が壊れない・typedef struct・ローカル"
+"$IWAC" 'struct Point { int32 x; int32 y; }; struct Point p; int main() { p.x = 1; p.x++; ++p.y; putc(48 + p.x + p.y); struct Point *q = &p; putc(48 + (q->x == 2)); return 0; }' > "$TMP/v37e.bin"
+check_tail "$TMP/v37e.bin" "31" "v37: メンバの ++ と & ・->"
+check_error 'struct P { int32 x; }; int f(struct P p) { return 0; } int main() { return 0; }' "v37: 構造体の値渡し"
+check_error 'struct P { int32 x; }; struct P f() { struct P a; return a; } int main() { return 0; }' "v37: 構造体の値返し"
+check_error 'struct P { int32 x; }; struct P a; struct P b; int main() { a = b; return 0; }' "v37: 構造体の代入"
+check_error 'struct P { int32 x; }; struct P a; int main() { a.zzz = 1; return 0; }' "v37: 無いメンバ"
+check_error 'struct P { int32 x; }; struct P a; int main() { struct P *q = &a; q.x = 1; return 0; }' "v37: ポインタへの ."
+check_error 'struct P { int32 x; }; int main() { struct P a = 1; return 0; }' "v37: 構造体の初期化"
+check_error 'int main() { struct P { int32 x; }; return 0; }' "v37: 関数の中の定義"
+# 構造体を使っても分割コンパイルが一括と一致する (各 TU が
+# 同じ定義を持ち、複数枠のグローバルが合併される)
+printf 'struct Point { int32 x; int32 y; };\nstruct Flags { char kind; uint32 mask; char name[8]; };\nstruct Point gp;\nstruct Flags gf;\nint after;\nint fill() { gp.x = 3; gp.y = 4; gf.kind = 75; gf.mask = 0x99; gf.name[1] = 110; after = 5; return gp.x + gp.y; }\n' > "$TMP/v37sa.c"
+printf 'struct Point { int32 x; int32 y; };\nstruct Flags { char kind; uint32 mask; char name[8]; };\nstruct Point gp;\nstruct Flags gf;\nint after;\nint fill();\nint main() { int r = fill(); putc(48 + r); putc(gf.kind); putc(48 + (gf.mask == 0x99)); putc(gf.name[1]); putc(48 + after); putc(10); return 0; }\n' > "$TMP/v37sb.c"
+"$IWAC" --kosaba --object "$TMP/v37sa.c" > "$TMP/v37sa.iwo" || fail "v37: オブジェクト出力 (a) に失敗"
+"$IWAC" --kosaba --object "$TMP/v37sb.c" > "$TMP/v37sb.iwo" || fail "v37: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba "$TMP/v37sa.c" "$TMP/v37sb.c" > "$TMP/v37one.elf" || fail "v37: 一括コンパイルに失敗"
+python3 "$TMP/mini_nori.py" "$TMP/v37mini.elf" "$TMP/v37sa.iwo" "$TMP/v37sb.iwo" >/dev/null || fail "v37: 参照リンカでのリンクに失敗"
+cmp -s "$TMP/v37one.elf" "$TMP/v37mini.elf" || fail "v37: 分割 (参照リンカ) と一括で出力が違う"
+echo "ok: v37: 構造体の分割コンパイルが一括と一致"
 
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る
