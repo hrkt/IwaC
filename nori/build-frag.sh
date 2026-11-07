@@ -66,10 +66,10 @@ apply nori.c 'in_buf[393216]' 'in_buf[163840]' 1
 apply nori.c '393216 - in_len' '163840 - in_len' 1
 apply nori.c 'in_len >= 393216' 'in_len >= 163840' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[262144]' 'code_pool[131072]' 1
-apply nori.c '&code_used, 262144' '&code_used, 131072' 1
-apply nori.c 'out_code[262144]' 'out_code[131072]' 1
-apply nori.c '> 262144' '> 131072' 1
+apply nori.c 'code_pool[262144]' 'code_pool[196608]' 1
+apply nori.c '&code_used, 262144' '&code_used, 196608' 1
+apply nori.c 'out_code[262144]' 'out_code[196608]' 1
+apply nori.c '> 262144' '> 196608' 1
 # 文字列置き場と名前プール
 apply nori.c 'str_pool[131072]' 'str_pool[16384]' 1
 apply nori.c '&str_used, 131072' '&str_used, 16384' 1

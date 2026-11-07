@@ -1068,6 +1068,31 @@ python3 "$TMP/mini_nori.py" "$TMP/v35mini.elf" "$TMP/v35sa.iwo" "$TMP/v35sb.iwo"
 cmp -s "$TMP/v35one.elf" "$TMP/v35mini.elf" || fail "v35: 分割 (参照リンカ) と一括で出力が違う"
 echo "ok: v35: 幅つきの型の分割コンパイルが一括と一致"
 
+# --- v36: typedef ---
+# 型への別名。名簿を引いて展開するので、幅つきの型の
+# 折り返しやポインタの歩幅がそのまま効くこと
+"$IWAC" 'typedef uint32 u32; u32 addwrap(u32 a, u32 b) { return a + b; } int main() { u32 x = 0xFFFFFFFF; putc(48 + (addwrap(x, 1) == 0)); u32 g = 0xFFFFFFFF; g++; putc(48 + (g == 0)); return 0; }' > "$TMP/v36a.bin"
+check_tail "$TMP/v36a.bin" 11 "v36: typedef 名での宣言・引数・戻り値 (折り返し)"
+"$IWAC" 'typedef uint32 u32; typedef u32 word; typedef uint32 *u32ptr; typedef char *str; int main() { word w = 0xFFFFFFFF; w = w + 1; putc(48 + (w == 0)); u32 v = 5; u32ptr p = &v; *p = 0xFFFFFFFF; putc(48 + (v == 0xFFFFFFFF)); str s = "A"; putc(s[0]); return 0; }' > "$TMP/v36b.bin"
+check_tail "$TMP/v36b.bin" 11A "v36: 連鎖 typedef・ポインタの typedef・char * の typedef"
+"$IWAC" 'typedef uint32 u32; typedef int16 i16; int main() { u32 a[2]; a[0] = 0x12345678; putc(48 + (a[0] == 0x12345678)); u32 z = (u32)-1; putc(48 + (z == 0xFFFFFFFF)); i16 h = 32767; h = h + 1; putc(48 + (h == -32767 - 1)); return 0; }' > "$TMP/v36c.bin"
+check_tail "$TMP/v36c.bin" 111 "v36: typedef 名の配列・キャスト・int16 の折り返し"
+"$IWAC" 'typedef long i64; typedef unsigned long usz; int main() { i64 v = -1; putc(48 + (v < 0)); usz u = 0xFFFFFFFF; u = u + 1; putc(48 + (u > 0xFFFFFFFF)); static i64 c; c = c + 5; putc(48 + (c == 5)); return 0; }' > "$TMP/v36d.bin"
+check_tail "$TMP/v36d.bin" 111 "v36: 従来の型への typedef (64ビットのまま)"
+check_error 'int main() { typedef int x; return 0; }' "v36: 関数の中の typedef"
+check_error 'typedef int x; typedef uint32 x; int main() { return 0; }' "v36: typedef 名の違う型への付け直し"
+check_error 'int x; typedef int x; int main() { return 0; }' "v36: 変数と同名の typedef"
+# typedef を使っても分割コンパイルが一括と一致する (各 TU が
+# 自分の typedef を持つ。宣言の形は v35 の分割チェックと同じ)
+printf 'typedef uint32 u32;\nu32 g;\nu32 getg() { return g; }\nvoid setg(u32 v) { g = v; }\n' > "$TMP/v36sa.c"
+printf 'typedef uint32 u32;\nu32 g;\nu32 getg();\nvoid setg(u32 v);\nint main() { setg(0xFFFFFFFF); return getg() == 0xFFFFFFFF ? 65 : 66; }\n' > "$TMP/v36sb.c"
+"$IWAC" --kosaba --object "$TMP/v36sa.c" > "$TMP/v36sa.iwo" || fail "v36: オブジェクト出力 (a) に失敗"
+"$IWAC" --kosaba --object "$TMP/v36sb.c" > "$TMP/v36sb.iwo" || fail "v36: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba "$TMP/v36sa.c" "$TMP/v36sb.c" > "$TMP/v36one.elf" || fail "v36: 一括コンパイルに失敗"
+python3 "$TMP/mini_nori.py" "$TMP/v36mini.elf" "$TMP/v36sa.iwo" "$TMP/v36sb.iwo" >/dev/null || fail "v36: 参照リンカでのリンクに失敗"
+cmp -s "$TMP/v36one.elf" "$TMP/v36mini.elf" || fail "v36: 分割 (参照リンカ) と一括で出力が違う"
+echo "ok: v36: typedef の分割コンパイルが一括と一致"
+
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る
 cat > "$TMP/ds_test.c" <<'DASHITEST'

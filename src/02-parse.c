@@ -182,6 +182,19 @@ static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
 static int func_nlocals[192];  /* 関数ごとのフレーム枠数。
                              * 本体は関数の名簿の節で説明する */
 
+/* typedef の名簿 (v36): 型への別名。
+ *   tdef_etype[i] : 型タグ (v35 の etype)
+ *   tdef_bsize[i] : 基本の大きさ (char なら 1、それ以外は幅)
+ *   tdef_plevel[i]: その型そのものが持つポインタ段数
+ * ファイルの範囲でだけ登録でき、宣言した地点から有効。
+ * スコープは持たない (割り切りは doc/roadmap.md の v36) */
+static char tdef_names[64][32];
+static int tdef_name_len[64];
+static int tdef_etype[64];
+static int tdef_bsize[64];
+static int tdef_plevel[64];
+static int ntdef;
+
 /* 名前の一致だけを見る小物 */
 static int var_name_eq(int i, char *name, int len) {
     if (var_name_len[i] != len)
@@ -204,6 +217,25 @@ static int find_var(char *name, int len) {
     }
     for (int i = 0; i < nvar; i++) {
         if (var_owner[i] == -1 && var_name_eq(i, name, len))
+            return i;
+    }
+    return -1;
+}
+
+/* typedef の名前の一致だけを見る小物 */
+static int tdef_name_eq(int i, char *name, int len) {
+    if (tdef_name_len[i] != len)
+        return 0;
+    int j = 0;
+    while (j < len && tdef_names[i][j] == name[j])
+        j++;
+    return j == len;
+}
+
+/* typedef の名簿から名前を探す。あれば番号、無ければ -1 */
+static int find_typedef(char *name, int len) {
+    for (int i = 0; i < ntdef; i++) {
+        if (tdef_name_eq(i, name, len))
             return i;
     }
     return -1;
@@ -1457,6 +1489,7 @@ static int expect_char(char c, char *msg) {
 /* 文を1つ読む関数は互いに呼び合う (while の本体が文の並びで、
  * その文にまた while がありうる) ので、先に宣言だけ置く */
 static int parse_stmt(void);
+static int parse_typedef(void);  /* typedef (本体は宣言の節、v36) */
 static int parse_stmt_list(int in_brace);
 static int parse_body(void);  /* 制御文の本体 (v25) */
 
@@ -1505,6 +1538,11 @@ static int sized_type_etype(void) {
 /* 直前に読んだ型の情報 (v21): 宣言が変数を作るときに使う。
  * 先読みで呼ばれた場合は上書きされるが、本読みで最後に
  * 残るのが正しい値になる */
+/* 今読んだ識別子が typedef 名かどうか (v36) */
+static int is_typedef_name(void) {
+    return find_typedef(ident_buf, ident_len) >= 0;
+}
+
 static int parse_type_bsize;   /* char を含めば 1、それ以外は 8 */
 /* parse_type_plevel と parse_type_etype は前方で宣言済み */
 
@@ -1521,8 +1559,25 @@ static int parse_type(void) {
         if (!parse_ident())
             return 0;
     }
-    if (!is_type_word())
-        return 0;
+    if (!is_type_word()) {
+        /* typedef 名なら名簿を引く (v36)。型の言葉の
+         * 続き (unsigned long のような組み合わせ) は
+         * 無く、後ろの * だけがポインタ段数に足される */
+        int td = find_typedef(ident_buf, ident_len);
+        if (td < 0)
+            return 0;
+        skip_spaces();
+        int stars = 0;
+        while (*cur == '*') {  /* ポインタの印を数える */
+            stars++;
+            cur++;
+            skip_spaces();
+        }
+        parse_type_etype = tdef_etype[td];
+        parse_type_bsize = tdef_bsize[td];
+        parse_type_plevel = tdef_plevel[td] + stars;
+        return 1;
+    }
     int has_char = ident_is("char");
     int sized = sized_type_etype();  /* 幅つきの型 (v35) */
     /* 型の言葉が続く間は読み進める (unsigned long や
@@ -1830,11 +1885,25 @@ static int parse_stmt_list(int in_brace) {
         if (is_ident_start(*cur)) {
             if (!parse_ident())
                 return -2;
+            if (ident_is("typedef")) {
+                /* typedef はファイルの範囲だけ (v36)。
+                 * 文ではないので並びには入れず、名簿への
+                 * 登録だけして次へ進む */
+                cur = save;
+                if (in_brace) {
+                    errmsg = "typedef は関数の外でだけ書けます";
+                    return -2;
+                }
+                if (parse_typedef() < 0)
+                    return -2;
+                continue;
+            }
             int is_keyword = ident_is("while") || ident_is("putc") ||
                              ident_is("if") || ident_is("for") ||
                              ident_is("break") || ident_is("continue") ||
                              ident_is("return");
-            int is_type = is_type_word() || ident_is("const") || ident_is("static");
+            int is_type = is_type_word() || ident_is("const") || ident_is("static") ||
+                          is_typedef_name();
             if (is_type) {
                 /* 型で始まるのは、関数定義か宣言の文。
                  * 名前の後ろが '[' (配列) か '=' (初期化) か
@@ -2047,6 +2116,75 @@ static int eval_const(int node, long *out) {
     return 0;
 }
 
+/* typedef を読む (v36): typedef <型> <名前> ;
+ * ファイルの範囲でだけ呼ばれる (振り分けは
+ * parse_stmt_list)。名簿に登録するだけで、
+ * ノードは作らない。成功したら 0、失敗は -1 */
+static int parse_typedef(void) {
+    if (!parse_ident())  /* "typedef" 自体を読み直す */
+        return -1;
+    skip_spaces();
+    if (!parse_type()) {
+        errmsg = "typedef の後には型が必要です";
+        return -1;
+    }
+    int et = parse_type_etype;
+    int bs = parse_type_bsize;
+    int pl = parse_type_plevel;
+    skip_spaces();
+    if (!parse_ident()) {
+        errmsg = "typedef には付ける名前が必要です";
+        return -1;
+    }
+    char name_buf[32];
+    int name_len = ident_len;
+    for (int i = 0; i < name_len; i++)
+        name_buf[i] = ident_buf[i];
+    skip_spaces();
+    if (*cur != ';') {
+        errmsg = "typedef の終わりには ; が必要です (名前は1つだけ付けられます)";
+        return -1;
+    }
+    cur++;
+    /* 名前の衝突を確かめる: 型の言葉そのもの、既存の
+     * typedef、既存の変数・配列・関数と同名は不可 */
+    if (is_type_word() || ident_is("const") || ident_is("static") ||
+        ident_is("typedef")) {
+        errmsg = "その名前は型の言葉なので typedef 名にできません";
+        return -1;
+    }
+    int existing = find_typedef(name_buf, name_len);
+    if (existing >= 0) {
+        /* 同じ型への付け直しは受ける (C11 と同じ。ヘッダを
+         * 複数のファイルで共有する形のため)。違う型への
+         * 付け直しはエラー */
+        if (tdef_etype[existing] == et && tdef_bsize[existing] == bs &&
+            tdef_plevel[existing] == pl)
+            return 0;
+        errmsg = "その typedef 名は違う型で既にあります";
+        return -1;
+    }
+    if (find_var(name_buf, name_len) >= 0 ||
+        find_array(name_buf, name_len) >= 0 ||
+        find_func(name_buf, name_len) >= 0) {
+        errmsg = "その名前は変数・配列・関数に使われています";
+        return -1;
+    }
+    if (ntdef >= 64) {
+        errmsg = "typedef は64個までです";
+        return -1;
+    }
+    int td = ntdef++;
+    for (int i = 0; i < name_len; i++)
+        tdef_names[td][i] = name_buf[i];
+    tdef_names[td][name_len] = '\0';
+    tdef_name_len[td] = name_len;
+    tdef_etype[td] = et;
+    tdef_bsize[td] = bs;
+    tdef_plevel[td] = pl;
+    return 0;
+}
+
 /* 宣言の文を読む (v21 で変数宣言を追加):
  *   型 名前 [ 大きさ ] ;         配列の宣言 (要素の大きさは
  *   型 名前 [ 行 ] [ 列 ] ;       型から決まる、v23。2次元も)
@@ -2253,7 +2391,8 @@ static int parse_stmt(void) {
          * parse_stmt_list がそちらへ振り分ける) */
         char *tsave = cur;
         if (parse_ident() &&
-            (is_type_word() || ident_is("const") || ident_is("static"))) {
+            (is_type_word() || ident_is("const") || ident_is("static") ||
+             is_typedef_name())) {
             cur = tsave;
             return parse_decl_stmt();
         }
@@ -2689,6 +2828,7 @@ static int parse_program(char *program) {
     cur = program;
     nnode = 0;
     nvar = 0;
+    ntdef = 0;
     var_nglobal = 0;
     parse_cur_func = -1;
     nstr = 0;

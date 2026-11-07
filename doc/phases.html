@@ -1757,10 +1757,35 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   逆に、変数の置き場所（8バイト枠）は据え置きで済みました。</p></div>
 </section>
 
+<!-- ================= v36 ================= -->
+<section class="phase" id="v36">
+  <div class="head"><span class="badge b-v4">v36</span><h2>typedef — 型に別名を付ける</h2></div>
+  <p class="goal-line">目標：<b>C で書かれたものの移植の土台として、型に別名を付けられるようにする。</b></p>
+  <p><code>typedef uint32 u32;</code> と書けば、それより後では
+  <code>u32</code> を型として使えます。変数の宣言、配列、関数の
+  引数と戻り値、キャスト — 型を書く場所ならどこでも大丈夫です。
+  ポインタの typedef（<code>typedef char *str;</code>）や、
+  別名への別名（連鎖）も受けます。</p>
+  <p>中身は「名前 → 型タグ・基本サイズ・ポインタ段数」の表が
+  1枚あるだけで、構文解析のときに引いて展開します。展開が
+  済めば typedef は消えるので、コード生成もオブジェクト形式も
+  typedef を知りません。v35 の幅つきの型の意味（折り返しや
+  符号なし演算）は、別名の先にもそのまま効きます。</p>
+  <div>
+    <span class="chip">名前 → 型タグの表</span><span class="chip">展開したら消える</span><span class="chip">ファイル範囲だけ</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  typedef は「新しい型」ではなく「名前」です。だから効く場所は
+  構文解析だけでした。ただ、その構文解析が C の古典的な難所で、
+  「文の頭にある名前が型かどうか」で読み方が変わります。iwac は
+  「ファイルの範囲でだけ書ける・宣言した地点から有効・
+  スコープなし」という割り切りで、表を1枚に単純化しました。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-07（v35 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-07（v36 時点）</p>
 </footer>
 
 </div>
