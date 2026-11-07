@@ -18,6 +18,7 @@ int main(int argc, char **argv) {
     target_kosaba = 0;
     obj_mode = 0;
     asari_mode = 0;
+    elf_mode = 0;
     if (argc >= 2 && str_eq(argv[1], "--kosaba")) {
         target_kosaba = 1;
         argi = 2;
@@ -38,6 +39,15 @@ int main(int argc, char **argv) {
         asari_mode = 1;
         argi++;
     }
+    /* ELF オブジェクト (v39、doc/elf-object.md):
+     * --object の代わりに --elf とすると、形式
+     * version 2 (ELF の ET_REL) で出す。生成の
+     * 作法はオブジェクト出力と同じ */
+    if (argc >= argi + 1 && str_eq(argv[argi], "--elf")) {
+        obj_mode = 1;
+        elf_mode = 1;
+        argi++;
+    }
     /* --out <名前>: KosabaOS 上での出力ファイル名
      * (v34。rt が hello.elf の代わりに使う) */
     if (argc >= argi + 2 && str_eq(argv[argi], "--out")) {
@@ -45,11 +55,11 @@ int main(int argc, char **argv) {
         argi += 2;
     }
     if (obj_mode && !target_kosaba) {
-        print_str(2, "iwac: --object / --asari は --kosaba と一緒に使います\n");
+        print_str(2, "iwac: --object / --asari / --elf は --kosaba と一緒に使います\n");
         return 1;
     }
     if (argc < argi + 1) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す (複数ファイルは連結して1つに)\n       iwac --kosaba --asari <ファイル.c>   (Asari 形式 (命令列のテキスト) を出す\n       iwac --kosaba --out <名前> <ファイル.c>   (OS 上の出力名を指定))\n");
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --object <ファイル.c>   (オブジェクトを出す (複数ファイルは連結して1つに)\n       iwac --kosaba --asari <ファイル.c>   (Asari 形式 (命令列のテキスト) を出す\n       iwac --kosaba --elf <ファイル.c>   (ELF オブジェクト (形式 version 2) を出す\n       iwac --kosaba --out <名前> <ファイル.c>   (OS 上の出力名を指定))\n");
         return 1;
     }
     if (target_kosaba)

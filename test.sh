@@ -1160,6 +1160,43 @@ echo "ok: v38: Asari が nori・Asari 自身・rt・構造体でも一致"
 cmp -s "$TMP/v38h.elf" "$TMP/v38hd.elf" || fail "v38: チェーンの ELF が直接と違う"
 echo "ok: v38: iwac → Asari → nori のチェーンが直接出力と一致"
 
+# --- v39: オブジェクトの ELF 化 (形式 version 2) ---
+# 物差しは「ELF 経由のリンク結果が .iwo 経由とバイト
+# 一致」すること (doc/elf-object.md)。nori は先頭の
+# マジックで両形式を見分ける
+elf_check() {
+    # $1 = ラベル、残り = ソース。rt と組でリンクする
+    label=$1; shift
+    "$IWAC" --kosaba --object "$@" > "$TMP/v39.iwo" || fail "v39: オブジェクト出力に失敗 ($label)"
+    "$IWAC" --kosaba --elf "$@" > "$TMP/v39.eo" || fail "v39: ELF オブジェクト出力に失敗 ($label)"
+    "$IWAC" --kosaba --object kosaba/kosaba_rt.c > "$TMP/v39rt.iwo" || fail "v39: rt のオブジェクト出力に失敗 ($label)"
+    "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v39rt.eo" || fail "v39: rt の ELF 出力に失敗 ($label)"
+    "$TMP/nori" "$TMP/v39.iwo" "$TMP/v39rt.iwo" > "$TMP/v39a.elf" || fail "v39: .iwo のリンクに失敗 ($label)"
+    "$TMP/nori" "$TMP/v39.eo" "$TMP/v39rt.eo" > "$TMP/v39b.elf" || fail "v39: ELF オブジェクトのリンクに失敗 ($label)"
+    cmp -s "$TMP/v39a.elf" "$TMP/v39b.elf" || fail "v39: ELF 経由のリンク結果が .iwo 経由と違う ($label)"
+}
+elf_check hello examples/hello-kosaba.c
+# 全断片 (リンク順に並べて一括版の材料と比べる)
+V39_OBJS_IWO=""
+V39_OBJS_EO=""
+for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+    "$IWAC" --kosaba --object src/decls.c "src/$f.c" > "$TMP/v39-$f.iwo" || fail "v39: 断片 $f のオブジェクト出力に失敗"
+    "$IWAC" --kosaba --elf src/decls.c "src/$f.c" > "$TMP/v39-$f.eo" || fail "v39: 断片 $f の ELF 出力に失敗"
+    V39_OBJS_IWO="$V39_OBJS_IWO $TMP/v39-$f.iwo"
+    V39_OBJS_EO="$V39_OBJS_EO $TMP/v39-$f.eo"
+done
+"$IWAC" --kosaba --object kosaba/kosaba_rt.c > "$TMP/v39-rt.iwo" || fail "v39: rt のオブジェクト出力に失敗"
+"$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v39-rt.eo" || fail "v39: rt の ELF 出力に失敗"
+"$TMP/nori" $V39_OBJS_IWO "$TMP/v39-rt.iwo" > "$TMP/v39full-a.elf" || fail "v39: 全断片の .iwo リンクに失敗"
+"$TMP/nori" $V39_OBJS_EO "$TMP/v39-rt.eo" > "$TMP/v39full-b.elf" || fail "v39: 全断片の ELF リンクに失敗"
+cmp -s "$TMP/v39full-a.elf" "$TMP/v39full-b.elf" || fail "v39: 全断片のリンク結果が形式で違う"
+echo "ok: v39: ELF オブジェクト (hello・全断片) のリンクが .iwo 経由と一致"
+elf_check nori nori/nori.c libdashi/libdashi.c
+elf_check asari自身 asari/asari.c libdashi/libdashi.c
+elf_check 構造体 "$TMP/v37sa.c" "$TMP/v37sb.c"
+echo "ok: v39: ELF オブジェクトが nori・Asari 自身・構造体でも一致"
+
+
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る
 cat > "$TMP/ds_test.c" <<'DASHITEST'

@@ -919,7 +919,563 @@ static void write_asari(void) {
     obj_str("end\n");
 }
 
+/* ================================================================
+ * ELF オブジェクトの出力 (形式 version 2、v39。
+ * 設計は doc/elf-object.md)
+ * 材料は write_object と同じで、テキストの代わりに
+ * ELF64 の ET_REL を書く。セクションは .text /
+ * .data / .bss / .iwac.strings / .iwac.arrays、
+ * 再配置は .rela.text / .rela.data。配置の規則は
+ * nori が握る (このファイルは置き場所を決めない)
+ * ================================================================ */
+static long elf_off;  /* ここまで書いたバイト数 */
+
+static void ebyte(int b) {
+    out_byte(b);
+    elf_off = elf_off + 1;
+}
+
+static void eu16(int v) {
+    ebyte(v & 0xff);
+    ebyte((v >> 8) & 0xff);
+}
+
+static void eu32(long v) {
+    ebyte((int)(v & 0xff));
+    ebyte((int)((v >> 8) & 0xff));
+    ebyte((int)((v >> 16) & 0xff));
+    ebyte((int)((v >> 24) & 0xff));
+}
+
+static void eu64(long v) {
+    for (int k = 0; k < 8; k++)
+        ebyte((int)((v >> (k * 8)) & 0xff));
+}
+
+static void epad(long align) {
+    while (elf_off % align != 0)
+        ebyte(0);
+}
+
+static void ebytes(char *p, long n) {
+    for (long i = 0; i < n; i++)
+        ebyte(p[i] & 0xff);
+}
+
+static int ename_len(char *s) {
+    int n = 0;
+    while (s[n] != '\0')
+        n++;
+    return n;
+}
+
+/* 変数 v の枠数 (write_object の var 書き出しと
+ * 同じ「次の変数までの間隔」の数え方) */
+static int elf_var_slots(int v) {
+    int ns = var_nglobal - var_slot[v];
+    for (int w = 0; w < nvar; w++) {
+        if (var_owner[w] >= 0 || var_slot[w] <= var_slot[v])
+            continue;
+        if (var_slot[w] - var_slot[v] < ns)
+            ns = var_slot[w] - var_slot[v];
+    }
+    return ns;
+}
+
+/* 配列 a のバイト数 (write_object と同じ数え方) */
+static long elf_arr_bytes(int a) {
+    long bytes = (long)arr_used - (long)arr_off[a];
+    for (int b = 0; b < narr; b++) {
+        if (arr_owner[b] >= 0 || b == a)
+            continue;
+        if (arr_off[b] > arr_off[a] &&
+            (long)arr_off[b] - (long)arr_off[a] < bytes)
+            bytes = (long)arr_off[b] - (long)arr_off[a];
+    }
+    return bytes;
+}
+
+/* シンボルの素性置き場 (describe が埋める) */
+static char *elf_d_name;
+static int elf_d_info;
+static int elf_d_shndx;
+static long elf_d_value;
+static long elf_d_size;
+
+/* セクション番号の約束 (このファイルの中だけ) */
+static int ELF_SEC_TEXT = 1;
+static int ELF_SEC_DATA = 2;
+static int ELF_SEC_BSS = 3;
+static int ELF_SEC_STRINGS = 4;
+static int ELF_SEC_ARRAYS = 5;
+
+/* ローカルシンボル i の素性。並びは [0]=空、
+ * [1..5]=セクション、次に再配置の組ごとの
+ * ラベル (PCREL_LO12 の相手)、最後に絶対
+ * アドレスのシンボル */
+static void elf_describe_local(int i, int start) {
+    elf_d_name = "";
+    elf_d_info = 0;
+    elf_d_shndx = 0;
+    elf_d_value = 0;
+    elf_d_size = 0;
+    if (i == 0)
+        return;
+    if (i <= 5) {
+        elf_d_info = 3;  /* LOCAL / SECTION */
+        elf_d_shndx = i;
+        return;
+    }
+    if (i < 6 + obj_nreloc) {
+        int r = i - 6;
+        elf_d_shndx = ELF_SEC_TEXT;
+        elf_d_value = (long)(obj_reloc_site[r] - start) * 4;
+        return;
+    }
+    {
+        int r = i - 6 - obj_nreloc;
+        elf_d_shndx = 0xfff1;  /* SHN_ABS */
+        elf_d_value = (long)(unsigned int)obj_abs_val[r];
+    }
+}
+
+/* 関数 f が kosaba_flush か (名前で正確に判定) */
+static int elf_is_flush(int f) {
+    char *want = "kosaba_flush";
+    if (func_name_len[f] != 12)
+        return 0;
+    for (int k = 0; k < 12; k++)
+        if (func_names[f][k] != want[k])
+            return 0;
+    return 1;
+}
+
+/* kosaba_flush が関数表にあるか */
+static int elf_flush_in_table(void) {
+    for (int f = 0; f < nfunc; f++)
+        if (elf_is_flush(f))
+            return 1;
+    return 0;
+}
+
+static int elf_nglob_var(void) {
+    int n = 0;
+    for (int v = 0; v < nvar; v++)
+        if (var_owner[v] < 0)
+            n++;
+    return n;
+}
+
+static int elf_nglob_arr(void) {
+    int n = 0;
+    for (int a = 0; a < narr; a++)
+        if (arr_owner[a] < 0)
+            n++;
+    return n;
+}
+
+/* 大域名シンボル g の素性。並びは iwac_entry
+ * (あれば)、関数 (表の順)、変数 (表の順)、
+ * 配列 (表の順)、最後に kosaba_flush の弱い
+ * 未定義 (表に無いのに呼び出しがあるとき) */
+static void elf_describe_global(int g, int has_entry, int start,
+                                int flush_extra) {
+    int off0 = has_entry ? 1 : 0;
+    elf_d_name = "";
+    elf_d_info = 0x10;  /* GLOBAL / NOTYPE */
+    elf_d_shndx = 0;
+    elf_d_value = 0;
+    elf_d_size = 0;
+    if (has_entry && g == 0) {
+        elf_d_name = "iwac_entry";
+        elf_d_shndx = ELF_SEC_TEXT;
+        elf_d_size = (long)obj_prefix_insts * 4;
+        return;
+    }
+    if (g < off0 + nfunc) {
+        int f = g - off0;
+        elf_d_name = func_names[f];
+        if (func_has_body[f]) {
+            long size = (long)(nasm - func_entry[f]);
+            for (int h = f + 1; h < nfunc; h++) {
+                if (func_has_body[h]) {
+                    size = (long)(func_entry[h] - func_entry[f]);
+                    break;
+                }
+            }
+            elf_d_info = 0x12;  /* GLOBAL / FUNC */
+            elf_d_shndx = ELF_SEC_TEXT;
+            elf_d_value = (long)(func_entry[f] - start) * 4;
+            elf_d_size = size * 4;
+        } else if (elf_is_flush(f)) {
+            /* 定義のない kosaba_flush は弱くする
+             * (callopt の意味、doc/elf-object.md) */
+            elf_d_info = 0x20;  /* WEAK / NOTYPE */
+        }
+        return;
+    }
+    if (g < off0 + nfunc + elf_nglob_var()) {
+        /* 変数は「枠の順」に並べる (nori が .iwo の
+         * var レコードと同じ順で登録できるように。
+         * 配置の一致に効く) */
+        int want = g - off0 - nfunc;
+        int v = -1;
+        for (int u = 0; u < nvar; u++) {
+            if (var_owner[u] >= 0)
+                continue;
+            int rank = 0;
+            for (int w = 0; w < nvar; w++)
+                if (var_owner[w] < 0 && var_slot[w] < var_slot[u])
+                    rank++;
+            if (rank == want) {
+                v = u;
+                break;
+            }
+        }
+        elf_d_name = var_names[v];
+        elf_d_info = 0x11;  /* GLOBAL / OBJECT */
+        if (var_init_kind[v] != 0) {
+            elf_d_shndx = ELF_SEC_DATA;
+            elf_d_value = (long)var_slot[v] * 8;
+        } else {
+            elf_d_shndx = 0xfff2;  /* SHN_COMMON (仮定義) */
+            elf_d_value = 8;       /* 並び (alignment) */
+        }
+        elf_d_size = (long)elf_var_slots(v) * 8;
+        return;
+    }
+    if (g < off0 + nfunc + elf_nglob_var() + elf_nglob_arr()) {
+        int want = g - off0 - nfunc - elf_nglob_var();
+        int seen = -1;
+        int a = -1;
+        for (int u = 0; u < narr; u++) {
+            if (arr_owner[u] >= 0)
+                continue;
+            seen++;
+            if (seen == want) {
+                a = u;
+                break;
+            }
+        }
+        elf_d_name = arr_names[a];
+        elf_d_info = 0x11;  /* GLOBAL / OBJECT */
+        elf_d_shndx = ELF_SEC_ARRAYS;
+        elf_d_value = arr_off[a];
+        elf_d_size = elf_arr_bytes(a);
+        return;
+    }
+    /* flush_extra の置き場 (呼び出し側が数える) */
+    elf_d_name = "kosaba_flush";
+    elf_d_info = 0x20;  /* WEAK / NOTYPE */
+}
+
+/* シンボル番号 → 名前 (オフセット計算と .strtab
+ * 書き出しで使う) */
+static char *elf_sym_name(int s, int nlocals, int has_entry,
+                          int start, int flush_extra) {
+    if (s < nlocals) {
+        elf_describe_local(s, start);
+    } else {
+        elf_describe_global(s - nlocals, has_entry, start,
+                            flush_extra);
+    }
+    return elf_d_name;
+}
+
+
+/* セクション名 (番号順。0 は空) */
+static char *elf_sec_name(int i) {
+    if (i == 1) return ".text";
+    if (i == 2) return ".data";
+    if (i == 3) return ".bss";
+    if (i == 4) return ".iwac.strings";
+    if (i == 5) return ".iwac.arrays";
+    if (i == 6) return ".rela.text";
+    if (i == 7) return ".rela.data";
+    if (i == 8) return ".symtab";
+    if (i == 9) return ".strtab";
+    if (i == 10) return ".shstrtab";
+    return "";
+}
+
+/* 変数・配列のシンボル番号 (表の順の数え直し) */
+static int elf_var_symidx(int v, int base) {
+    /* 変数の並びは枠の順 (elf_describe_global と同じ) */
+    int rank = 0;
+    for (int u = 0; u < nvar; u++)
+        if (var_owner[u] < 0 && var_slot[u] < var_slot[v])
+            rank++;
+    return base + rank;
+}
+
+static int elf_arr_symidx(int a, int base) {
+    int rank = 0;
+    for (int u = 0; u < a; u++)
+        if (arr_owner[u] < 0)
+            rank++;
+    return base + rank;
+}
+
+/* link / info / entsize は呼び出し前に置く
+ * (elf_shdr の引数を8個以内に収めるため) */
+static int elf_sh_link;
+static int elf_sh_info;
+static long elf_sh_entsize;
+
+static void elf_shdr(int name, int type, long flags, long off,
+                     long size, long align) {
+    eu32(name);
+    eu32(type);
+    eu64(flags);
+    eu64(0);
+    eu64(off);
+    eu64(size);
+    eu32(elf_sh_link);
+    eu32(elf_sh_info);
+    eu64(align);
+    eu64(elf_sh_entsize);
+    elf_sh_link = 0;
+    elf_sh_info = 0;
+    elf_sh_entsize = 0;
+}
+
+static void write_elf_object(void) {
+    int has_entry = (prog_main >= 0 || prog_stmts != -1 ||
+                     prog_has_final);
+    int start = has_entry ? 0 : obj_prefix_insts;
+    int off0 = has_entry ? 1 : 0;
+
+    /* 数える */
+    int ncalls = 0;
+    for (int i = start; i < nasm; i++)
+        if (asm_op[i] == OP_JAL && asm_imm[i] < 0)
+            ncalls++;
+    int flush_extra = (obj_flush_site >= 0 &&
+                       !elf_flush_in_table()) ? 1 : 0;
+    int nlocals = 6 + obj_nreloc + obj_nabs;
+    int nglob = off0 + nfunc + elf_nglob_var() +
+                elf_nglob_arr() + flush_extra;
+    int nsym = nlocals + nglob;
+    int nrela_text = ncalls + 2 * obj_nreloc + 2 * obj_nabs;
+    int nrela_data = 0;
+    for (int v = 0; v < nvar; v++)
+        if (var_owner[v] < 0 && var_init_kind[v] == 2)
+            nrela_data++;
+    int img_slots = 0;
+    for (int v = 0; v < nvar; v++) {
+        if (var_owner[v] >= 0 || var_init_kind[v] == 0)
+            continue;
+        int end = var_slot[v] + elf_var_slots(v);
+        if (end > img_slots)
+            img_slots = end;
+    }
+    long text_size = (long)(nasm - start) * 4;
+    long data_size = (long)img_slots * 8;
+    long bss_size = (long)var_nglobal * 8 - data_size;
+    long strings_size = str_used;
+    long arrays_size = arr_used;
+    long strtab_size = 1;
+    for (int s2 = 0; s2 < nsym; s2++)
+        strtab_size += ename_len(elf_sym_name(s2, nlocals,
+                             has_entry, start, flush_extra)) + 1;
+    long shstrtab_size = 0;
+    for (int i = 0; i < 11; i++)
+        shstrtab_size += ename_len(elf_sec_name(i)) + 1;
+
+    /* 置き場所 */
+    long text_off = 64;
+    long strings_off = text_off + text_size;
+    long data_off = (strings_off + strings_size + 7) & ~7L;
+    long rela_text_off = (data_off + data_size + 7) & ~7L;
+    long rela_data_off = rela_text_off + (long)nrela_text * 24;
+    long symtab_off = (rela_data_off + (long)nrela_data * 24 + 7) & ~7L;
+    long strtab_off = symtab_off + (long)nsym * 24;
+    long shstrtab_off = strtab_off + strtab_size;
+    long shoff = (shstrtab_off + shstrtab_size + 7) & ~7L;
+
+    /* ELF ヘッダ */
+    elf_off = 0;
+    ebyte(0x7f); ebyte('E'); ebyte('L'); ebyte('F');
+    ebyte(2); ebyte(1); ebyte(1); ebyte(0);
+    for (int k = 0; k < 8; k++)
+        ebyte(0);
+    eu16(1);          /* ET_REL */
+    eu16(243);        /* EM_RISCV */
+    eu32(1);          /* version */
+    eu64(0);          /* entry */
+    eu64(0);          /* phoff */
+    eu64(shoff);
+    eu32(0);          /* flags */
+    eu16(64);         /* ehsize */
+    eu16(0);          /* phentsize */
+    eu16(0);          /* phnum */
+    eu16(64);         /* shentsize */
+    eu16(11);         /* shnum */
+    eu16(10);         /* shstrndx */
+
+    /* .text (穴の正規化は write_object と同じ) */
+    for (int i = start; i < nasm; i++) {
+        int saved_imm = asm_imm[i];
+        if (asm_op[i] == OP_JAL && saved_imm < 0)
+            asm_imm[i] = i;
+        eu32(encode_inst(i));
+        asm_imm[i] = saved_imm;
+    }
+    /* .iwac.strings */
+    ebytes((char *)str_pool, str_used);
+    /* .data (グローバルの初期イメージ) */
+    epad(8);
+    for (int slot = 0; slot < img_slots; slot++) {
+        long val = 0;
+        for (int v = 0; v < nvar; v++) {
+            if (var_owner[v] >= 0 || var_slot[v] != slot)
+                continue;
+            if (var_init_kind[v] == 1)
+                val = var_init_val[v];
+            else if (var_init_kind[v] == 2)
+                val = str_off[var_init_val[v]];
+            break;
+        }
+        eu64(val);
+    }
+    /* .rela.text */
+    epad(8);
+    for (int i = start; i < nasm; i++) {
+        if (asm_op[i] != OP_JAL || asm_imm[i] >= 0)
+            continue;
+        int sym;
+        if (i == obj_flush_site || asm_imm[i] == -1000003) {
+            if (elf_flush_in_table()) {
+                int f = 0;
+                while (!elf_is_flush(f))
+                    f++;
+                sym = nlocals + off0 + f;
+            } else {
+                sym = nlocals + off0 + nfunc + elf_nglob_var() +
+                      elf_nglob_arr();
+            }
+        } else {
+            sym = nlocals + off0 + (-asm_imm[i] - 1);
+        }
+        eu64((long)(i - start) * 4);
+        eu64(((long)sym << 32) | 17);  /* R_RISCV_JAL */
+        eu64(0);
+    }
+    for (int r = 0; r < obj_nreloc; r++) {
+        int sym;
+        long add = 0;
+        if (obj_reloc_kind[r] == RLOC_STR) {
+            sym = 4;  /* .iwac.strings のセクションシンボル */
+            add = str_off[obj_reloc_idx[r]];
+        } else if (obj_reloc_kind[r] == RLOC_VAR) {
+            sym = elf_var_symidx(obj_reloc_idx[r],
+                                 nlocals + off0 + nfunc);
+        } else {
+            sym = elf_arr_symidx(obj_reloc_idx[r],
+                                 nlocals + off0 + nfunc +
+                                 elf_nglob_var());
+        }
+        eu64((long)(obj_reloc_site[r] - start) * 4);
+        eu64(((long)sym << 32) | 23);  /* R_RISCV_PCREL_HI20 */
+        eu64(add);
+        eu64((long)(obj_reloc_site[r] - start) * 4 + 4);
+        eu64(((long)(6 + r) << 32) | 24);  /* PCREL_LO12_I */
+        eu64(0);
+    }
+    for (int r = 0; r < obj_nabs; r++) {
+        int sym = 6 + obj_nreloc + r;
+        eu64((long)(obj_abs_site[r] - start) * 4);
+        eu64(((long)sym << 32) | 26);  /* R_RISCV_HI20 */
+        eu64(0);
+        eu64((long)(obj_abs_site[r] - start) * 4 + 4);
+        eu64(((long)sym << 32) | 27);  /* R_RISCV_LO12_I */
+        eu64(0);
+    }
+    /* .rela.data (文字列へのポインタの初期値) */
+    for (int v = 0; v < nvar; v++) {
+        if (var_owner[v] >= 0 || var_init_kind[v] != 2)
+            continue;
+        eu64((long)var_slot[v] * 8);
+        eu64(((long)4 << 32) | 2);  /* R_RISCV_64、相手は文字列 */
+        eu64(str_off[var_init_val[v]]);
+    }
+    /* .symtab */
+    epad(8);
+    for (int s2 = 0; s2 < nsym; s2++) {
+        long name_off = 1;
+        for (int t = 0; t < s2; t++)
+            name_off += ename_len(elf_sym_name(t, nlocals,
+                                has_entry, start, flush_extra)) + 1;
+        if (s2 < nlocals)
+            elf_describe_local(s2, start);
+        else
+            elf_describe_global(s2 - nlocals, has_entry, start,
+                                flush_extra);
+        eu32(name_off);
+        ebyte(elf_d_info);
+        ebyte(0);
+        eu16(elf_d_shndx);
+        eu64(elf_d_value);
+        eu64(elf_d_size);
+    }
+    /* .strtab */
+    ebyte(0);
+    for (int s2 = 0; s2 < nsym; s2++) {
+        char *nm = elf_sym_name(s2, nlocals, has_entry, start,
+                                flush_extra);
+        ebytes(nm, ename_len(nm));
+        ebyte(0);
+    }
+    /* .shstrtab */
+    for (int i = 0; i < 11; i++) {
+        ebytes(elf_sec_name(i), ename_len(elf_sec_name(i)));
+        ebyte(0);
+    }
+    /* セクションヘッダ */
+    epad(8);
+    elf_sh_link = 0;
+    elf_sh_info = 0;
+    elf_sh_entsize = 0;
+    elf_shdr(0, 0, 0, 0, 0, 0);
+    {
+        long noff[11];
+        long acc = 0;
+        for (int i = 0; i < 11; i++) {
+            noff[i] = acc;
+            acc += ename_len(elf_sec_name(i)) + 1;
+        }
+        elf_shdr((int)noff[1], 1, 6, text_off, text_size, 4);
+        elf_shdr((int)noff[2], 1, 3, data_off, data_size, 8);
+        elf_shdr((int)noff[3], 8, 3, data_off + data_size,
+                 bss_size, 8);
+        elf_shdr((int)noff[4], 1, 3, strings_off, strings_size, 1);
+        elf_shdr((int)noff[5], 8, 3, strings_off + strings_size,
+                 arrays_size, 8);
+        elf_sh_link = 8;
+        elf_sh_info = 1;
+        elf_sh_entsize = 24;
+        elf_shdr((int)noff[6], 4, 0, rela_text_off,
+                 (long)nrela_text * 24, 8);
+        elf_sh_link = 8;
+        elf_sh_info = 2;
+        elf_sh_entsize = 24;
+        elf_shdr((int)noff[7], 4, 0, rela_data_off,
+                 (long)nrela_data * 24, 8);
+        elf_sh_link = 9;
+        elf_sh_info = nlocals;
+        elf_sh_entsize = 24;
+        elf_shdr((int)noff[8], 2, 0, symtab_off,
+                 (long)nsym * 24, 8);
+        elf_shdr((int)noff[9], 3, 0, strtab_off, strtab_size, 1);
+        elf_shdr((int)noff[10], 3, 0, shstrtab_off, shstrtab_size, 1);
+    }
+}
+
 static void write_binary(void) {
+    if (elf_mode) {
+        write_elf_object();
+        return;
+    }
     if (asari_mode) {
         write_asari();
         return;

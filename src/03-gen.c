@@ -87,20 +87,33 @@ static int OP_REMU = 37; /* 符号なし剰余 (v35、M 拡張) */
 static int OP_SRL = 38;  /* 論理右シフト (v35) */
 static int OP_SRAI = 39; /* 算術右シフト即値 (v35) */
 
-static int asm_op[40960];
-static int asm_rd[40960];
-static int asm_rs1[40960];
-static int asm_rs2[40960];
-static int asm_imm[40960];
+/* 命令表の上限は 49152 (v39 で 40960 から増量。
+ * v38 の時点で一括セルフコンパイルが約44K命令に
+ * 達して上限を超え、asm_push が無言で表の外へ
+ * 書いて隣の表を壊していた (点検は asm_push と
+ * gen_program にある)。op / rd / rs1 / rs2 は
+ * 小さい値しか入らないので char にして、増量の
+ * 対価 (imm と patch_next の増分) を払った */
+static char asm_op[49152];
+static char asm_rd[49152];
+static char asm_rs1[49152];
+static char asm_rs2[49152];
+static int asm_imm[49152];
 static int nasm;  /* 並べた命令の数 */
 
 /* 命令を1つ、命令列の末尾に積む */
 static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
+    if (nasm >= 49152) {
+        /* 上限あふれ: 表の外へは書かない (v39)。
+         * 生成は最後まで回るが、gen_program が
+         * nasm を見て失敗にする */
+        return;
+    }
     int i = nasm++;
-    asm_op[i] = op;
-    asm_rd[i] = rd;
-    asm_rs1[i] = rs1;
-    asm_rs2[i] = rs2;
+    asm_op[i] = (char)op;
+    asm_rd[i] = (char)rd;
+    asm_rs1[i] = (char)rs1;
+    asm_rs2[i] = (char)rs2;
     asm_imm[i] = imm;
 }
 
@@ -121,7 +134,7 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
  * 指す。届く分岐は従来どおり beq 1命令のままなので、
  * 今まで正しく作れていたプログラムの出力は変わらない */
 static int branch_ord;         /* 条件分岐の通し番号 */
-static char branch_long[40960]; /* 伸ばす分岐の印 */
+static char branch_long[49152]; /* 伸ばす分岐の印 */
 
 /* 「t1 が 0 なら飛ぶ」条件分岐を置く。戻り値は、飛び先
  * (命令番号) を asm_imm に書き込むべき命令の番号:
@@ -243,6 +256,9 @@ static int obj_mode;
 static int asari_mode;  /* Asari 形式で出す (v38、doc/asari.md)。
                          * 立て方は obj_mode と同じで、出口だけ
                          * write_asari に替わる */
+static int elf_mode;    /* ELF オブジェクトで出す (v39、
+                         * doc/elf-object.md)。立て方は同じで
+                         * 出口が write_elf_object に替わる */
 static int obj_prefix_insts;  /* 入口の断片の命令数
                                * (最終パスの値が残る) */
 static int obj_flush_site;    /* 入口の kosaba_flush
@@ -1313,7 +1329,7 @@ static int gen_elem_addr(int node) {
 static int loop_depth;
 static int loop_break_head[32];
 static int loop_cont_head[32];
-static int patch_next[40960];
+static int patch_next[49152];
 
 /* 関数の return の飛び先 (出口は関数の生成の最後まで
  * 分からない) も同じ道具で積む */
@@ -1986,13 +2002,18 @@ static int gen_program(void) {
      * 伸ばす。伸ばすと別の分岐が届かなくなることがある
      * ので、印が増えなくなるまで1回目の生成を繰り返す
      * (emit_beq_t1z の説明参照) */
-    for (int i = 0; i < 40960; i++)
+    for (int i = 0; i < 49152; i++)
         branch_long[i] = 0;
     for (;;) {
         if (!gen_all())
             return 0;
         if (!relax_scan())
             break;
+    }
+    if (nasm >= 49152) {
+        /* asm_push が上限で止めた分 (v39) */
+        errmsg = "命令が多すぎます";
+        return 0;
     }
     code_insts = nasm;
     if (obj_mode && (obj_nreloc < 0 || obj_nabs < 0)) {

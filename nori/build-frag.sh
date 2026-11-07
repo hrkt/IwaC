@@ -61,7 +61,7 @@ apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2048' 1
 apply nori.c '[4096]' '[1024]' 13
 apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 1024' 1
 # 再配置表
-apply nori.c '[16384]' '[5120]' 5
+apply nori.c '[16384]' '[5120]' 7
 apply nori.c 'MAX_REL = 16384' 'MAX_REL = 5120' 1
 # 入力バッファと読みのガード
 apply nori.c 'in_buf[393216]' 'in_buf[163840]' 1

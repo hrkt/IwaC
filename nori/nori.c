@@ -262,6 +262,338 @@ static int read_hex_bytes(char *pool, int *used, int max, long n) {
     return 1;
 }
 
+
+/* ================= ELF オブジェクトを読む =================
+ * 形式 version 2 (doc/elf-object.md)。中身は .iwo と
+ * 同じ内部構造 (名前表・登録順・穴の控え) に写す。
+ * 配置と穴埋めは .iwo と共通の後段が担う */
+static int esym_tag[16384];  /* 0 = 名前あり、1 = 文字列
+                              * セクション、2 = 絶対、3 = その他、
+                              * 4 = 名前あり (弱い) */
+static int esym_sym[16384];  /* 名前 → 名前表の番号 */
+static int eabs_idx[256];
+static long eabs_val[256];
+static int neabs;
+static int edata_off[1024];  /* .data の変数 (初期値の受け口) */
+static int edata_sym[1024];
+static long edata_val[1024];
+static int edata_hit[1024];
+static int nedata;
+
+static int eget8(long off) {
+    return in_buf[off] & 0xff;
+}
+
+static int eget16(long off) {
+    return eget8(off) + eget8(off + 1) * 256;
+}
+
+static long eget32(long off) {
+    return (long)eget16(off) + (long)eget16(off + 2) * 65536;
+}
+
+static long eget64(long off) {
+    return eget32(off) + eget32(off + 4) * (1L << 32);
+}
+
+/* セクションヘッダの置き場 (1つ分ずつ読む) */
+static long esec_type;
+static long esec_off;
+static long esec_size;
+static long esec_link;
+static long esec_info;
+
+static void eget_shdr(long shoff, int i) {
+    long b = shoff + (long)i * 64;
+    esec_type = eget32(b + 4);
+    esec_off = eget64(b + 24);
+    esec_size = eget64(b + 32);
+    esec_link = eget32(b + 40);
+    esec_info = eget32(b + 44);
+}
+
+/* セクション i の名前を buf に写す (32文字まで) */
+static void esec_name(long shoff, long shstr_off, int i, char *buf) {
+    long b = shoff + (long)i * 64;
+    long noff = shstr_off + eget32(b);
+    int n = 0;
+    while (n < 31) {
+        char c = in_buf[noff + n];
+        buf[n] = c;
+        n++;
+        if (c == '\0')
+            break;
+    }
+    buf[31] = '\0';
+}
+
+static int read_object_elf(int obj) {
+    if (eget8(4) != 2 || eget8(5) != 1)
+        return fail("ELF の形が違います (64ビット LE のみ)");
+    if (eget16(16) != 1 || eget16(18) != 243)
+        return fail("ELF の形が違います (ET_REL / RISC-V のみ)");
+    long shoff = eget64(40);
+    int shnum = eget16(60);
+    int shstrndx = eget16(62);
+    if (shnum > 32)
+        return fail("セクションが多すぎます");
+    eget_shdr(shoff, shstrndx);
+    long shstr_off = esec_off;
+
+    /* セクションを探す */
+    int text_i = -1;
+    int data_i = -1;
+    int strings_i = -1;
+    int arrays_i = -1;
+    int symtab_i = -1;
+    for (int i = 0; i < shnum; i++) {
+        char nm[32];
+        esec_name(shoff, shstr_off, i, nm);
+        if (ds_streq(nm, ".text"))
+            text_i = i;
+        else if (ds_streq(nm, ".data"))
+            data_i = i;
+        else if (ds_streq(nm, ".iwac.strings"))
+            strings_i = i;
+        else if (ds_streq(nm, ".iwac.arrays"))
+            arrays_i = i;
+        eget_shdr(shoff, i);
+        if (esec_type == 2)
+            symtab_i = i;
+    }
+    if (text_i < 0 || symtab_i < 0)
+        return fail("ELF に .text / .symtab がありません");
+
+    /* コードと文字列を写す */
+    eget_shdr(shoff, text_i);
+    obj_code_len[obj] = (int)esec_size;
+    for (long k = 0; k < esec_size; k++) {
+        if (code_used >= 262144)
+            return fail("コードが入りません");
+        code_pool[code_used] = in_buf[esec_off + k];
+        code_used++;
+    }
+    if (strings_i >= 0) {
+        eget_shdr(shoff, strings_i);
+        obj_str_len[obj] = (int)esec_size;
+        for (long k = 0; k < esec_size; k++) {
+            if (str_used >= 131072)
+                return fail("文字列が入りません");
+            str_pool[str_used] = in_buf[esec_off + k];
+            str_used++;
+        }
+    }
+
+    /* シンボル表 */
+    eget_shdr(shoff, symtab_i);
+    long symtab_off = esec_off;
+    long nsym_e = esec_size / 24;
+    int strtab_i = (int)esec_link;
+    eget_shdr(shoff, strtab_i);
+    long strtab_off = esec_off;
+    long data_off = 0;
+    if (data_i >= 0) {
+        eget_shdr(shoff, data_i);
+        data_off = esec_off;
+    }
+    if (nsym_e > 16384)
+        return fail("シンボルが多すぎます");
+    neabs = 0;
+    nedata = 0;
+    for (long si = 0; si < nsym_e; si++) {
+        long b = symtab_off + si * 24;
+        long name_off = eget32(b);
+        int info = eget8(b + 4);
+        int bind = info >> 4;
+        int type = info & 15;
+        int shndx = eget16(b + 6);
+        long value = eget64(b + 8);
+        long size = eget64(b + 16);
+        esym_tag[si] = 3;
+        esym_sym[si] = -1;
+        if (type == 3) {
+            /* SECTION: 文字列セクションだけ印を付ける */
+            if (shndx >= 0 && shndx < shnum) {
+                char snm[32];
+                esec_name(shoff, shstr_off, shndx, snm);
+                if (ds_streq(snm, ".iwac.strings"))
+                    esym_tag[si] = 1;
+            }
+            continue;
+        }
+        if (shndx == 0xfff1) {
+            /* SHN_ABS: 値そのものが住所 */
+            esym_tag[si] = 2;
+            if (neabs < 256) {
+                eabs_idx[neabs] = (int)si;
+                eabs_val[neabs] = value;
+                neabs++;
+            }
+            continue;
+        }
+        if (name_off == 0)
+            continue;
+        char *gnm = in_buf + strtab_off + name_off;
+        if (ds_streq(gnm, "iwac_entry")) {
+            obj_entry[obj] = (int)size;
+            continue;
+        }
+        int s = new_sym(gnm);
+        if (s < 0)
+            return 0;
+        esym_sym[si] = s;
+        esym_tag[si] = bind == 2 ? 4 : 0;
+        if (type == 2 || (type == 0 && shndx == 0)) {
+            /* 関数 (定義・宣言・未定義) */
+            if (!set_kind(s, 1))
+                return 0;
+            if (nseq >= MAX_SEQ)
+                return fail("関数が多すぎます");
+            seq_sym[nseq++] = s;
+            if (shndx == text_i) {
+                if (sym_obj[s] >= 0)
+                    return fail("関数の定義が二つあります");
+                sym_obj[s] = obj;
+                sym_off[s] = (int)value;
+                sym_size[s] = (int)size;
+            }
+        } else if (type == 1 && shndx == 0xfff2) {
+            /* 変数の仮定義 (SHN_COMMON) */
+            if (!set_kind(s, 2))
+                return 0;
+            if (sym_obj[s] < 0) {
+                sym_obj[s] = obj;
+                sym_off[s] = var_slots;
+                var_slots += (int)(size / 8);
+            }
+        } else if (type == 1 && shndx == data_i) {
+            /* 初期値のある変数 (本定義) */
+            if (!set_kind(s, 2))
+                return 0;
+            if (sym_obj[s] < 0) {
+                sym_obj[s] = obj;
+                sym_off[s] = var_slots;
+                var_slots += (int)(size / 8);
+            }
+            if (sym_firm[s])
+                return fail("変数の本定義が二つあります");
+            sym_firm[s] = 1;
+            if (nedata >= 1024)
+                return fail("変数が多すぎます");
+            edata_off[nedata] = (int)value;
+            edata_sym[nedata] = s;
+            edata_val[nedata] = eget64(data_off + value);
+            edata_hit[nedata] = 0;
+            nedata++;
+        } else if (type == 1 && shndx == arrays_i) {
+            /* グローバル配列 */
+            if (!set_kind(s, 3))
+                return 0;
+            if (sym_obj[s] >= 0) {
+                if (sym_size[s] != (int)size)
+                    return fail("配列の大きさが食い違います");
+            } else {
+                sym_obj[s] = obj;
+                sym_size[s] = (int)size;
+                sym_off[s] = (int)arr_area;
+                arr_area += size;
+            }
+        }
+    }
+
+    /* 再配置 */
+    for (int i = 0; i < shnum; i++) {
+        eget_shdr(shoff, i);
+        if (esec_type != 4)
+            continue;
+        int target_i = (int)esec_info;
+        char tnm[32];
+        esec_name(shoff, shstr_off, target_i, tnm);
+        int is_text = ds_streq(tnm, ".text");
+        int is_data = ds_streq(tnm, ".data");
+        if (!is_text && !is_data)
+            continue;
+        long cnt = esec_size / 24;
+        for (long ri = 0; ri < cnt; ri++) {
+            long rb = esec_off + ri * 24;
+            long roff = eget64(rb);
+            long rinfo = eget64(rb + 8);
+            long rsym = rinfo / (1L << 32);
+            long rtype = rinfo % (1L << 32);
+            long radd = eget64(rb + 16);
+            if (is_data) {
+                /* 文字列へのポインタ初期値 (R_RISCV_64) */
+                if (rtype != 2 || esym_tag[rsym] != 1)
+                    return fail("知らないデータ再配置があります");
+                int hit = -1;
+                for (int e = 0; e < nedata; e++)
+                    if (edata_off[e] == (int)roff)
+                        hit = e;
+                if (hit < 0)
+                    return fail("初期値の受け口がありません");
+                int vs = edata_sym[hit];
+                if (sym_hasinit[vs])
+                    return fail("初期値が二つあります");
+                sym_hasinit[vs] = 1;
+                sym_init_kind[vs] = 2;
+                sym_init_val[vs] = radd;
+                sym_init_obj[vs] = obj;
+                edata_hit[hit] = 1;
+                continue;
+            }
+            if (rtype == 17) {
+                /* R_RISCV_JAL: 関数呼び出し */
+                if (esym_tag[rsym] != 0 && esym_tag[rsym] != 4)
+                    return fail("呼び出しの相手が違います");
+                int kind = esym_tag[rsym] == 4 ? 2 : 1;
+                if (!add_rel(obj, (int)roff, kind,
+                             esym_sym[rsym], 0))
+                    return 0;
+            } else if (rtype == 23) {
+                /* R_RISCV_PCREL_HI20: 住所作りの組の頭 */
+                if (esym_tag[rsym] == 1) {
+                    if (!add_rel(obj, (int)roff, 4, -1, radd))
+                        return 0;
+                } else if (esym_tag[rsym] == 0 ||
+                           esym_tag[rsym] == 4) {
+                    if (!add_rel(obj, (int)roff, 3,
+                                 esym_sym[rsym], radd))
+                        return 0;
+                } else
+                    return fail("住所作りの相手が違います");
+            } else if (rtype == 26) {
+                /* R_RISCV_HI20: 絶対アドレスの組の頭 */
+                long val = 0;
+                int found = 0;
+                for (int e = 0; e < neabs; e++) {
+                    if (eabs_idx[e] == (int)rsym) {
+                        val = eabs_val[e];
+                        found = 1;
+                    }
+                }
+                if (!found)
+                    return fail("絶対アドレスが見つかりません");
+                if (!add_rel(obj, (int)roff, 5, -1, val))
+                    return 0;
+            }
+            /* 24 / 27 (LO12) と 51 (RELAX) は組の後半
+             * または印なので読み飛ばす */
+        }
+    }
+    /* 再配置の無かった初期値は数の初期値として確定 */
+    for (int e = 0; e < nedata; e++) {
+        if (edata_hit[e])
+            continue;
+        int fs = edata_sym[e];
+        if (sym_hasinit[fs])
+            return fail("初期値が二つあります");
+        sym_hasinit[fs] = 1;
+        sym_init_kind[fs] = 1;
+        sym_init_val[fs] = edata_val[e];
+    }
+    return 1;
+}
+
 /* オブジェクト1つを読む (番号 obj) */
 static int read_object(int obj, char *path) {
     int fd = open(path, 0);
@@ -286,6 +618,14 @@ static int read_object(int obj, char *path) {
     in_pos = 0;
 
     obj_entry[obj] = -1;
+    /* 形式 version 2 (ELF) か、テキスト (.iwo) かを
+     * 先頭のマジックで見分ける (doc/elf-object.md) */
+    if (in_len >= 4 && eget8(0) == 0x7f && in_buf[1] == 'E' &&
+        in_buf[2] == 'L' && in_buf[3] == 'F') {
+        obj_code_off[obj] = code_used;
+        obj_str_off[obj] = str_used;
+        return read_object_elf(obj);
+    }
     obj_code_off[obj] = code_used;
     obj_str_off[obj] = str_used;
 
