@@ -159,7 +159,7 @@ int run_iwac(int i) {
     int p;
     long st;
     p = 0;
-    p = ds_append(args, p, "iwac.elf --kosaba --object --out ");
+    p = ds_append(args, p, "iwac.elf --kosaba --elf --out ");
     p = ds_append(args, p, obj_name[i]);
     p = ds_append(args, p, " ");
     p = ds_append(args, p, obj_srcs[i]);

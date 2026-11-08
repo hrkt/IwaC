@@ -8,10 +8,11 @@
 # ディレクトリからの相対):
 #   # で始まる行はコメント
 #   out <名前.elf>                  成果物 (1回だけ)
-#   obj <名前.iwo> <file.c> [...]   1つの翻訳単位を
+#   obj <名前.eo> <file.c> [...]    1つの翻訳単位を
 #                                   オブジェクトにする
 # obj の並びがリンク順になる。各 obj について
-# iwac --kosaba --object を、最後に nori を起動する。
+# iwac --kosaba --elf を、最後に nori を起動する
+# (v42 で .iwo から ELF に切替)。
 # オブジェクトは misoni-tmp/ に置く。
 #
 # 道具の場所: 環境変数 IWAC / NORI があればそれ、
@@ -42,7 +43,7 @@ while read -r kind a b; do
             files=$b
             echo "misoni: $a を訳します"
             # shellcheck disable=SC2086
-            "$IWAC" --kosaba --object $files > "misoni-tmp/$a"
+            "$IWAC" --kosaba --elf $files > "misoni-tmp/$a"
             OBJS="$OBJS misoni-tmp/$a"
             ;;
         *)

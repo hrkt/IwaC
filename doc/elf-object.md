@@ -1,5 +1,10 @@
 # オブジェクトの ELF 化: 形式 version 2 の設計
 
+(2026-11-08 追記: v42 で .iwo は引退し、本形式が
+唯一のオブジェクト形式になった。引退の記録は
+doc/iwo-retirement.md。本文中の「現行の .iwo」
+等の記述は v39 設計時点のものとして読むこと)
+
 現行のオブジェクト形式 (.iwo、doc/object-format.md)
 はテキストで、iwac と nori の間だけで通用する。
 これを ELF の ET_REL (再配置可能オブジェクト) に
@@ -175,3 +180,15 @@ doc/progress.md の v39 記録。
 バイトを切り詰めて .iwo の ainit 記録と
 同じ形に揃える (設計は doc/array-init.md)。
 初期値のない TU の .eo は v39 と同形。
+
+### v42 での変更 (.iwo 引退)
+
+手順4を実施した (2026-11-08、ユーザーの決定。
+判断材料は doc/iwo-retirement.md)。Asari に
+ELF 書き手 (write_elf_object の移植) を足して
+出力も ELF になり、物差しは「Asari の .eo ==
+iwac の .eo」に置き直した。Misoni は --elf に
+切替 (手順3の残りも完了)。nori は .iwo の
+読み口を撤去し、iwac は --object を廃止した。
+test.sh の mini_nori は引退し、分割の確認は
+nori の ELF リンクと一括の比較が担う。

@@ -98,16 +98,16 @@ cat ../src/0*.c > "$WORK/iwac_std_all.c"
 # 標準と一致すること (断片プロファイルの本分)
 mkdir -p "$WORK/objs"
 for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
-    "$WORK/iwac-std" --kosaba --object ../src/decls.c ../src/$f.c > "$WORK/objs/$f-std.iwo"
-    "$WORK/iwac-frag" --kosaba --object ../src/decls.c ../src/$f.c > "$WORK/objs/$f-frag.iwo"
-    if ! cmp -s "$WORK/objs/$f-std.iwo" "$WORK/objs/$f-frag.iwo"; then
+    "$WORK/iwac-std" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-std.eo"
+    "$WORK/iwac-frag" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-frag.eo"
+    if ! cmp -s "$WORK/objs/$f-std.eo" "$WORK/objs/$f-frag.eo"; then
         echo "build-frag: $f のオブジェクトが標準と違います。止まります" >&2
         exit 1
     fi
 done
-"$WORK/iwac-std" --kosaba --object ../kosaba/kosaba_rt.c > "$WORK/objs/rt-std.iwo"
-"$WORK/iwac-frag" --kosaba --object ../kosaba/kosaba_rt.c > "$WORK/objs/rt-frag.iwo"
-if ! cmp -s "$WORK/objs/rt-std.iwo" "$WORK/objs/rt-frag.iwo"; then
+"$WORK/iwac-std" --kosaba --elf ../kosaba/kosaba_rt.c > "$WORK/objs/rt-std.eo"
+"$WORK/iwac-frag" --kosaba --elf ../kosaba/kosaba_rt.c > "$WORK/objs/rt-frag.eo"
+if ! cmp -s "$WORK/objs/rt-std.eo" "$WORK/objs/rt-frag.eo"; then
     echo "build-frag: rt のオブジェクトが標準と違います。止まります" >&2
     exit 1
 fi

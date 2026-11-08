@@ -2,7 +2,7 @@
  *
  * 断片 (src/0*.c) をオブジェクトに分けて訳すとき、
  * 各断片の翻訳単位の先頭にこのファイルを一緒に渡す:
- *   iwac --kosaba --object src/decls.c src/03-gen.c
+ *   iwac --kosaba --elf src/decls.c src/03-gen.c
  * 断片同士で共有する変数・配列は「仮定義 (初期値
  * なし)」で、関数はプロトタイプで、ここに全部
  * 宣言してある。実体 (初期値つきの定義や本体) は
@@ -394,7 +394,6 @@ void obj_num(long v);
 void obj_str(char *s);
 void obj_hex(unsigned char *p, long n);
 void obj_arr_init(int a);
-void write_object(void);
 char *op_name(int op);
 void write_asari(void);
 void ebyte(int b);

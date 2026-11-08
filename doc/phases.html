@@ -1914,10 +1914,36 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   小さな1関数で済み、読み取り側は一切変えずに済みました。</p></div>
 </section>
 
+<!-- ================= v42 ================= -->
+<section class="phase" id="v42">
+  <div class="head"><span class="badge b-v4">v42</span><h2>.iwo の引退 — オブジェクトは ELF に一本化</h2></div>
+  <p class="goal-line">目標：<b>自作のテキスト形式（.iwo）を引退させ、オブジェクト形式を ELF に一本化する。</b></p>
+  <p>.iwo は分割コンパイルの階段を支えた形式でしたが、v39 で ELF の
+  オブジェクトが同じ中身を持てるようになり、形式が2つある分の
+  保守（新機能のたびに両方への対応と両方での一致確認）が残って
+  いました。得る軽さは恒常的で、払う移行コストは一回限り、
+  という判断で引退を決めました（判断材料は
+  <code>doc/iwo-retirement.md</code> にアーキテクチャ決定として
+  記録）。</p>
+  <p>段取りは受け口の側から：まず符号化の別出し Asari に ELF を
+  書く力を足し（出力が iwac とバイト一致することを確認）、
+  ビルドのドライバ Misoni を ELF に切り替えてから、最後に
+  リンカ nori の .iwo の読み口と iwac の <code>--object</code> を
+  撤去しました。.iwo の仕様書（<code>doc/object-format.md</code>）は
+  消さず、歴史的資産として残してあります。</p>
+  <div>
+    <span class="chip">形式は1つに</span><span class="chip">仕様書は歴史として残す</span><span class="chip">受け口から順に移行</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  形式を捨てる判断は「今の不便」ではなく「これから先の全作業に
+  かかる税金」で考えるもの、というのが実感です。捨てる段取りも、
+  利用者を先に移してから本体を撤去する、という順序が安全でした。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-08（v41 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-08（v42 時点）</p>
 </footer>
 
 </div>

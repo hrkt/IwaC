@@ -2,14 +2,16 @@
  * Asari: iwac の第3層 (encode) の独立プログラム
  *
  * 入力は iwac --asari が出す命令列のテキスト (.ias)、
- * 出力はオブジェクト (.iwo) で、標準出力へ書く。
+ * 出力は ELF オブジェクトで、標準出力へ書く
+ * (v42 で .iwo から切替。決定の記録は
+ * doc/iwo-retirement.md)。
  * 設計は doc/asari.md。仕事は3つ:
  *   1. 命令列を読む (op は名前、穴は注記で別に来る)
  *   2. 命令を符号化する (RISC-V。ここだけがビット列を
  *      知っている。iwac 本体の src/04-encode.c の移植)
- *   3. データ側のレコードを写し、穴の位置を命令番号から
- *      バイト位置に直して .iwo を出す
- * 物差しは、iwac 内部の encode が出す .iwo との
+ *   3. データ側のレコードから ELF オブジェクトを
+ *      組む (iwac 本体の write_elf_object の移植)
+ * 物差しは、iwac が出す ELF オブジェクトとの
  * バイト一致。
  *
  * このプログラムも iwac の言語の範囲で書いてあり、
@@ -501,7 +503,8 @@ static int read_input(char *path) {
  * - 計算は long で行い、最後に32ビットに丸める
  *   (本体は unsigned int の回り込みに頼っている)
  * - 呼び出しの jal は「オフセット 0」で符号化する
- *   (本体の write_object が揃えた正規形。doc/asari.md) */
+ *   (本体のオブジェクト書き手が揃えた正規形。
+ *   doc/asari.md) */
 static long encode_inst(int i) {
     int op = iop[i];
     long rd = ird[i];
@@ -644,171 +647,656 @@ static void out_ch(int c) {
     olen++;
 }
 
-static void out_str(char *s) {
-    int i = 0;
-    while (s[i] != '\0') {
-        out_ch(s[i]);
-        i++;
-    }
+/* ================= ELF の書き道具 =================
+ * 出力先は out_ch と共通で、こちらは書いたバイト数を
+ * 数える (置き場所の計算に使う)。iwac 本体の ebyte
+ * 系 (src/04-encode.c) の移植 */
+static long eoff;
+
+static void ebyte(int b) {
+    out_ch(b);
+    eoff++;
 }
 
-/* 10進数 (負もあり。本体の obj_num と同じ書き方) */
-static void out_num(long v) {
-    char buf[24];
+static void eu16(int v) {
+    ebyte(v & 0xff);
+    ebyte((v >> 8) & 0xff);
+}
+
+static void eu32(long v) {
+    ebyte((int)(v & 0xff));
+    ebyte((int)((v >> 8) & 0xff));
+    ebyte((int)((v >> 16) & 0xff));
+    ebyte((int)((v >> 24) & 0xff));
+}
+
+static void eu64(long v) {
+    for (int k = 0; k < 8; k++)
+        ebyte((int)((v >> (k * 8)) & 0xff));
+}
+
+static void epad8(void) {
+    while (eoff % 8 != 0)
+        ebyte(0);
+}
+
+static void ebytes(char *p, long n) {
+    for (long i = 0; i < n; i++)
+        ebyte(p[i] & 0xff);
+}
+
+/* ================= レコードの数えと検索 =================
+ * ELF のシンボル表は「関数は名簿の順、変数は枠の順、
+ * 配列は名簿の順」で並ぶ。レコードはその順で届いて
+ * いるので、種類ごとに数えれば順位が分かる */
+static int cnt_func(void) {
     int n = 0;
-    if (v < 0) {
-        out_ch('-');
-        v = -v;
-    }
-    if (v == 0)
-        buf[n++] = '0';
-    while (v > 0) {
-        buf[n++] = (char)('0' + (int)(v % 10));
-        v /= 10;
-    }
-    for (int i = n - 1; i >= 0; i--)
-        out_ch(buf[i]);
+    for (int r = 0; r < nrec; r++)
+        if (rec_kind[r] == 'f' || rec_kind[r] == 'd')
+            n++;
+    return n;
 }
 
-static void out_hex_byte(int b) {
-    char *hex = "0123456789abcdef";
-    out_ch(hex[(b >> 4) & 15]);
-    out_ch(hex[b & 15]);
+static int cnt_var(void) {
+    int n = 0;
+    for (int r = 0; r < nrec; r++)
+        if (rec_kind[r] == 'v' || rec_kind[r] == 'c')
+            n++;
+    return n;
 }
 
-/* バイト列を16進数で (1行に32バイトまで。本体の
- * obj_hex と同じ改行の置き方) */
-static void out_hex(char *p, long n) {
-    for (long i = 0; i < n; i++) {
-        if (i > 0 && i % 32 == 0)
-            out_ch('\n');
-        out_hex_byte(p[i] & 0xff);
-    }
-    if (n > 0)
-        out_ch('\n');
+static int cnt_arr(void) {
+    int n = 0;
+    for (int r = 0; r < nrec; r++)
+        if (rec_kind[r] == 'a')
+            n++;
+    return n;
 }
 
-/* ================= .iwo を出す =================
- * 並びと字面は iwac 本体の write_object と揃える。
- * 位置は「命令番号 - 先頭」で引いて4倍する */
-static int write_object_out(void) {
-    int start = has_entry ? 0 : prefix_n;
+static int cnt_iptr(void) {
+    int n = 0;
+    for (int r = 0; r < nrec; r++)
+        if (rec_kind[r] == 'p')
+            n++;
+    return n;
+}
 
-    out_str("iwacobj 1\n");
-    out_str("target kosaba\n");
-    if (has_entry) {
-        out_str("entry ");
-        out_num((long)prefix_n * 4);
-        out_str("\n");
+/* kosaba_flush が関数として届いているか */
+static int flush_in_recs(void) {
+    for (int r = 0; r < nrec; r++)
+        if ((rec_kind[r] == 'f' || rec_kind[r] == 'd') &&
+            ds_streq(name_pool + rec_name[r], "kosaba_flush"))
+            return 1;
+    return 0;
+}
+
+static int has_callopt(void) {
+    for (int r = 0; r < ncall; r++)
+        if (call_kind[r] == 2)
+            return 1;
+    return 0;
+}
+
+/* 変数全体の枠数 (仮定義の領域の大きさ) */
+static long total_var_slots(void) {
+    long n = 0;
+    for (int r = 0; r < nrec; r++)
+        if (rec_kind[r] == 'v' || rec_kind[r] == 'c')
+            n += rec_n1[r];
+    return n;
+}
+
+/* 初期値つき変数が届く最後の枠 (初期イメージの大きさ) */
+static long img_slots(void) {
+    long best = 0;
+    long pos = 0;
+    for (int r = 0; r < nrec; r++) {
+        if (rec_kind[r] != 'v' && rec_kind[r] != 'c')
+            continue;
+        if (rec_kind[r] == 'v' && pos + rec_n1[r] > best)
+            best = pos + rec_n1[r];
+        pos += rec_n1[r];
     }
-    out_str("code ");
-    out_num((long)(ninst - start) * 4);
-    out_str("\n");
+    return best;
+}
+
+/* 名前から順位と場所を引く (再配置の相手決めに使う) */
+static int func_rank(char *name) {
+    int seen = -1;
+    for (int r = 0; r < nrec; r++) {
+        if (rec_kind[r] != 'f' && rec_kind[r] != 'd')
+            continue;
+        seen++;
+        if (ds_streq(name_pool + rec_name[r], name))
+            return seen;
+    }
+    return -1;
+}
+
+static int var_rank(char *name) {
+    int seen = -1;
+    for (int r = 0; r < nrec; r++) {
+        if (rec_kind[r] != 'v' && rec_kind[r] != 'c')
+            continue;
+        seen++;
+        if (ds_streq(name_pool + rec_name[r], name))
+            return seen;
+    }
+    return -1;
+}
+
+static int arr_rank(char *name) {
+    int seen = -1;
+    for (int r = 0; r < nrec; r++) {
+        if (rec_kind[r] != 'a')
+            continue;
+        seen++;
+        if (ds_streq(name_pool + rec_name[r], name))
+            return seen;
+    }
+    return -1;
+}
+
+/* 変数の枠の位置 (先行する変数の枠数の合計) */
+static long var_slotpos(char *name) {
+    long pos = 0;
+    for (int r = 0; r < nrec; r++) {
+        if (rec_kind[r] != 'v' && rec_kind[r] != 'c')
+            continue;
+        if (ds_streq(name_pool + rec_name[r], name))
+            return pos;
+        pos += rec_n1[r];
+    }
+    return 0;
+}
+
+/* 変数の初期値 (init なら値、iptr なら文字列の位置。
+ * 初期値の無い変数では呼ばない) */
+static long var_init_val(char *name) {
+    for (int r = 0; r < nrec; r++)
+        if ((rec_kind[r] == 'i' || rec_kind[r] == 'p') &&
+            ds_streq(name_pool + rec_name[r], name))
+            return rec_n1[r];
+    return 0;
+}
+
+/* 配列の領域内オフセット */
+static long arr_off_of(char *name) {
+    for (int r = 0; r < nrec; r++)
+        if (rec_kind[r] == 'a' &&
+            ds_streq(name_pool + rec_name[r], name))
+            return rec_n1[r];
+    return 0;
+}
+
+/* 初期値の実体が届く末尾 (iwac 本体の arr_init_end と
+ * 同じ数え方: 書かれた範囲の最後の 0 でないバイトまで) */
+static long ainit_end(void) {
+    long best = 0;
+    for (int r = 0; r < nrec; r++) {
+        if (rec_kind[r] != 'A')
+            continue;
+        long t = rec_n2[r];
+        while (t > 0 && ainit_bytes[rec_n1[r] + t - 1] == 0)
+            t--;
+        long cand = arr_off_of(name_pool + rec_name[r]) + t;
+        if (cand > best)
+            best = cand;
+    }
+    return best;
+}
+
+/* ================= シンボルの素性 =================
+ * iwac 本体の elf_describe_* の移植。並びは
+ * [0]=空、[1..5]=セクション、再配置の組ごとの
+ * ラベル、絶対アドレスのシンボル (以上ローカル)、
+ * iwac_entry (あれば)、関数、変数、配列、
+ * kosaba_flush の弱い未定義 (余分があれば) */
+static char *ed_name;
+static int ed_info;
+static int ed_shndx;
+static long ed_value;
+static long ed_size;
+
+static char *esec_name(int i) {
+    if (i == 1) return ".text";
+    if (i == 2) return ".data";
+    if (i == 3) return ".bss";
+    if (i == 4) return ".iwac.strings";
+    if (i == 5) return ".iwac.arrays";
+    if (i == 6) return ".rela.text";
+    if (i == 7) return ".rela.data";
+    if (i == 8) return ".symtab";
+    if (i == 9) return ".strtab";
+    if (i == 10) return ".shstrtab";
+    return "";
+}
+
+static void edescribe_local(int i, int start) {
+    ed_name = "";
+    ed_info = 0;
+    ed_shndx = 0;
+    ed_value = 0;
+    ed_size = 0;
+    if (i == 0)
+        return;
+    if (i <= 5) {
+        ed_info = 3;  /* LOCAL / SECTION */
+        ed_shndx = i;
+        return;
+    }
+    if (i < 6 + naddr) {
+        int r = i - 6;
+        ed_shndx = 1;  /* .text */
+        ed_value = (long)(addr_site[r] - start) * 4;
+        return;
+    }
     {
-        long col = 0;
-        for (int i = start; i < ninst; i++) {
-            long w = encode_inst(i);
-            for (int j = 0; j < 4; j++) {
-                if (col > 0 && col % 32 == 0)
-                    out_ch('\n');
-                out_hex_byte((int)((w >> (j * 8)) & 0xff));
-                col++;
+        int r = i - 6 - naddr;
+        ed_shndx = 0xfff1;  /* SHN_ABS */
+        ed_value = abs_val[r];
+    }
+}
+
+static void edescribe_global(int g, int has_entry, int start) {
+    int off0 = has_entry ? 1 : 0;
+    ed_name = "";
+    ed_info = 0x10;  /* GLOBAL / NOTYPE */
+    ed_shndx = 0;
+    ed_value = 0;
+    ed_size = 0;
+    if (has_entry && g == 0) {
+        ed_name = "iwac_entry";
+        ed_shndx = 1;
+        ed_size = (long)prefix_n * 4;
+        return;
+    }
+    if (g < off0 + cnt_func()) {
+        int want = g - off0;
+        int seen = -1;
+        for (int r = 0; r < nrec; r++) {
+            if (rec_kind[r] != 'f' && rec_kind[r] != 'd')
+                continue;
+            seen++;
+            if (seen == want) {
+                ed_name = name_pool + rec_name[r];
+                if (rec_kind[r] == 'f') {
+                    ed_info = 0x12;  /* GLOBAL / FUNC */
+                    ed_shndx = 1;
+                    ed_value = (rec_n1[r] - start) * 4;
+                    ed_size = rec_n2[r] * 4;
+                } else if (ds_streq(ed_name, "kosaba_flush")) {
+                    ed_info = 0x20;  /* WEAK / NOTYPE */
+                }
+                return;
             }
         }
-        if (col > 0)
-            out_ch('\n');
+        return;
     }
-    out_str("strings ");
-    out_num(str_len);
-    out_str("\n");
-    out_hex(str_bytes, str_len);
-    out_str("arrays ");
-    out_num(arrays_n);
-    out_str("\n");
-    for (int r = 0; r < nrec; r++) {
-        char *nm = name_pool + rec_name[r];
-        if (rec_kind[r] == 'f') {
-            out_str("func ");
-            out_str(nm);
-            out_str(" ");
-            out_num((rec_n1[r] - start) * 4);
-            out_str(" ");
-            out_num(rec_n2[r] * 4);
-            out_str("\n");
-        } else if (rec_kind[r] == 'd') {
-            out_str("decl ");
-            out_str(nm);
-            out_str("\n");
-        } else if (rec_kind[r] == 'v' || rec_kind[r] == 'c') {
-            out_str(rec_kind[r] == 'v' ? "var " : "varc ");
-            out_str(nm);
-            out_str(" ");
-            out_num(rec_n1[r]);
-            out_str("\n");
-        } else if (rec_kind[r] == 'a') {
-            out_str("arr ");
-            out_str(nm);
-            out_str(" ");
-            out_num(rec_n1[r]);
-            out_str(" ");
-            out_num(rec_n2[r]);
-            out_str("\n");
-        } else if (rec_kind[r] == 'A') {
-            out_str("ainit ");
-            out_str(nm);
-            out_str(" ");
-            out_num(rec_n2[r]);
-            out_str("\n");
-            out_hex(ainit_bytes + rec_n1[r], rec_n2[r]);
-        } else if (rec_kind[r] == 'i') {
-            out_str("init ");
-            out_str(nm);
-            out_str(" ");
-            out_num(rec_n1[r]);
-            out_str("\n");
-        } else if (rec_kind[r] == 'p') {
-            out_str("iptr ");
-            out_str(nm);
-            out_str(" str ");
-            out_num(rec_n1[r]);
-            out_str("\n");
+    if (g < off0 + cnt_func() + cnt_var()) {
+        int want = g - off0 - cnt_func();
+        int seen = -1;
+        long slotpos = 0;
+        for (int r = 0; r < nrec; r++) {
+            if (rec_kind[r] != 'v' && rec_kind[r] != 'c')
+                continue;
+            seen++;
+            if (seen == want) {
+                ed_name = name_pool + rec_name[r];
+                ed_info = 0x11;  /* GLOBAL / OBJECT */
+                if (rec_kind[r] == 'v') {
+                    ed_shndx = 2;  /* .data */
+                    ed_value = slotpos * 8;
+                } else {
+                    ed_shndx = 0xfff2;  /* SHN_COMMON */
+                    ed_value = 8;
+                }
+                ed_size = rec_n1[r] * 8;
+                return;
+            }
+            slotpos += rec_n1[r];
+        }
+        return;
+    }
+    if (g < off0 + cnt_func() + cnt_var() + cnt_arr()) {
+        int want = g - off0 - cnt_func() - cnt_var();
+        int seen = -1;
+        for (int r = 0; r < nrec; r++) {
+            if (rec_kind[r] != 'a')
+                continue;
+            seen++;
+            if (seen == want) {
+                ed_name = name_pool + rec_name[r];
+                ed_info = 0x11;
+                ed_shndx = 5;  /* .iwac.arrays */
+                ed_value = rec_n1[r];
+                ed_size = rec_n2[r];
+                return;
+            }
+        }
+        return;
+    }
+    /* 余分の kosaba_flush (弱い未定義) */
+    ed_name = "kosaba_flush";
+    ed_info = 0x20;
+}
+
+static char *esym_name(int s, int nlocals, int has_entry,
+                       int start) {
+    if (s < nlocals)
+        edescribe_local(s, start);
+    else
+        edescribe_global(s - nlocals, has_entry, start);
+    return ed_name;
+}
+
+/* (旧 .iwo 出力は v42 で引退。出力は ELF に一本化) */
+
+/* ================= ELF を出す =================
+ * iwac 本体の write_elf_object とバイト一致させる。
+ * 材料はレコードと注記から組み直す。配置の規則は
+ * nori が握る (ここは置き場所を決めない)。
+ * 段ごとに値を受けるための置き場 */
+static int el_start;
+static int el_off0;
+static int el_nf;
+static int el_nv;
+static int el_na;
+static int el_nlocals;
+static int el_nsym;
+static int el_nrela_data;
+static long el_data_size;
+static long el_bss_size;
+static long el_strings_off;
+static long el_strings_size;
+static long el_arrays_off;
+static long el_arrays_size;
+static long el_aend;
+static long el_data_off;
+static long el_rela_text_off;
+static long el_rela_data_off;
+static long el_symtab_off;
+static long el_strtab_off;
+static long el_strtab_size;
+static long el_shstrtab_off;
+static long el_shstrtab_size;
+
+/* link / info / entsize は呼び出し前に置く (引数を
+ * 8個以内に収めるため。本体と同じやり方) */
+static int esh_link;
+static int esh_info;
+static long esh_entsize;
+
+static void eshdr(int name, int type, long flags, long off,
+                  long size, long align) {
+    eu32(name);
+    eu32(type);
+    eu64(flags);
+    eu64(0);
+    eu64(off);
+    eu64(size);
+    eu32(esh_link);
+    eu32(esh_info);
+    eu64(align);
+    eu64(esh_entsize);
+    esh_link = 0;
+    esh_info = 0;
+    esh_entsize = 0;
+}
+
+/* 段1: 数えて置き場所を決め、ヘッダ・.text・
+ * .iwac.strings・.iwac.arrays の中身を書く */
+static void elf_part1(void) {
+    el_start = has_entry ? 0 : prefix_n;
+    el_off0 = has_entry ? 1 : 0;
+    el_aend = ainit_end();
+    int nf = cnt_func();
+    int nv = cnt_var();
+    int na = cnt_arr();
+    int flush_extra = (has_callopt() && !flush_in_recs()) ? 1 : 0;
+    int nlocals = 6 + naddr + nabs;
+    int nglob = el_off0 + nf + nv + na + flush_extra;
+    long img = img_slots();
+    long text_size = (long)(ninst - el_start) * 4;
+    long strtab_size = 1;
+    for (int s2 = 0; s2 < nlocals + nglob; s2++)
+        strtab_size += ds_strlen(esym_name(s2, nlocals,
+                             has_entry, el_start)) + 1;
+    long shstrtab_size = 0;
+    for (int i = 0; i < 11; i++)
+        shstrtab_size += ds_strlen(esec_name(i)) + 1;
+    long text_off = 64;
+    long strings_off = text_off + text_size;
+    long arrays_off = strings_off + str_len;
+    long data_off = (arrays_off + 7) / 8 * 8;
+    if (el_aend > 0)
+        data_off = (arrays_off + arrays_n + 7) / 8 * 8;
+    long rela_text_off = (data_off + img * 8 + 7) / 8 * 8;
+    el_nf = nf;
+    el_nv = nv;
+    el_na = na;
+    el_nlocals = nlocals;
+    el_nsym = nlocals + nglob;
+    el_nrela_data = cnt_iptr();
+    el_data_size = img * 8;
+    el_bss_size = total_var_slots() * 8 - img * 8;
+    el_strings_off = strings_off;
+    el_strings_size = str_len;
+    el_arrays_off = arrays_off;
+    el_arrays_size = arrays_n;
+    el_data_off = data_off;
+    el_rela_text_off = rela_text_off;
+    el_rela_data_off = rela_text_off +
+        (long)(ncall + 2 * naddr + 2 * nabs) * 24;
+    el_symtab_off = (el_rela_data_off +
+        (long)el_nrela_data * 24 + 7) / 8 * 8;
+    el_strtab_off = el_symtab_off + (long)el_nsym * 24;
+    el_strtab_size = strtab_size;
+    el_shstrtab_off = el_strtab_off + strtab_size;
+    el_shstrtab_size = shstrtab_size;
+    long shoff = (el_shstrtab_off + shstrtab_size + 7) / 8 * 8;
+
+    eoff = 0;
+    ebyte(0x7f); ebyte('E'); ebyte('L'); ebyte('F');
+    ebyte(2); ebyte(1); ebyte(1); ebyte(0);
+    for (int k = 0; k < 8; k++)
+        ebyte(0);
+    eu16(1);          /* ET_REL */
+    eu16(243);        /* EM_RISCV */
+    eu32(1);
+    eu64(0);
+    eu64(0);
+    eu64(shoff);
+    eu32(0);
+    eu16(64);
+    eu16(0);
+    eu16(0);
+    eu16(64);
+    eu16(11);
+    eu16(10);
+    /* .text (呼び出しの穴は encode_inst が正規形に) */
+    for (int i = el_start; i < ninst; i++)
+        eu32(encode_inst(i));
+    /* .iwac.strings */
+    ebytes(str_bytes, str_len);
+    /* .iwac.arrays の中身 (初期値があるときだけ) */
+    if (el_aend > 0) {
+        long pos = 0;
+        for (int r = 0; r < nrec; r++) {
+            if (rec_kind[r] != 'A')
+                continue;
+            long off = arr_off_of(name_pool + rec_name[r]);
+            while (pos < off) {
+                ebyte(0);
+                pos++;
+            }
+            ebytes(ainit_bytes + rec_n1[r], rec_n2[r]);
+            pos = off + rec_n2[r];
+        }
+        while (pos < arrays_n) {
+            ebyte(0);
+            pos++;
         }
     }
+}
+
+/* 段2: .data の初期イメージと再配置 (.rela.text /
+ * .rela.data) を書く */
+static void elf_part2(void) {
+    epad8();
+    /* .data: 枠ごとに、その枠から始まる変数の初期値 */
+    long img = img_slots();
+    for (long slot = 0; slot < img; slot++) {
+        long val = 0;
+        long pos = 0;
+        for (int r = 0; r < nrec; r++) {
+            if (rec_kind[r] != 'v' && rec_kind[r] != 'c')
+                continue;
+            if (pos == slot && rec_kind[r] == 'v') {
+                val = var_init_val(name_pool + rec_name[r]);
+                break;
+            }
+            pos += rec_n1[r];
+        }
+        eu64(val);
+    }
+    /* .rela.text: 呼び出し */
+    epad8();
     for (int r = 0; r < ncall; r++) {
-        out_str(call_kind[r] == 1 ? "call " : "callopt ");
-        out_num((long)(call_site[r] - start) * 4);
-        out_str(" ");
-        out_str(name_pool + call_name[r]);
-        out_str("\n");
-    }
-    for (int r = 0; r < naddr; r++) {
-        if (addr_kind[r] == 1) {
-            out_str("addrstr ");
-            out_num((long)(addr_site[r] - start) * 4);
-            out_str(" ");
-            out_num(addr_val[r]);
-            out_str("\n");
+        int sym;
+        if (call_kind[r] == 2) {
+            if (flush_in_recs())
+                sym = el_nlocals + el_off0 +
+                      func_rank("kosaba_flush");
+            else
+                sym = el_nlocals + el_off0 + el_nf + el_nv +
+                      el_na;
         } else {
-            out_str("addr ");
-            out_num((long)(addr_site[r] - start) * 4);
-            out_str(" ");
-            out_str(name_pool + addr_name[r]);
-            out_str(" 0\n");
+            sym = el_nlocals + el_off0 +
+                  func_rank(name_pool + call_name[r]);
         }
+        eu64((long)(call_site[r] - el_start) * 4);
+        eu64(((long)sym << 32) | 17);  /* R_RISCV_JAL */
+        eu64(0);
     }
+    /* .rela.text: 住所作りの組 (HI20 + LO12) */
+    for (int r = 0; r < naddr; r++) {
+        int sym;
+        long add = 0;
+        if (addr_kind[r] == 1) {
+            sym = 4;  /* .iwac.strings のセクション */
+            add = addr_val[r];
+        } else if (addr_kind[r] == 2) {
+            sym = el_nlocals + el_off0 + el_nf +
+                  var_rank(name_pool + addr_name[r]);
+        } else {
+            sym = el_nlocals + el_off0 + el_nf + el_nv +
+                  arr_rank(name_pool + addr_name[r]);
+        }
+        eu64((long)(addr_site[r] - el_start) * 4);
+        eu64(((long)sym << 32) | 23);  /* PCREL_HI20 */
+        eu64(add);
+        eu64((long)(addr_site[r] - el_start) * 4 + 4);
+        eu64(((long)(6 + r) << 32) | 24);  /* PCREL_LO12_I */
+        eu64(0);
+    }
+    /* .rela.text: 絶対アドレスの組 */
     for (int r = 0; r < nabs; r++) {
-        out_str("addabs ");
-        out_num((long)(abs_site[r] - start) * 4);
-        out_str(" ");
-        out_num(abs_val[r]);
-        out_str("\n");
+        int sym = 6 + naddr + r;
+        eu64((long)(abs_site[r] - el_start) * 4);
+        eu64(((long)sym << 32) | 26);  /* R_RISCV_HI20 */
+        eu64(0);
+        eu64((long)(abs_site[r] - el_start) * 4 + 4);
+        eu64(((long)sym << 32) | 27);  /* R_RISCV_LO12_I */
+        eu64(0);
     }
-    for (int r = 0; r < nundef; r++) {
-        out_str("undef ");
-        out_str(name_pool + undef_name[r]);
-        out_str("\n");
+    /* .rela.data: 文字列へのポインタの初期値 */
+    for (int r = 0; r < nrec; r++) {
+        if (rec_kind[r] != 'p')
+            continue;
+        eu64(var_slotpos(name_pool + rec_name[r]) * 8);
+        eu64(((long)4 << 32) | 2);  /* R_RISCV_64 */
+        eu64(rec_n1[r]);
     }
-    out_str("end\n");
+}
+
+/* 段3: .symtab・.strtab・.shstrtab・セクション
+ * ヘッダを書く */
+static void elf_part3(void) {
+    epad8();
+    for (int s2 = 0; s2 < el_nsym; s2++) {
+        long name_off = 1;
+        for (int t = 0; t < s2; t++)
+            name_off += ds_strlen(esym_name(t, el_nlocals,
+                              has_entry, el_start)) + 1;
+        esym_name(s2, el_nlocals, has_entry, el_start);
+        eu32(name_off);
+        ebyte(ed_info);
+        ebyte(0);
+        eu16(ed_shndx);
+        eu64(ed_value);
+        eu64(ed_size);
+    }
+    ebyte(0);
+    for (int s2 = 0; s2 < el_nsym; s2++) {
+        char *nm = esym_name(s2, el_nlocals, has_entry,
+                             el_start);
+        ebytes(nm, ds_strlen(nm));
+        ebyte(0);
+    }
+    for (int i = 0; i < 11; i++) {
+        ebytes(esec_name(i), ds_strlen(esec_name(i)));
+        ebyte(0);
+    }
+    epad8();
+    eshdr(0, 0, 0, 0, 0, 0);
+    {
+        long noff[11];
+        long acc = 0;
+        for (int i = 0; i < 11; i++) {
+            noff[i] = acc;
+            acc += ds_strlen(esec_name(i)) + 1;
+        }
+        eshdr((int)noff[1], 1, 6, 64,
+              (long)(ninst - el_start) * 4, 4);
+        eshdr((int)noff[2], 1, 3, el_data_off, el_data_size, 8);
+        eshdr((int)noff[3], 8, 3, el_data_off + el_data_size,
+              el_bss_size, 8);
+        eshdr((int)noff[4], 1, 3, el_strings_off,
+              el_strings_size, 1);
+        if (el_aend > 0)
+            eshdr((int)noff[5], 1, 3, el_arrays_off,
+                  el_arrays_size, 8);
+        else
+            eshdr((int)noff[5], 8, 3,
+                  el_strings_off + el_strings_size,
+                  el_arrays_size, 8);
+        esh_link = 8;
+        esh_info = 1;
+        esh_entsize = 24;
+        eshdr((int)noff[6], 4, 0, el_rela_text_off,
+              (long)(ncall + 2 * naddr + 2 * nabs) * 24, 8);
+        esh_link = 8;
+        esh_info = 2;
+        esh_entsize = 24;
+        eshdr((int)noff[7], 4, 0, el_rela_data_off,
+              (long)el_nrela_data * 24, 8);
+        esh_link = 9;
+        esh_info = el_nlocals;
+        esh_entsize = 24;
+        eshdr((int)noff[8], 2, 0, el_symtab_off,
+              (long)el_nsym * 24, 8);
+        eshdr((int)noff[9], 3, 0, el_strtab_off,
+              el_strtab_size, 1);
+        eshdr((int)noff[10], 3, 0, el_shstrtab_off,
+              el_shstrtab_size, 1);
+    }
+}
+
+static int write_elf_out(void) {
+    elf_part1();
+    elf_part2();
+    elf_part3();
     oflush();
     return 1;
 }
@@ -823,7 +1311,7 @@ int main(int argc, char **argv) {
         base = 3;
     }
     if (argc - base < 1) {
-        ds_puts(2, "usage: asari [--out <name>] <ファイル.ias> > out.iwo\n");
+        ds_puts(2, "usage: asari [--out <name>] <ファイル.ias> > out.eo\n");
         return 1;
     }
     if (!read_input(argv[base])) {
@@ -832,6 +1320,6 @@ int main(int argc, char **argv) {
         ds_puts(2, "\n");
         return 1;
     }
-    write_object_out();
+    write_elf_out();
     return 0;
 }

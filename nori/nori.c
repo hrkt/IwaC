@@ -1,9 +1,10 @@
 /* nori -- IwaC のためのリンカ (分割コンパイルへの
- * 階段の段3。設計は doc/object-format.md)
+ * 階段の段3。形式の設計は doc/elf-object.md)
  *
- * 使い方: nori a.iwo b.iwo ... > prog.elf
+ * 使い方: nori a.eo b.eo ... > prog.elf
  *
- * オブジェクト (テキスト形式、iwacobj 1) を読み、
+ * ELF オブジェクト (v39 の形式。v42 で .iwo の
+ * 読み口は引退し、ELF に一本化した) を読み、
  *   1. コードを並べる (入口の断片を先頭に、
  *      関数の本体は登録順)
  *   2. データを並べる (文字列 → 配列 → グローバル。
@@ -185,96 +186,10 @@ static int add_rel(int obj, int off, int kind, int sym, long val) {
 
 /* ================= オブジェクトを読む ================= */
 static long in_len;
-static long in_pos;
-static char tok_buf[128];
-
-static void skip_space(void) {
-    while (in_pos < in_len) {
-        char c = in_buf[in_pos];
-        if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
-            break;
-        in_pos++;
-    }
-}
-
-/* 空白で区切られた言葉を1つ読む。無ければ空に */
-static void read_tok(void) {
-    skip_space();
-    int n = 0;
-    while (in_pos < in_len) {
-        char c = in_buf[in_pos];
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
-            break;
-        if (n < 127)
-            tok_buf[n++] = c;
-        in_pos++;
-    }
-    tok_buf[n] = '\0';
-}
-
-/* 次の言葉が期待どおりか確かめる */
-static int expect_tok(char *want) {
-    read_tok();
-    if (!ds_streq(tok_buf, want))
-        return fail("オブジェクトの形が違います");
-    return 1;
-}
-
-/* 10進数を読む (符号あり、64ビット) */
-static long read_num(void) {
-    read_tok();
-    long v = 0;
-    int i = 0;
-    int neg = 0;
-    if (tok_buf[0] == '-') {
-        neg = 1;
-        i = 1;
-    }
-    while (tok_buf[i] >= '0' && tok_buf[i] <= '9') {
-        v = v * 10 + (tok_buf[i] - '0');
-        i++;
-    }
-    return neg ? -v : v;
-}
-
-/* 16進数のバイト列を n バイト読んで置き場へ足す */
-static int read_hex_bytes(char *pool, int *used, int max, long n) {
-    for (long i = 0; i < n; i++) {
-        int hi = -1;
-        int lo = -1;
-        while (hi < 0) {
-            if (in_pos >= in_len)
-                return fail("16進数が途中で終わっています");
-            char c = in_buf[in_pos++];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
-                continue;
-            hi = ds_hexval(c);
-            if (hi < 0)
-                return fail("16進数でない文字があります");
-        }
-        while (lo < 0) {
-            if (in_pos >= in_len)
-                return fail("16進数が途中で終わっています");
-            char c = in_buf[in_pos++];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
-                continue;
-            lo = ds_hexval(c);
-            if (lo < 0)
-                return fail("16進数でない文字があります");
-        }
-        if (*used >= max)
-            return fail("置き場が足りません");
-        pool[*used] = (char)(hi * 16 + lo);
-        *used = *used + 1;
-    }
-    return 1;
-}
-
-
 /* ================= ELF オブジェクトを読む =================
- * 形式 version 2 (doc/elf-object.md)。中身は .iwo と
- * 同じ内部構造 (名前表・登録順・穴の控え) に写す。
- * 配置と穴埋めは .iwo と共通の後段が担う */
+ * 形式の設計は doc/elf-object.md。中身は内部構造
+ * (名前表・登録順・穴の控え) に写し、配置と
+ * 穴埋めは後段が担う */
 static int esym_tag[16384];  /* 0 = 名前あり、1 = 文字列
                               * セクション、2 = 絶対、3 = その他、
                               * 4 = 名前あり (弱い) */
@@ -337,8 +252,8 @@ static void esec_name(long shoff, long shstr_off, int i, char *buf) {
 }
 
 /* 配列の初期値を in_buf の位置から取り込む (v40)。
- * 末尾の 0 バイトは実体に入れない (.iwo 側と同じ
- * 約束)。全部 0 の写しは「初期値なし」と同じで、
+ * 末尾の 0 バイトは実体に入れない (書き手側と
+ * 同じ約束)。全部 0 の写しは「初期値なし」と同じで、
  * 仮定義側のオブジェクトが中身つきの節を持って
  * いた場合に当たる。既に初期値がある名前とは、
  * 同じ中身ならよい */
@@ -668,221 +583,16 @@ static int read_object(int obj, char *path) {
         }
     }
     close(fd);
-    in_pos = 0;
 
     obj_entry[obj] = -1;
-    /* 形式 version 2 (ELF) か、テキスト (.iwo) かを
-     * 先頭のマジックで見分ける (doc/elf-object.md) */
-    if (in_len >= 4 && eget8(0) == 0x7f && in_buf[1] == 'E' &&
-        in_buf[2] == 'L' && in_buf[3] == 'F') {
-        obj_code_off[obj] = code_used;
-        obj_str_off[obj] = str_used;
-        return read_object_elf(obj);
-    }
     obj_code_off[obj] = code_used;
     obj_str_off[obj] = str_used;
-
-    if (!expect_tok("iwacobj"))
-        return 0;
-    if (read_num() != 1)
-        return fail("オブジェクトの版が違います");
-    if (!expect_tok("target"))
-        return 0;
-    read_tok();
-    if (!ds_streq(tok_buf, "kosaba"))
-        return fail("対象が kosaba ではありません");
-
-    for (;;) {
-        read_tok();
-        if (tok_buf[0] == '\0')
-            return fail("end がありません");
-        if (ds_streq(tok_buf, "end"))
-            break;
-        if (ds_streq(tok_buf, "entry")) {
-            obj_entry[obj] = (int)read_num();
-        } else if (ds_streq(tok_buf, "code")) {
-            long n = read_num();
-            obj_code_len[obj] = (int)n;
-            if (!read_hex_bytes(code_pool, &code_used, 262144, n))
-                return 0;
-        } else if (ds_streq(tok_buf, "strings")) {
-            long n = read_num();
-            obj_str_len[obj] = (int)n;
-            if (!read_hex_bytes(str_pool, &str_used, 131072, n))
-                return 0;
-        } else if (ds_streq(tok_buf, "arrays")) {
-            read_num();  /* 合計は記録だけで、配置は arr から */
-        } else if (ds_streq(tok_buf, "func")) {
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            int off = (int)read_num();
-            int size = (int)read_num();
-            if (!set_kind(s, 1))
-                return 0;
-            if (sym_obj[s] >= 0)
-                return fail("関数の定義が二つあります");
-            sym_obj[s] = obj;
-            sym_off[s] = off;
-            sym_size[s] = size;
-            if (nseq >= MAX_SEQ)
-                return fail("関数が多すぎます");
-            seq_sym[nseq++] = s;
-        } else if (ds_streq(tok_buf, "decl")) {
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            if (!set_kind(s, 1))
-                return 0;
-            if (nseq >= MAX_SEQ)
-                return fail("関数が多すぎます");
-            seq_sym[nseq++] = s;
-        } else if (ds_streq(tok_buf, "var") ||
-                   ds_streq(tok_buf, "varc")) {
-            int firm = ds_streq(tok_buf, "var");
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            int cnt = (int)read_num();  /* 占める枠の数 (v37) */
-            if (!set_kind(s, 2))
-                return 0;
-            if (sym_obj[s] < 0) {
-                /* 初出: 枠番号を割り当てる (初出の順) */
-                sym_obj[s] = obj;
-                sym_off[s] = var_slots;
-                var_slots += cnt;
-            }
-            if (firm) {
-                if (sym_firm[s])
-                    return fail("変数の本定義が二つあります");
-                sym_firm[s] = 1;
-            }
-        } else if (ds_streq(tok_buf, "arr")) {
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            read_num();  /* 自分の領域でのずれは使わない */
-            int size = (int)read_num();
-            if (!set_kind(s, 3))
-                return 0;
-            if (sym_obj[s] >= 0) {
-                if (sym_size[s] != size)
-                    return fail("配列の大きさが食い違います");
-            } else {
-                sym_obj[s] = obj;
-                sym_size[s] = size;
-                sym_off[s] = (int)arr_area;
-                arr_area += size;
-            }
-        } else if (ds_streq(tok_buf, "ainit")) {
-            /* 配列の初期値 (v40)。直前の arr で登録された
-             * 配列に、バイト列を結び付ける */
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            long n = read_num();
-            if (!set_kind(s, 3))
-                return 0;
-            if (sym_ainit_len[s] >= 0)
-                return fail("配列の初期値が二つあります");
-            int astart = ainit_used;
-            if (!read_hex_bytes(ainit_buf, &ainit_used, MAX_AINIT, n))
-                return 0;
-            /* 末尾の 0 バイトは実体に入れない (一括版の
-             * arr_init_end と同じ約束。全部 0 なら
-             * 初期値なしと同じ) */
-            long tn = n;
-            while (tn > 0 && ainit_buf[astart + tn - 1] == 0)
-                tn--;
-            ainit_used = astart + (int)tn;
-            if (tn > 0) {
-                sym_ainit_off[s] = astart;
-                sym_ainit_len[s] = (int)tn;
-            }
-        } else if (ds_streq(tok_buf, "init")) {
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            if (!set_kind(s, 2))
-                return 0;
-            if (sym_hasinit[s])
-                return fail("初期値が二つあります");
-            sym_hasinit[s] = 1;
-            sym_init_kind[s] = 1;
-            sym_init_val[s] = read_num();
-        } else if (ds_streq(tok_buf, "iptr")) {
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            if (!set_kind(s, 2))
-                return 0;
-            if (sym_hasinit[s])
-                return fail("初期値が二つあります");
-            read_tok();
-            sym_hasinit[s] = 1;
-            if (ds_streq(tok_buf, "str")) {
-                sym_init_kind[s] = 2;
-                sym_init_val[s] = read_num();
-                sym_init_obj[s] = obj;
-            } else if (ds_streq(tok_buf, "sym")) {
-                read_tok();
-                int t = new_sym(tok_buf);
-                if (t < 0)
-                    return 0;
-                sym_init_kind[s] = 3;
-                sym_init_sym[s] = t;
-                sym_init_val[s] = read_num();
-            } else
-                return fail("iptr の形が違います");
-        } else if (ds_streq(tok_buf, "call") ||
-                   ds_streq(tok_buf, "callopt")) {
-            int kind = ds_streq(tok_buf, "call") ? 1 : 2;
-            int off = (int)read_num();
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            if (!set_kind(s, 1))
-                return 0;
-            if (!add_rel(obj, off, kind, s, 0))
-                return 0;
-        } else if (ds_streq(tok_buf, "addr")) {
-            int off = (int)read_num();
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            long add = read_num();
-            if (!add_rel(obj, off, 3, s, add))
-                return 0;
-        } else if (ds_streq(tok_buf, "addrstr")) {
-            int off = (int)read_num();
-            long v = read_num();
-            if (!add_rel(obj, off, 4, -1, v))
-                return 0;
-        } else if (ds_streq(tok_buf, "addabs")) {
-            int off = (int)read_num();
-            long v = read_num();
-            if (!add_rel(obj, off, 5, -1, v))
-                return 0;
-        } else if (ds_streq(tok_buf, "undef")) {
-            read_tok();
-            int s = new_sym(tok_buf);
-            if (s < 0)
-                return 0;
-            if (!set_kind(s, 1))
-                return 0;
-        } else
-            return fail("知らないレコードがあります");
-    }
-    return 1;
+    /* 読めるのは ELF オブジェクトだけ (v42 で .iwo の
+     * 読み口は引退。決定の記録は doc/iwo-retirement.md) */
+    if (in_len >= 4 && eget8(0) == 0x7f && in_buf[1] == 'E' &&
+        in_buf[2] == 'L' && in_buf[3] == 'F')
+        return read_object_elf(obj);
+    return fail("ELF オブジェクトではありません");
 }
 
 /* ================= 配置 ================= */
@@ -1177,7 +887,7 @@ int main(int argc, char **argv) {
         base = 3;
     }
     if (argc - base < 1) {
-        ds_puts(2, "usage: nori [--out <name>] <obj.iwo> ... > prog.elf\n");
+        ds_puts(2, "usage: nori [--out <name>] <obj.eo> ... > prog.elf\n");
         return 1;
     }
     if (argc - base > MAX_OBJ) {

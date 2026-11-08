@@ -462,12 +462,9 @@ static void write_global_image(void) {
 
 
 /* ================================================================
- * オブジェクト出力 (v31、分割コンパイルの段2)
- * 設計は doc/object-format.md。1ファイル分の
- * コードとデータの材料を、名前と穴のメモ付きの
- * テキストとして標準出力へ書く。最終形 (配置と
- * 住所) は知らないので、穴は即値 0 のまま。
- * 埋めるのはリンカ (段3 の nori) の仕事
+ * テキスト書き出しの道具 (Asari 形式が使う)
+ * 旧 .iwo 出力 (v31〜v41) と共通だった道具で、
+ * .iwo 引退 (v42) の後も Asari 形式のために残る。
  * ================================================================ */
 
 /* 10進数を書く (負もあり) */
@@ -505,8 +502,8 @@ static void obj_hex(unsigned char *p, long n) {
         out_byte('\n');
 }
 
-/* 配列の初期値を ainit 記録で書く (v40、write_object
- * と write_asari の共通)。書かれた要素の範囲だけを、
+/* 配列の初期値を ainit 記録で書く (v40、Asari 形式)。
+ * 書かれた要素の範囲だけを、
  * 要素の大きさで切り詰めたバイト列にする (改行の
  * 置き方は obj_hex と同じ) */
 static void obj_arr_init(int a) {
@@ -534,231 +531,11 @@ static void obj_arr_init(int a) {
         out_byte('\n');
 }
 
-static void write_object(void) {
-    /* 入口の断片を持つか: main か、トップレベルの
-     * 文か、最後の式があるファイルが持つ。持たない
-     * ファイル (ライブラリだけ) の出口命令は
-     * オブジェクトには含めない */
-    int has_entry = (prog_main >= 0 || prog_stmts != -1 ||
-                     prog_has_final);
-    int start = has_entry ? 0 : obj_prefix_insts;
-
-    obj_str("iwacobj 1\n");
-    obj_str("target kosaba\n");
-    if (has_entry) {
-        obj_str("entry ");
-        obj_num((long)obj_prefix_insts * 4);
-        obj_str("\n");
-    }
-    /* コード (穴は encode_inst が印のまま符号化
-     * するので、呼び出しと住所作りは即値 0 の形に
-     * なる。呼び出しの印は下の call のメモで読む) */
-    obj_str("code ");
-    obj_num((long)(nasm - start) * 4);
-    obj_str("\n");
-    {
-        /* 1命令ずつ符号化して16進に */
-        unsigned char wb[4];
-        long col = 0;
-        char *hex = "0123456789abcdef";
-        for (int i = start; i < nasm; i++) {
-            /* 呼び出しの jal は、飛び先の代わりに印
-             * (負数) が入っている。符号化すると印の
-             * 値でオフセットの桁が埋まるが、リンカは
-             * その桁を捨てて自分で書き直す (nori は
-             * 下12ビットだけ残す)。そこで、穴の形は
-             * 「オフセット 0」で揃える (Asari の出力と
-             * バイト一致させるための正規化、v38) */
-            int saved_imm = asm_imm[i];
-            if (asm_op[i] == OP_JAL && saved_imm < 0)
-                asm_imm[i] = i;
-            unsigned int w = encode_inst(i);
-            asm_imm[i] = saved_imm;
-            wb[0] = (unsigned char)(w & 0xff);
-            wb[1] = (unsigned char)((w >> 8) & 0xff);
-            wb[2] = (unsigned char)((w >> 16) & 0xff);
-            wb[3] = (unsigned char)((w >> 24) & 0xff);
-            for (int j = 0; j < 4; j++) {
-                if (col > 0 && col % 32 == 0)
-                    out_byte('\n');
-                out_byte(hex[(wb[j] >> 4) & 15]);
-                out_byte(hex[wb[j] & 15]);
-                col++;
-            }
-        }
-        if (col > 0)
-            out_byte('\n');
-    }
-    /* 文字列の実体 */
-    obj_str("strings ");
-    obj_num(str_used);
-    obj_str("\n");
-    obj_hex((unsigned char *)str_pool, str_used);
-    /* グローバル配列の合計 (実体はゼロだけ) */
-    obj_str("arrays ");
-    obj_num(arr_used);
-    obj_str("\n");
-    /* 関数 (名簿の順)。定義は func (位置と大きさ)、
-     * 宣言だけのものは decl。この並び順が、リンク時
-     * の配置順 (登録順) の材料になる: 一括では本体は
-     * 登録順に並ぶので、宣言が先にあった関数の本体は
-     * 宣言のあった場所に置かれる */
-    for (int f = 0; f < nfunc; f++) {
-        if (func_has_body[f]) {
-            /* 大きさは次の定義までの距離 (最後は末尾まで) */
-            long size = (long)(nasm - func_entry[f]);
-            for (int g = f + 1; g < nfunc; g++) {
-                if (func_has_body[g]) {
-                    size = (long)(func_entry[g] - func_entry[f]);
-                    break;
-                }
-            }
-            obj_str("func ");
-            obj_str(func_names[f]);
-            obj_str(" ");
-            obj_num((long)(func_entry[f] - start) * 4);
-            obj_str(" ");
-            obj_num(size * 4);
-            obj_str("\n");
-        } else {
-            obj_str("decl ");
-            obj_str(func_names[f]);
-            obj_str("\n");
-        }
-    }
-    /* グローバルの定義 (枠の順)。初期値があれば
-     * 本定義 (var)、無ければ仮定義 (varc)。占める
-     * 枠の数も書く (v37、構造体は複数枠) */
-    for (int s = 0; s < var_nglobal; s++) {
-        for (int v = 0; v < nvar; v++) {
-            if (var_owner[v] >= 0 || var_slot[v] != s)
-                continue;
-            /* 枠の数 = 次のグローバルまでの距離 */
-            int ns = var_nglobal - s;
-            for (int w = 0; w < nvar; w++) {
-                if (var_owner[w] >= 0 || var_slot[w] <= s)
-                    continue;
-                if (var_slot[w] - s < ns)
-                    ns = var_slot[w] - s;
-            }
-            obj_str(var_init_kind[v] != 0 ? "var " : "varc ");
-            obj_str(var_names[v]);
-            obj_str(" ");
-            obj_num(ns);
-            obj_str("\n");
-            break;
-        }
-    }
-    /* グローバル配列の定義 (登録順) */
-    for (int a = 0; a < narr; a++) {
-        if (arr_owner[a] >= 0)
-            continue;
-        /* 大きさは次の配列までの距離 (最後は合計まで) */
-        long bytes = (long)arr_used - (long)arr_off[a];
-        for (int b = 0; b < narr; b++) {
-            if (arr_owner[b] >= 0 || b == a)
-                continue;
-            if (arr_off[b] > arr_off[a] &&
-                (long)arr_off[b] - (long)arr_off[a] < bytes)
-                bytes = (long)arr_off[b] - (long)arr_off[a];
-        }
-        obj_str("arr ");
-        obj_str(arr_names[a]);
-        obj_str(" ");
-        obj_num(arr_off[a]);
-        obj_str(" ");
-        obj_num(bytes);
-        obj_str("\n");
-    }
-    /* 配列の初期値 (v40、登録順) */
-    for (int a = 0; a < narr; a++) {
-        if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
-            continue;
-        obj_arr_init(a);
-    }
-    /* 初期値 (枠の順)。文字列は iptr として出す */
-    for (int s = 0; s < var_nglobal; s++) {
-        for (int v = 0; v < nvar; v++) {
-            if (var_owner[v] >= 0 || var_slot[v] != s)
-                continue;
-            if (var_init_kind[v] == 1) {
-                obj_str("init ");
-                obj_str(var_names[v]);
-                obj_str(" ");
-                obj_num(var_init_val[v]);
-                obj_str("\n");
-            } else if (var_init_kind[v] == 2) {
-                obj_str("iptr ");
-                obj_str(var_names[v]);
-                obj_str(" str ");
-                obj_num(str_off[var_init_val[v]]);
-                obj_str("\n");
-            }
-            break;
-        }
-    }
-    /* 穴: 呼び出し (命令の印を読む) */
-    for (int i = start; i < nasm; i++) {
-        if (asm_op[i] != OP_JAL || asm_imm[i] >= 0)
-            continue;
-        if (i == obj_flush_site || asm_imm[i] == -1000003) {
-            obj_str("callopt ");
-            obj_num((long)(i - start) * 4);
-            obj_str(" kosaba_flush\n");
-        } else {
-            obj_str("call ");
-            obj_num((long)(i - start) * 4);
-            obj_str(" ");
-            obj_str(func_names[-asm_imm[i] - 1]);
-            obj_str("\n");
-        }
-    }
-    /* 穴: 住所作り (gen の控えの順) */
-    for (int r = 0; r < obj_nreloc; r++) {
-        long off = (long)(obj_reloc_site[r] - start) * 4;
-        if (obj_reloc_kind[r] == RLOC_STR) {
-            obj_str("addrstr ");
-            obj_num(off);
-            obj_str(" ");
-            obj_num(str_off[obj_reloc_idx[r]]);
-            obj_str("\n");
-        } else if (obj_reloc_kind[r] == RLOC_VAR) {
-            obj_str("addr ");
-            obj_num(off);
-            obj_str(" ");
-            obj_str(var_names[obj_reloc_idx[r]]);
-            obj_str(" 0\n");
-        } else {
-            obj_str("addr ");
-            obj_num(off);
-            obj_str(" ");
-            obj_str(arr_names[obj_reloc_idx[r]]);
-            obj_str(" 0\n");
-        }
-    }
-    for (int r = 0; r < obj_nabs; r++) {
-        obj_str("addabs ");
-        obj_num((long)(obj_abs_site[r] - start) * 4);
-        obj_str(" ");
-        obj_num((long)(unsigned int)obj_abs_val[r]);
-        obj_str("\n");
-    }
-    /* 外に頼る名前 (宣言だけの関数のうち呼ばれたもの) */
-    for (int f = 0; f < nfunc; f++) {
-        if (func_called[f] && !func_has_body[f]) {
-            obj_str("undef ");
-            obj_str(func_names[f]);
-            obj_str("\n");
-        }
-    }
-    obj_str("end\n");
-}
-
 /* ================================================================
  * Asari 形式の出力 (v38、設計は doc/asari.md)
  * 符号化する前の命令列を、付属情報と一緒にテキストで
  * 出す。符号化は独立プログラム Asari の仕事になる。
- * 材料は write_object と同じで、違うのは「コードの
+ * 材料はオブジェクト共通で、違うのは「コードの
  * バイト列」の代わりに「命令列そのもの」を書くことと、
  * 穴の位置をバイト数でなく命令番号で書くこと
  * ================================================================ */
@@ -810,7 +587,7 @@ static char *op_name(int op) {
 }
 
 static void write_asari(void) {
-    /* 入口の断片を持つか (write_object と同じ判定) */
+    /* 入口の断片を持つか (ELF 書き手と同じ判定) */
     int has_entry = (prog_main >= 0 || prog_stmts != -1 ||
                      prog_has_final);
     int start = has_entry ? 0 : obj_prefix_insts;
@@ -844,7 +621,7 @@ static void write_asari(void) {
         obj_num(imm);
         obj_str("\n");
     }
-    /* 注記: 呼び出し (write_object の振り分けと同じ。
+    /* 注記: 呼び出し (ELF 書き手の振り分けと同じ。
      * 位置は命令番号) */
     for (int i = start; i < nasm; i++) {
         if (asm_op[i] != OP_JAL || asm_imm[i] >= 0)
@@ -890,7 +667,7 @@ static void write_asari(void) {
         obj_num((long)(unsigned int)obj_abs_val[r]);
         obj_str("\n");
     }
-    /* データ側の写し (write_object と同じ材料を、
+    /* データ側の写し (ELF 書き手と同じ材料を、
      * func の位置と大きさだけ命令の単位で書く) */
     obj_str("strings ");
     obj_num(str_used);
@@ -959,7 +736,7 @@ static void write_asari(void) {
         obj_num(bytes);
         obj_str("\n");
     }
-    /* 配列の初期値 (v40、write_object と同じ並び) */
+    /* 配列の初期値 (v40、書き手共通の並び) */
     for (int a = 0; a < narr; a++) {
         if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
             continue;
@@ -998,7 +775,7 @@ static void write_asari(void) {
 /* ================================================================
  * ELF オブジェクトの出力 (形式 version 2、v39。
  * 設計は doc/elf-object.md)
- * 材料は write_object と同じで、テキストの代わりに
+ * 材料はオブジェクト共通で、テキストの代わりに
  * ELF64 の ET_REL を書く。セクションは .text /
  * .data / .bss / .iwac.strings / .iwac.arrays、
  * 再配置は .rela.text / .rela.data。配置の規則は
@@ -1045,8 +822,7 @@ static int ename_len(char *s) {
     return n;
 }
 
-/* 変数 v の枠数 (write_object の var 書き出しと
- * 同じ「次の変数までの間隔」の数え方) */
+/* 変数 v の枠数 (「次の変数までの間隔」の数え方) */
 static int elf_var_slots(int v) {
     int ns = var_nglobal - var_slot[v];
     for (int w = 0; w < nvar; w++) {
@@ -1058,7 +834,7 @@ static int elf_var_slots(int v) {
     return ns;
 }
 
-/* 配列 a のバイト数 (write_object と同じ数え方) */
+/* 配列 a のバイト数 (「次の配列までの間隔」の数え方) */
 static long elf_arr_bytes(int a) {
     long bytes = (long)arr_used - (long)arr_off[a];
     for (int b = 0; b < narr; b++) {
@@ -1419,7 +1195,7 @@ static void write_elf_object(void) {
     eu16(11);         /* shnum */
     eu16(10);         /* shstrndx */
 
-    /* .text (穴の正規化は write_object と同じ) */
+    /* .text (呼び出しの穴はオフセット 0 に正規化) */
     for (int i = start; i < nasm; i++) {
         int saved_imm = asm_imm[i];
         if (asm_op[i] == OP_JAL && saved_imm < 0)
@@ -1591,10 +1367,6 @@ static void write_binary(void) {
     }
     if (asari_mode) {
         write_asari();
-        return;
-    }
-    if (obj_mode) {
-        write_object();
         return;
     }
     if (target_kosaba)

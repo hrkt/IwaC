@@ -413,7 +413,8 @@ KosabaOS の C 版が `-mcmodel=medany`（auipc 前提）を
   断片を別々にオブジェクト化するときは、共有する
   名前の宣言を集めた `src/decls.c` を各断片の
   翻訳単位の先頭に一緒に渡す（`iwac --kosaba
-  --object src/decls.c src/03-gen.c` の形）。
+  --elf src/decls.c src/03-gen.c` の形。旧
+  --object は v42 で引退した）。
   decls.c は連結（build.sh）には入らない。
   言語側もこれに合わせ、ファイル範囲の再宣言
   （変数・配列・関数のプロトタイプ）は C の

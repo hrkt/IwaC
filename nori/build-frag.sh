@@ -17,7 +17,9 @@
 #   登録順         4096 → 2048
 #   再配置表      16384 → 5120 (v38 で増量: iwac の
 #     再配置の実測合計が 4,339 になり 4096 を超えた)
-#   入力バッファ 約384KB → 160KB
+#   入力バッファ 約384KB → 180KB (v42 で増量:
+#     ELF 形式の最大オブジェクト 173,544 バイト
+#     (03-gen.eo) が入る大きさ)
 #   コード置き場  256KB → 184KB (入力側・出力側とも。
 #     iwac のコード合計の実測 184,092 に合わせた)
 #   文字列置き場  128KB → 16KB
@@ -67,12 +69,12 @@ apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 1024' 1
 apply nori.c '[16384]' '[5120]' 7
 apply nori.c 'MAX_REL = 16384' 'MAX_REL = 5120' 1
 # 入力バッファと読みのガード
-apply nori.c 'in_buf[393216]' 'in_buf[163840]' 1
-apply nori.c '393216 - in_len' '163840 - in_len' 1
-apply nori.c 'in_len >= 393216' 'in_len >= 163840' 1
+apply nori.c 'in_buf[393216]' 'in_buf[184320]' 1
+apply nori.c '393216 - in_len' '184320 - in_len' 1
+apply nori.c 'in_len >= 393216' 'in_len >= 184320' 1
 # コード置き場 (入力側・出力側) とその上限
 apply nori.c 'code_pool[262144]' 'code_pool[188416]' 1
-apply nori.c '&code_used, 262144' '&code_used, 188416' 1
+apply nori.c 'code_used >= 262144' 'code_used >= 188416' 1
 apply nori.c 'out_code[262144]' 'out_code[188416]' 1
 apply nori.c '> 262144' '> 188416' 1
 # 配列の初期値の置き場 (v40)
@@ -80,7 +82,7 @@ apply nori.c 'ainit_buf[262144]' 'ainit_buf[4096]' 1
 apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 4096' 1
 # 文字列置き場と名前プール
 apply nori.c 'str_pool[131072]' 'str_pool[16384]' 1
-apply nori.c '&str_used, 131072' '&str_used, 16384' 1
+apply nori.c 'str_used >= 131072' 'str_used >= 16384' 1
 apply nori.c 'name_pool[65536]' 'name_pool[16384]' 1
 apply nori.c 'name_used >= 65536' 'name_used >= 16384' 1
 
@@ -90,11 +92,11 @@ cat ../src/0*.c > "$WORK/iwac_all.c"
 mkdir -p "$WORK/objs"
 OBJS=""
 for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
-    "$WORK/iwac-std" --kosaba --object ../src/decls.c ../src/$f.c > "$WORK/objs/$f.iwo"
-    OBJS="$OBJS objs/$f.iwo"
+    "$WORK/iwac-std" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f.eo"
+    OBJS="$OBJS objs/$f.eo"
 done
-"$WORK/iwac-std" --kosaba --object ../kosaba/kosaba_rt.c > "$WORK/objs/rt.iwo"
-OBJS="$OBJS objs/rt.iwo"
+"$WORK/iwac-std" --kosaba --elf ../kosaba/kosaba_rt.c > "$WORK/objs/rt.eo"
+OBJS="$OBJS objs/rt.eo"
 
 # 標準 nori と断片 nori (どちらもホスト版) でリンクして比べる
 "$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/nori-std" nori.c ../libdashi/libdashi.c

@@ -756,247 +756,41 @@ f3=$(od -An -tu8 -j 208 -N 8 "$TMP/v28bss.elf" | tr -d ' ')
 echo "ok: v28: ELF の BSS 化 (ファイル $size バイト、配列 200000 バイトはゼロ埋め分)"
 
 # --- v31: オブジェクト出力 (分割コンパイルの段2) ---
-# --object の形と決まりを確かめる。あわせて、参照
-# リンカ (mini-nori、Python。nori 本体の物差し) で
-# つないだ結果が一括コンパイルとバイト一致すること
-# を確かめる (設計は doc/object-format.md)
+# --elf の形と決まりを readelf で確かめる (設計は
+# doc/elf-object.md)。リンクの確認は v32 (nori 本体)
+# が担う。旧 .iwo の形の確認と参照リンカ mini_nori
+# は v42 で引退した (doc/iwo-retirement.md)
 printf 'int getg();\nint main() { return getg(); }\n' > "$TMP/v31b.c"
 printf 'int g = 65;\nchar *msg = "Hi";\nint getg() { return g; }\n' > "$TMP/v31a.c"
-"$IWAC" --kosaba --object "$TMP/v31b.c" > "$TMP/v31b.iwo" || fail "v31: オブジェクト出力 (b) に失敗"
-"$IWAC" --kosaba --object "$TMP/v31a.c" > "$TMP/v31a.iwo" || fail "v31: オブジェクト出力 (a) に失敗"
-head -1 "$TMP/v31b.iwo" | grep -qx 'iwacobj 1' || fail "v31: 題字が iwacobj 1 でない"
-grep -q '^entry ' "$TMP/v31b.iwo" || fail "v31: main のあるファイルに entry が無い"
-grep -q '^decl getg$' "$TMP/v31b.iwo" || fail "v31: 宣言だけの関数が decl にならない"
-grep -q '^init g 65$' "$TMP/v31a.iwo" || fail "v31: 初期値が init にならない"
-grep -q '^iptr msg str 0$' "$TMP/v31a.iwo" || fail "v31: 文字列の初期値が iptr にならない"
-grep -Eq '^addr [0-9]+ g 0$' "$TMP/v31a.iwo" || fail "v31: 住所作りの穴 (addr) が無い"
-"$IWAC" --object "$TMP/v31a.c" >/dev/null 2>&1 && fail "v31: --kosaba 無しの --object が通ってしまった"
-"$IWAC" --kosaba --object "$TMP/v31a.c" "$TMP/v31b.c" > "$TMP/v31ab.iwo" || fail "v33: 複数ファイルの --object に失敗"
-[ "$(grep -c '^iwacobj 1$' "$TMP/v31ab.iwo")" = 1 ] || fail "v33: 複数ファイルでもオブジェクトは1つのはず"
+"$IWAC" --kosaba --elf "$TMP/v31b.c" > "$TMP/v31b.eo" || fail "v31: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba --elf "$TMP/v31a.c" > "$TMP/v31a.eo" || fail "v31: オブジェクト出力 (a) に失敗"
+readelf -h "$TMP/v31b.eo" | grep -q 'REL (Relocatable file)' || fail "v31: 再配置可能オブジェクトでない"
+readelf -sW "$TMP/v31b.eo" | grep -q 'iwac_entry' || fail "v31: main のあるファイルに iwac_entry が無い"
+readelf -sW "$TMP/v31b.eo" | grep -q 'UND getg' || fail "v31: 宣言だけの関数が未定義シンボルにならない"
+readelf -sW "$TMP/v31a.eo" | grep -Eq 'OBJECT +GLOBAL +DEFAULT +[0-9]+ +g$' || fail "v31: 初期値つき変数が実体のあるシンボルにならない"
+readelf -rW "$TMP/v31a.eo" | grep -q 'R_RISCV_64' || fail "v31: 文字列へのポインタ初期値の再配置が無い"
+readelf -rW "$TMP/v31a.eo" | grep -q 'R_RISCV_PCREL_HI20' || fail "v31: 住所作りの再配置が無い"
+"$IWAC" --elf "$TMP/v31a.c" >/dev/null 2>&1 && fail "v31: --kosaba 無しの --elf が通ってしまった"
+"$IWAC" --kosaba --elf "$TMP/v31a.c" "$TMP/v31b.c" > "$TMP/v31ab.eo" || fail "v33: 複数ファイルの --elf に失敗"
+readelf -h "$TMP/v31ab.eo" | grep -q 'REL (Relocatable file)' || fail "v33: 複数ファイルでもオブジェクトは1つのはず"
 echo "ok: v31: オブジェクトの形と決まり"
-if command -v python3 >/dev/null 2>&1; then
-    cat > "$TMP/mini_nori.py" <<'MININORI'
-#!/usr/bin/env python3
-"""mini-nori: doc/object-format.md の参照リンカ (検証用)。
-使い方: mini_nori.py out.elf in1.iwo in2.iwo ...
-配置規則と ELF の形は iwac の encode (v31) と同じに作り、
-一括コンパイルの出力とバイト比較できるようにする。"""
-import sys, struct
-
-CODE_BASE = 0x40000000
-DATA_BASE = 0x40200000
-
-def parse_obj(text):
-    lines = text.splitlines()
-    o = {'entry': None, 'code': b'', 'strings': b'', 'arrays': 0,
-         'funcs': {}, 'funorder': [], 'vars': [], 'arrs': [],
-         'inits': {}, 'relocs': [], 'undef': []}
-    assert lines[0] == 'iwacobj 1', '題字が違います'
-    i = 1
-    def read_hex(nbytes, i):
-        buf = ''
-        while len(buf) < nbytes * 2:
-            buf += lines[i].strip(); i += 1
-        return bytes.fromhex(buf[:nbytes*2]), i
-    while i < len(lines):
-        ln = lines[i]; i += 1
-        if ln == 'end': break
-        p = ln.split()
-        k = p[0]
-        if k == 'target': assert p[1] == 'kosaba'
-        elif k == 'entry': o['entry'] = int(p[1])
-        elif k == 'code': o['code'], i = read_hex(int(p[1]), i)
-        elif k == 'strings': o['strings'], i = read_hex(int(p[1]), i)
-        elif k == 'arrays': o['arrays'] = int(p[1])
-        elif k == 'func':
-            o['funcs'][p[1]] = (int(p[2]), int(p[3])); o['funorder'].append(p[1])
-        elif k == 'decl': o['funorder'].append(p[1])
-        elif k in ('var', 'varc'): o['vars'].append((p[1], k == 'var', int(p[2])))
-        elif k == 'arr': o['arrs'].append((p[1], int(p[2]), int(p[3])))
-        elif k == 'init': o['inits'][p[1]] = ('init', int(p[2]))
-        elif k == 'iptr':
-            if p[2] == 'str': o['inits'][p[1]] = ('str', int(p[3]))
-            else: o['inits'][p[1]] = ('sym', p[3], int(p[4]))
-        elif k == 'call': o['relocs'].append(('call', int(p[1]), p[2]))
-        elif k == 'callopt': o['relocs'].append(('callopt', int(p[1]), p[2]))
-        elif k == 'addr': o['relocs'].append(('addr', int(p[1]), p[2], int(p[3])))
-        elif k == 'addrstr': o['relocs'].append(('addrstr', int(p[1]), int(p[2])))
-        elif k == 'addabs': o['relocs'].append(('addabs', int(p[1]), int(p[2])))
-        elif k == 'undef': o['undef'].append(p[1])
-        else: raise ValueError('知らないレコード: ' + ln)
-    return o
-
-def main():
-    out_path, in_paths = sys.argv[1], sys.argv[2:]
-    objs = [parse_obj(open(p).read()) for p in in_paths]
-
-    # コード配置: 入口の断片 → 関数本体を登録順に
-    entries = [o for o in objs if o['entry'] is not None]
-    assert len(entries) == 1, '入口はちょうど1つ必要です'
-    ent = entries[0]
-    code = bytearray(ent['code'][:ent['entry']])
-    body_src = {}
-    for o in objs:
-        for name, (off, size) in o['funcs'].items():
-            assert name not in body_src, '関数の二重定義: ' + name
-            body_src[name] = (o, off, size)
-    body_final = {}   # (id(obj), off) -> 最終オフセット
-    func_addr = {}
-    for o in objs:
-        for name in o['funorder']:
-            if name in func_addr or name not in body_src: continue
-            bo, boff, bsize = body_src[name]
-            func_addr[name] = CODE_BASE + len(code)
-            body_final[(id(bo), boff)] = len(code)
-            code += bo['code'][boff:boff+bsize]
-    def site_final(o, x):
-        if o is ent and x < ent['entry']: return x
-        for name, (off, size) in o['funcs'].items():
-            if off <= x < off + size:
-                return body_final[(id(o), off)] + (x - off)
-        raise ValueError('どの本体にも属さない穴: %d' % x)
-
-    # データ配置: 文字列 → 配列 → グローバル (初出の順)
-    str_base = {}
-    spos = 0
-    for o in objs:
-        str_base[id(o)] = DATA_BASE + spos; spos += len(o['strings'])
-    arr_addr = {}
-    apos = spos
-    for o in objs:
-        for name, off, size in o['arrs']:
-            if name in arr_addr:
-                assert arr_addr[name][1] == size, '配列の大きさが食い違います: ' + name
-            else:
-                arr_addr[name] = (DATA_BASE + apos, size); apos += size
-    arr_total = apos - spos
-    var_addr = {}
-    var_nslots = {}
-    order = []
-    inits = {}
-    init_owner = {}
-    slotpos = 0
-    for o in objs:
-        for name, firm, nslots in o['vars']:
-            if name not in var_addr:
-                var_addr[name] = DATA_BASE + spos + arr_total + slotpos * 8
-                var_nslots[name] = nslots
-                slotpos += nslots
-                order.append(name)
-            if name in o['inits']:
-                inits[name] = o['inits'][name]; init_owner[name] = o
-
-    def sym(name):
-        if name in func_addr: return func_addr[name]
-        if name in var_addr: return var_addr[name]
-        if name in arr_addr: return arr_addr[name][0]
-        raise KeyError('未定義の名前: ' + name)
-
-    # 穴埋め
-    for o in objs:
-        for r in o['relocs']:
-            kind, off = r[0], r[1]
-            place = site_final(o, off)
-            pc = CODE_BASE + place
-            if kind in ('call', 'callopt'):
-                name = r[2]
-                if name not in func_addr:
-                    assert kind == 'callopt', '未定義の関数: ' + name
-                    struct.pack_into('<I', code, place, 0x00000013)  # nop
-                    continue
-                o2 = func_addr[name] - pc
-                w = int.from_bytes(code[place:place+4], 'little') & 0x00000FFF
-                w |= ((o2 >> 20) & 1) << 31
-                w |= ((o2 >> 1) & 0x3FF) << 21
-                w |= ((o2 >> 11) & 1) << 20
-                w |= ((o2 >> 12) & 0xFF) << 12
-                struct.pack_into('<I', code, place, w & 0xFFFFFFFF)
-            else:
-                if kind == 'addr': target = sym(r[2]) + r[3]
-                elif kind == 'addrstr': target = str_base[id(o)] + r[2]
-                else: target = r[2]
-                diff = target - pc
-                hi = (diff + 0x800) >> 12
-                lo = diff - (hi << 12)
-                w0 = int.from_bytes(code[place:place+4], 'little')
-                w0 = (w0 & 0x000FFFFF) | ((hi & 0xFFFFF) << 12)
-                struct.pack_into('<I', code, place, w0 & 0xFFFFFFFF)
-                w1 = int.from_bytes(code[place+4:place+8], 'little')
-                w1 = (w1 & 0x000FFFFF) | ((lo & 0xFFF) << 20)
-                struct.pack_into('<I', code, place+4, w1 & 0xFFFFFFFF)
-
-    # グローバルの初期イメージ
-    gbl = bytearray()
-    for name in order:
-        v = 0
-        if name in inits:
-            it = inits[name]
-            if it[0] == 'init': v = it[1]
-            elif it[0] == 'str': v = str_base[id(init_owner[name])] + it[1]
-            else: v = sym(it[1]) + it[2]
-        gbl += struct.pack('<q', v)
-        for _ in range(var_nslots[name] - 1):
-            gbl += struct.pack('<q', 0)
-    has_inits = 1 if inits else 0
-    str_all = b''.join(o['strings'] for o in objs)
-
-    # ELF (iwac の encode と同じ形)
-    code_bytes = bytes(code)
-    data_off = (4096 + len(code_bytes) + 4095) & ~4095
-    out = bytearray()
-    def u8(x): out.append(x & 0xFF)
-    def u16(x): out.extend(struct.pack('<H', x))
-    def u32(x): out.extend(struct.pack('<I', x))
-    def u64(x): out.extend(struct.pack('<Q', x))
-    out.extend(b'\x7fELF'); u8(2); u8(1); u8(1); u8(0)
-    for _ in range(8): u8(0)
-    u16(2); u16(243); u32(1); u64(CODE_BASE); u64(64); u64(0); u32(0)
-    u16(64); u16(56); u16(3); u16(0); u16(0); u16(0)
-    def phdr(flags, off, va, fsz, msz, align):
-        u32(1); u32(flags); u64(off); u64(va); u64(va); u64(fsz); u64(msz); u64(align)
-    phdr(5, 4096, CODE_BASE, len(code_bytes), len(code_bytes), 0x1000)
-    phdr(6, data_off, DATA_BASE, len(str_all), spos + arr_total, 0x1000)
-    phdr(6, data_off + spos, DATA_BASE + spos + arr_total,
-         len(gbl) if has_inits else 0, len(gbl), 1)
-    out.extend(bytes(4096 - len(out)))
-    out.extend(code_bytes)
-    out.extend(bytes(data_off - len(out)))
-    out.extend(str_all)
-    if has_inits: out.extend(gbl)
-    open(out_path, 'wb').write(bytes(out))
-    print(f'linked: code {len(code_bytes)} bytes, globals {len(order)}')
-
-if __name__ == '__main__':
-    main()
-MININORI
-    "$IWAC" --kosaba "$TMP/v31b.c" "$TMP/v31a.c" > "$TMP/v31one.elf" || fail "v31: 一括コンパイルに失敗"
-    python3 "$TMP/mini_nori.py" "$TMP/v31split.elf" "$TMP/v31b.iwo" "$TMP/v31a.iwo" >/dev/null || fail "v31: 参照リンカでのリンクに失敗"
-    cmp -s "$TMP/v31one.elf" "$TMP/v31split.elf" || fail "v31: 分割と一括で出力が違う"
-    "$IWAC" --kosaba --object examples/hello-kosaba.c > "$TMP/v31h.iwo" || fail "v31: hello のオブジェクト出力に失敗"
-    "$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v31h.elf" || fail "v31: hello の一括に失敗"
-    python3 "$TMP/mini_nori.py" "$TMP/v31h2.elf" "$TMP/v31h.iwo" >/dev/null || fail "v31: hello のリンクに失敗"
-    cmp -s "$TMP/v31h.elf" "$TMP/v31h2.elf" || fail "v31: hello で分割と一括が違う"
-    echo "ok: v31: オブジェクト経由でも一括と同じ出力 (参照リンカで確認)"
-else
-    echo "skip: v31: 参照リンカの確認 (python3 が無いため)"
-fi
 
 # --- v32: リンカ nori 本体 (iwac の言語で書いたもの) ---
 # gcc で nori を組み立て、オブジェクトをリンクして一括
 # コンパイルとバイト一致することと、未定義で止まることを確かめる
 if cc -std=c11 -O2 -o "$TMP/nori" nori/nori.c libdashi/libdashi.c 2>/dev/null; then
-    "$IWAC" --kosaba --object "$TMP/v31b.c" > "$TMP/v32b.iwo" || fail "v32: オブジェクト出力 (b) に失敗"
-    "$IWAC" --kosaba --object "$TMP/v31a.c" > "$TMP/v32a.iwo" || fail "v32: オブジェクト出力 (a) に失敗"
+    "$IWAC" --kosaba --elf "$TMP/v31b.c" > "$TMP/v32b.eo" || fail "v32: オブジェクト出力 (b) に失敗"
+    "$IWAC" --kosaba --elf "$TMP/v31a.c" > "$TMP/v32a.eo" || fail "v32: オブジェクト出力 (a) に失敗"
     "$IWAC" --kosaba "$TMP/v31b.c" "$TMP/v31a.c" > "$TMP/v32one.elf" || fail "v32: 一括コンパイルに失敗"
-    "$TMP/nori" "$TMP/v32b.iwo" "$TMP/v32a.iwo" > "$TMP/v32split.elf" || fail "v32: nori でのリンクに失敗"
+    "$TMP/nori" "$TMP/v32b.eo" "$TMP/v32a.eo" > "$TMP/v32split.elf" || fail "v32: nori でのリンクに失敗"
     cmp -s "$TMP/v32one.elf" "$TMP/v32split.elf" || fail "v32: nori と一括で出力が違う"
-    "$IWAC" --kosaba --object examples/hello-kosaba.c > "$TMP/v32h.iwo" || fail "v32: hello のオブジェクト化に失敗"
+    "$IWAC" --kosaba --elf examples/hello-kosaba.c > "$TMP/v32h.eo" || fail "v32: hello のオブジェクト化に失敗"
     "$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v32h.elf" || fail "v32: hello の一括に失敗"
-    "$TMP/nori" "$TMP/v32h.iwo" > "$TMP/v32h2.elf" || fail "v32: hello のリンクに失敗"
+    "$TMP/nori" "$TMP/v32h.eo" > "$TMP/v32h2.elf" || fail "v32: hello のリンクに失敗"
     cmp -s "$TMP/v32h.elf" "$TMP/v32h2.elf" || fail "v32: hello で nori と一括が違う"
     printf 'int nosuch();\nint main() { return nosuch(); }\n' > "$TMP/v32u.c"
-    "$IWAC" --kosaba --object "$TMP/v32u.c" > "$TMP/v32u.iwo" || fail "v32: 未定義テスト用オブジェクトに失敗"
-    "$TMP/nori" "$TMP/v32u.iwo" >/dev/null 2>&1 && fail "v32: 未定義の関数でリンクが通ってしまった"
+    "$IWAC" --kosaba --elf "$TMP/v32u.c" > "$TMP/v32u.eo" || fail "v32: 未定義テスト用オブジェクトに失敗"
+    "$TMP/nori" "$TMP/v32u.eo" >/dev/null 2>&1 && fail "v32: 未定義の関数でリンクが通ってしまった"
     echo "ok: v32: nori でリンクして一括と同じ出力、未定義はエラー"
 else
     echo "skip: v32: nori の確認 (cc が無いため)"
@@ -1012,10 +806,10 @@ echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
 # つないだ iwac2 が、一括の iwac2 (v27 の節) とバイト一致
 if [ -x "$TMP/nori" ]; then
     for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
-        "$IWAC" --kosaba --object "src/decls.c" "src/$f.c" > "$TMP/v33-$f.iwo" || fail "v33: 断片 $f のオブジェクト化に失敗"
+        "$IWAC" --kosaba --elf "src/decls.c" "src/$f.c" > "$TMP/v33-$f.eo" || fail "v33: 断片 $f のオブジェクト化に失敗"
     done
-    "$IWAC" --kosaba --object kosaba/kosaba_rt.c > "$TMP/v33-rt.iwo" || fail "v33: rt のオブジェクト化に失敗"
-    "$TMP/nori" "$TMP/v33-01-head.iwo" "$TMP/v33-02-parse.iwo" "$TMP/v33-02b-decl.iwo" "$TMP/v33-03-gen.iwo" "$TMP/v33-04-encode.iwo" "$TMP/v33-05-input.iwo" "$TMP/v33-06-preproc.iwo" "$TMP/v33-07-main.iwo" "$TMP/v33-rt.iwo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
+    "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v33-rt.eo" || fail "v33: rt のオブジェクト化に失敗"
+    "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
     cmp -s "$TMP/v27self.elf" "$TMP/v33split.elf" || fail "v33: 分割と一括で iwac2 が違う"
     echo "ok: v33: 分割セルフホスト (断片→nori) が一括とバイト一致"
 else
@@ -1035,9 +829,9 @@ if [ -x "$TMP/nori" ]; then
     cmp -s "$TMP/v27self.elf" "$TMP/v34/iwac2.elf" || fail "段5: Misoni の iwac2 が一括と違う"
     echo "ok: 段5: Misoni (マニフェスト駆動) でも iwac2 がバイト一致"
     # v34: --out は出力そのものを変えない (名前は OS 上でのみ効く)
-    "$IWAC" --kosaba --object examples/hello-kosaba.c > "$TMP/v34/plain.iwo" || fail "v34: オブジェクト化に失敗"
-    "$IWAC" --kosaba --object --out zzz.iwo examples/hello-kosaba.c > "$TMP/v34/named.iwo" || fail "v34: --out つきオブジェクト化に失敗"
-    cmp -s "$TMP/v34/plain.iwo" "$TMP/v34/named.iwo" || fail "v34: --out で出力が変わった"
+    "$IWAC" --kosaba --elf examples/hello-kosaba.c > "$TMP/v34/plain.eo" || fail "v34: オブジェクト化に失敗"
+    "$IWAC" --kosaba --elf --out zzz.eo examples/hello-kosaba.c > "$TMP/v34/named.eo" || fail "v34: --out つきオブジェクト化に失敗"
+    cmp -s "$TMP/v34/plain.eo" "$TMP/v34/named.eo" || fail "v34: --out で出力が変わった"
     echo "ok: v34: --out は出力内容を変えない"
     # v34: Misoni 本体 (OS 上のプログラム) が iwac で訳せる
     "$IWAC" --kosaba misoni/misoni.c libdashi/libdashi.c kosaba/kosaba_rt.c > "$TMP/v34/misoni.elf" || fail "v34: misoni.c が訳せない"
@@ -1067,11 +861,11 @@ check_tail "$TMP/v35g.bin" 11 "v35: 関数の戻り値と引数の型、++ の�
 # ある環境では実リンクでも確かめる)
 printf 'uint32 g;\nuint32 getg() { return g; }\nvoid setg(uint32 v) { g = v; }\n' > "$TMP/v35sa.c"
 printf 'uint32 g;\nuint32 getg();\nvoid setg(uint32 v);\nint main() { setg(0xFFFFFFFF); return getg() == 0xFFFFFFFF ? 65 : 66; }\n' > "$TMP/v35sb.c"
-"$IWAC" --kosaba --object "$TMP/v35sa.c" > "$TMP/v35sa.iwo" || fail "v35: オブジェクト出力 (a) に失敗"
-"$IWAC" --kosaba --object "$TMP/v35sb.c" > "$TMP/v35sb.iwo" || fail "v35: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba --elf "$TMP/v35sa.c" > "$TMP/v35sa.eo" || fail "v35: オブジェクト出力 (a) に失敗"
+"$IWAC" --kosaba --elf "$TMP/v35sb.c" > "$TMP/v35sb.eo" || fail "v35: オブジェクト出力 (b) に失敗"
 "$IWAC" --kosaba "$TMP/v35sa.c" "$TMP/v35sb.c" > "$TMP/v35one.elf" || fail "v35: 一括コンパイルに失敗"
-python3 "$TMP/mini_nori.py" "$TMP/v35mini.elf" "$TMP/v35sa.iwo" "$TMP/v35sb.iwo" >/dev/null || fail "v35: 参照リンカでのリンクに失敗"
-cmp -s "$TMP/v35one.elf" "$TMP/v35mini.elf" || fail "v35: 分割 (参照リンカ) と一括で出力が違う"
+"$TMP/nori" "$TMP/v35sa.eo" "$TMP/v35sb.eo" > "$TMP/v35mini.elf" || fail "v35: nori でのリンクに失敗"
+cmp -s "$TMP/v35one.elf" "$TMP/v35mini.elf" || fail "v35: 分割 (nori) と一括で出力が違う"
 echo "ok: v35: 幅つきの型の分割コンパイルが一括と一致"
 
 # --- v36: typedef ---
@@ -1092,11 +886,11 @@ check_error 'int x; typedef int x; int main() { return 0; }' "v36: 変数と同�
 # 自分の typedef を持つ。宣言の形は v35 の分割チェックと同じ)
 printf 'typedef uint32 u32;\nu32 g;\nu32 getg() { return g; }\nvoid setg(u32 v) { g = v; }\n' > "$TMP/v36sa.c"
 printf 'typedef uint32 u32;\nu32 g;\nu32 getg();\nvoid setg(u32 v);\nint main() { setg(0xFFFFFFFF); return getg() == 0xFFFFFFFF ? 65 : 66; }\n' > "$TMP/v36sb.c"
-"$IWAC" --kosaba --object "$TMP/v36sa.c" > "$TMP/v36sa.iwo" || fail "v36: オブジェクト出力 (a) に失敗"
-"$IWAC" --kosaba --object "$TMP/v36sb.c" > "$TMP/v36sb.iwo" || fail "v36: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba --elf "$TMP/v36sa.c" > "$TMP/v36sa.eo" || fail "v36: オブジェクト出力 (a) に失敗"
+"$IWAC" --kosaba --elf "$TMP/v36sb.c" > "$TMP/v36sb.eo" || fail "v36: オブジェクト出力 (b) に失敗"
 "$IWAC" --kosaba "$TMP/v36sa.c" "$TMP/v36sb.c" > "$TMP/v36one.elf" || fail "v36: 一括コンパイルに失敗"
-python3 "$TMP/mini_nori.py" "$TMP/v36mini.elf" "$TMP/v36sa.iwo" "$TMP/v36sb.iwo" >/dev/null || fail "v36: 参照リンカでのリンクに失敗"
-cmp -s "$TMP/v36one.elf" "$TMP/v36mini.elf" || fail "v36: 分割 (参照リンカ) と一括で出力が違う"
+"$TMP/nori" "$TMP/v36sa.eo" "$TMP/v36sb.eo" > "$TMP/v36mini.elf" || fail "v36: nori でのリンクに失敗"
+cmp -s "$TMP/v36one.elf" "$TMP/v36mini.elf" || fail "v36: 分割 (nori) と一括で出力が違う"
 echo "ok: v36: typedef の分割コンパイルが一括と一致"
 
 # --- v37: 構造体 ---
@@ -1123,24 +917,25 @@ check_error 'int main() { struct P { int32 x; }; return 0; }' "v37: 関数の中
 # 同じ定義を持ち、複数枠のグローバルが合併される)
 printf 'struct Point { int32 x; int32 y; };\nstruct Flags { char kind; uint32 mask; char name[8]; };\nstruct Point gp;\nstruct Flags gf;\nint after;\nint fill() { gp.x = 3; gp.y = 4; gf.kind = 75; gf.mask = 0x99; gf.name[1] = 110; after = 5; return gp.x + gp.y; }\n' > "$TMP/v37sa.c"
 printf 'struct Point { int32 x; int32 y; };\nstruct Flags { char kind; uint32 mask; char name[8]; };\nstruct Point gp;\nstruct Flags gf;\nint after;\nint fill();\nint main() { int r = fill(); putc(48 + r); putc(gf.kind); putc(48 + (gf.mask == 0x99)); putc(gf.name[1]); putc(48 + after); putc(10); return 0; }\n' > "$TMP/v37sb.c"
-"$IWAC" --kosaba --object "$TMP/v37sa.c" > "$TMP/v37sa.iwo" || fail "v37: オブジェクト出力 (a) に失敗"
-"$IWAC" --kosaba --object "$TMP/v37sb.c" > "$TMP/v37sb.iwo" || fail "v37: オブジェクト出力 (b) に失敗"
+"$IWAC" --kosaba --elf "$TMP/v37sa.c" > "$TMP/v37sa.eo" || fail "v37: オブジェクト出力 (a) に失敗"
+"$IWAC" --kosaba --elf "$TMP/v37sb.c" > "$TMP/v37sb.eo" || fail "v37: オブジェクト出力 (b) に失敗"
 "$IWAC" --kosaba "$TMP/v37sa.c" "$TMP/v37sb.c" > "$TMP/v37one.elf" || fail "v37: 一括コンパイルに失敗"
-python3 "$TMP/mini_nori.py" "$TMP/v37mini.elf" "$TMP/v37sa.iwo" "$TMP/v37sb.iwo" >/dev/null || fail "v37: 参照リンカでのリンクに失敗"
-cmp -s "$TMP/v37one.elf" "$TMP/v37mini.elf" || fail "v37: 分割 (参照リンカ) と一括で出力が違う"
+"$TMP/nori" "$TMP/v37sa.eo" "$TMP/v37sb.eo" > "$TMP/v37mini.elf" || fail "v37: nori でのリンクに失敗"
+cmp -s "$TMP/v37one.elf" "$TMP/v37mini.elf" || fail "v37: 分割 (nori) と一括で出力が違う"
 echo "ok: v37: 構造体の分割コンパイルが一括と一致"
 
 # --- v38: Asari (encode の別出し) ---
-# 物差しは .iwo のバイト一致: iwac --object の出力と、
-# iwac --asari → Asari の出力が全く同じこと (doc/asari.md)
+# 物差しは ELF オブジェクトのバイト一致: iwac --elf の
+# 出力と、iwac --asari → Asari の出力が全く同じこと
+# (doc/asari.md。v42 で Asari の出力も ELF になった)
 gcc -std=c11 -O2 -o "$TMP/asari" asari/asari.c libdashi/libdashi.c || fail "v38: Asari のホストビルドに失敗"
 asari_check() {
     # $1 = ラベル、残り = ソースファイル
     label=$1; shift
-    "$IWAC" --kosaba --object "$@" > "$TMP/v38.iwo" || fail "v38: オブジェクト出力に失敗 ($label)"
+    "$IWAC" --kosaba --elf "$@" > "$TMP/v38.eo" || fail "v38: ELF オブジェクト出力に失敗 ($label)"
     "$IWAC" --kosaba --asari "$@" > "$TMP/v38.ias" || fail "v38: Asari 形式の出力に失敗 ($label)"
-    "$TMP/asari" "$TMP/v38.ias" > "$TMP/v38a.iwo" || fail "v38: Asari が失敗 ($label)"
-    cmp -s "$TMP/v38.iwo" "$TMP/v38a.iwo" || fail "v38: Asari の出力が内部 encode と違う ($label)"
+    "$TMP/asari" "$TMP/v38.ias" > "$TMP/v38a.eo" || fail "v38: Asari が失敗 ($label)"
+    cmp -s "$TMP/v38.eo" "$TMP/v38a.eo" || fail "v38: Asari の出力が内部 encode と違う ($label)"
 }
 asari_check hello examples/hello-kosaba.c
 for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
@@ -1154,43 +949,44 @@ asari_check 構造体 "$TMP/v37sa.c"
 echo "ok: v38: Asari が nori・Asari 自身・rt・構造体でも一致"
 # チェーン: iwac → Asari → nori が直接の ELF と一致
 "$IWAC" --kosaba --asari examples/hello-kosaba.c > "$TMP/v38h.ias" || fail "v38: チェーン用の出力に失敗"
-"$TMP/asari" "$TMP/v38h.ias" > "$TMP/v38h.iwo" || fail "v38: チェーンで Asari が失敗"
-"$TMP/nori" "$TMP/v38h.iwo" > "$TMP/v38h.elf" || fail "v38: チェーンで nori が失敗"
+"$TMP/asari" "$TMP/v38h.ias" > "$TMP/v38h.eo" || fail "v38: チェーンで Asari が失敗"
+"$TMP/nori" "$TMP/v38h.eo" > "$TMP/v38h.elf" || fail "v38: チェーンで nori が失敗"
 "$IWAC" --kosaba examples/hello-kosaba.c > "$TMP/v38hd.elf" || fail "v38: 直接の ELF 出力に失敗"
 cmp -s "$TMP/v38h.elf" "$TMP/v38hd.elf" || fail "v38: チェーンの ELF が直接と違う"
 echo "ok: v38: iwac → Asari → nori のチェーンが直接出力と一致"
 
-# --- v39: オブジェクトの ELF 化 (形式 version 2) ---
-# 物差しは「ELF 経由のリンク結果が .iwo 経由とバイト
-# 一致」すること (doc/elf-object.md)。nori は先頭の
-# マジックで両形式を見分ける
+# --- v39: オブジェクトの ELF 化 ---
+# 物差しは「ELF 経由のリンク結果が一括とバイト一致」
+# すること (doc/elf-object.md)。v39 当時は .iwo 経由
+# との比較だったが、v42 の .iwo 引退で一括との比較に
+# 替えた (rt と組のリンクは v33 と同じ形)
 elf_check() {
-    # $1 = ラベル、残り = ソース。rt と組でリンクする
+    # $1 = ラベル、残り = ソース。rt と組でリンクして
+    # 一括と比べる。先頭に kosaba_flush の宣言だけの
+    # ファイルを足す: 入口の接頭辞の形 (flush を呼ぶか)
+    # を宣言の有無で揃え、一括とリンクで同じ形にする
+    # (宣言の無い TU は接頭辞が短く、rt と組にすると
+    # 一括と形が違う。decls.c の約束と同じ)
     label=$1; shift
-    "$IWAC" --kosaba --object "$@" > "$TMP/v39.iwo" || fail "v39: オブジェクト出力に失敗 ($label)"
-    "$IWAC" --kosaba --elf "$@" > "$TMP/v39.eo" || fail "v39: ELF オブジェクト出力に失敗 ($label)"
-    "$IWAC" --kosaba --object kosaba/kosaba_rt.c > "$TMP/v39rt.iwo" || fail "v39: rt のオブジェクト出力に失敗 ($label)"
+    printf 'void kosaba_flush();\n' > "$TMP/v39pre.c"
+    "$IWAC" --kosaba --elf "$TMP/v39pre.c" "$@" > "$TMP/v39.eo" || fail "v39: ELF オブジェクト出力に失敗 ($label)"
     "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v39rt.eo" || fail "v39: rt の ELF 出力に失敗 ($label)"
-    "$TMP/nori" "$TMP/v39.iwo" "$TMP/v39rt.iwo" > "$TMP/v39a.elf" || fail "v39: .iwo のリンクに失敗 ($label)"
+    "$IWAC" --kosaba "$TMP/v39pre.c" "$@" kosaba/kosaba_rt.c > "$TMP/v39d.elf" || fail "v39: 一括出力に失敗 ($label)"
     "$TMP/nori" "$TMP/v39.eo" "$TMP/v39rt.eo" > "$TMP/v39b.elf" || fail "v39: ELF オブジェクトのリンクに失敗 ($label)"
-    cmp -s "$TMP/v39a.elf" "$TMP/v39b.elf" || fail "v39: ELF 経由のリンク結果が .iwo 経由と違う ($label)"
+    cmp -s "$TMP/v39d.elf" "$TMP/v39b.elf" || fail "v39: ELF 経由のリンク結果が一括と違う ($label)"
 }
 elf_check hello examples/hello-kosaba.c
-# 全断片 (リンク順に並べて一括版の材料と比べる)
-V39_OBJS_IWO=""
+# 全断片 (rt と組でリンクし、一括版と比べる)
 V39_OBJS_EO=""
 for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
-    "$IWAC" --kosaba --object src/decls.c "src/$f.c" > "$TMP/v39-$f.iwo" || fail "v39: 断片 $f のオブジェクト出力に失敗"
     "$IWAC" --kosaba --elf src/decls.c "src/$f.c" > "$TMP/v39-$f.eo" || fail "v39: 断片 $f の ELF 出力に失敗"
-    V39_OBJS_IWO="$V39_OBJS_IWO $TMP/v39-$f.iwo"
     V39_OBJS_EO="$V39_OBJS_EO $TMP/v39-$f.eo"
 done
-"$IWAC" --kosaba --object kosaba/kosaba_rt.c > "$TMP/v39-rt.iwo" || fail "v39: rt のオブジェクト出力に失敗"
 "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v39-rt.eo" || fail "v39: rt の ELF 出力に失敗"
-"$TMP/nori" $V39_OBJS_IWO "$TMP/v39-rt.iwo" > "$TMP/v39full-a.elf" || fail "v39: 全断片の .iwo リンクに失敗"
 "$TMP/nori" $V39_OBJS_EO "$TMP/v39-rt.eo" > "$TMP/v39full-b.elf" || fail "v39: 全断片の ELF リンクに失敗"
-cmp -s "$TMP/v39full-a.elf" "$TMP/v39full-b.elf" || fail "v39: 全断片のリンク結果が形式で違う"
-echo "ok: v39: ELF オブジェクト (hello・全断片) のリンクが .iwo 経由と一致"
+"$IWAC" --kosaba src/0*.c kosaba/kosaba_rt.c > "$TMP/v39full-d.elf" || fail "v39: 全断片の一括に失敗"
+cmp -s "$TMP/v39full-d.elf" "$TMP/v39full-b.elf" || fail "v39: 全断片のリンク結果が一括と違う"
+echo "ok: v39: ELF オブジェクト (hello・全断片) のリンクが一括と一致"
 elf_check nori nori/nori.c libdashi/libdashi.c
 elf_check asari自身 asari/asari.c libdashi/libdashi.c
 elf_check 構造体 "$TMP/v37sa.c" "$TMP/v37sb.c"
@@ -1213,7 +1009,7 @@ if (a[1][2] == 6) putc(72);
 long b[] = { 1000000, -2 };
 if (b[0] + b[1] == 999998) putc(73);' > "$TMP/v40a.bin"
 check_tail "$TMP/v40a.bin" 'ABCDEFGHI' "v40: 配列初期化子の値が読める"
-# KosabaOS 向け: 一括と3つのオブジェクト経路が一致
+# KosabaOS 向け: 一括とオブジェクト経路が一致
 cat > "$TMP/v40t.c" <<'V40TEST'
 int32 tbl[5] = { 10, -20, 0x100, 0, 0 };
 char msg[6] = "hello";
@@ -1223,20 +1019,17 @@ int get(int i) { return tbl[i]; }
 int main() { return get(1) + msg[1] + mat[1][2]; }
 V40TEST
 "$IWAC" --kosaba "$TMP/v40t.c" > "$TMP/v40d.elf" || fail "v40: 一括出力に失敗"
-"$IWAC" --kosaba --object "$TMP/v40t.c" > "$TMP/v40.iwo" || fail "v40: オブジェクト出力に失敗"
-"$TMP/nori" "$TMP/v40.iwo" > "$TMP/v40a.elf" || fail "v40: .iwo のリンクに失敗"
-cmp -s "$TMP/v40d.elf" "$TMP/v40a.elf" || fail "v40: .iwo 経由が一括と違う"
 "$IWAC" --kosaba --elf "$TMP/v40t.c" > "$TMP/v40.eo" || fail "v40: ELF 出力に失敗"
 "$TMP/nori" "$TMP/v40.eo" > "$TMP/v40b.elf" || fail "v40: ELF のリンクに失敗"
 cmp -s "$TMP/v40d.elf" "$TMP/v40b.elf" || fail "v40: ELF 経由が一括と違う"
 "$IWAC" --kosaba --asari "$TMP/v40t.c" > "$TMP/v40.ias" || fail "v40: Asari 形式の出力に失敗"
-"$TMP/asari" "$TMP/v40.ias" > "$TMP/v40s.iwo" || fail "v40: Asari が失敗"
-"$TMP/nori" "$TMP/v40s.iwo" > "$TMP/v40c.elf" || fail "v40: Asari 経由のリンクに失敗"
+"$TMP/asari" "$TMP/v40.ias" > "$TMP/v40s.eo" || fail "v40: Asari が失敗"
+"$TMP/nori" "$TMP/v40s.eo" > "$TMP/v40c.elf" || fail "v40: Asari 経由のリンクに失敗"
 cmp -s "$TMP/v40d.elf" "$TMP/v40c.elf" || fail "v40: Asari 経由が一括と違う"
-echo "ok: v40: 配列初期化子の一括と .iwo・ELF・Asari 経由が一致"
+echo "ok: v40: 配列初期化子の一括と ELF・Asari 経由が一致"
 asari_check 配列初期化子 "$TMP/v40t.c"
 elf_check 配列初期化子 "$TMP/v40t.c"
-# 分割 TU: 仮宣言と初期値つき定義が合併する (両形式・両順)
+# 分割 TU: 仮宣言と初期値つき定義が合併する (両順)
 cat > "$TMP/v40s1.c" <<'V40TEST'
 int tbl[4];
 int get(int i) { return tbl[i]; }
@@ -1247,12 +1040,6 @@ int tbl[4] = { 5, 6, 7, 8 };
 int main() { return get(2); }
 V40TEST
 "$IWAC" --kosaba "$TMP/v40s1.c" "$TMP/v40s2.c" > "$TMP/v40sd.elf" || fail "v40: 分割の一括に失敗"
-"$IWAC" --kosaba --object "$TMP/v40s1.c" > "$TMP/v40s1.iwo" || fail "v40: 分割1の出力に失敗"
-"$IWAC" --kosaba --object "$TMP/v40s2.c" > "$TMP/v40s2.iwo" || fail "v40: 分割2の出力に失敗"
-"$TMP/nori" "$TMP/v40s1.iwo" "$TMP/v40s2.iwo" > "$TMP/v40s12.elf" || fail "v40: 分割 .iwo のリンクに失敗"
-cmp -s "$TMP/v40sd.elf" "$TMP/v40s12.elf" || fail "v40: 分割 .iwo 経由が一括と違う"
-"$TMP/nori" "$TMP/v40s2.iwo" "$TMP/v40s1.iwo" > "$TMP/v40s21.elf" || fail "v40: 分割 .iwo 逆順のリンクに失敗"
-cmp -s "$TMP/v40sd.elf" "$TMP/v40s21.elf" || fail "v40: 分割 .iwo 逆順が一括と違う"
 "$IWAC" --kosaba --elf "$TMP/v40s1.c" > "$TMP/v40s1.eo" || fail "v40: 分割1の ELF 出力に失敗"
 "$IWAC" --kosaba --elf "$TMP/v40s2.c" > "$TMP/v40s2.eo" || fail "v40: 分割2の ELF 出力に失敗"
 "$TMP/nori" "$TMP/v40s1.eo" "$TMP/v40s2.eo" > "$TMP/v40se12.elf" || fail "v40: 分割 ELF のリンクに失敗"
@@ -1299,6 +1086,16 @@ echo "ok: v41: 代入文の行またぎ (バックスラッシュつき) が通�
 check_error 'int a[8]; int b[8];
 int main() { int i; i = 0; a[1]
  = b[0]; return a[1]; }' "v41: バックスラッシュ無しの行またぎ"
+
+# --- v42: .iwo の引退 (doc/iwo-retirement.md) ---
+# 旧 --object は廃止され、nori は ELF 以外を受けない。
+# オブジェクト経路の一括一致は v31〜v40 の各節が
+# ELF で担う。ここでは「引退したこと」自体を確かめる
+"$IWAC" --kosaba --object examples/hello-kosaba.c >/dev/null 2>&1 && fail "v42: 廃止した --object が通ってしまった"
+echo "ok: v42: --object は廃止されている"
+printf 'iwacobj 1\ntarget kosaba\nend\n' > "$TMP/v42fake.iwo"
+"$TMP/nori" "$TMP/v42fake.iwo" >/dev/null 2>&1 && fail "v42: nori が .iwo を受けてしまった"
+echo "ok: v42: nori は ELF オブジェクトだけを読む"
 
 
 # --- libdashi: 共通関数の束 ---
