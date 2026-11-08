@@ -591,3 +591,10 @@ K210 実機の 1MB 確認は順序の外に置き、次の
 言語の基本的な拡張 (switch など) が済んだら取り組む。
 目的は Ikesu の実時間再生 (現状は実時間の約 6.6 倍)。
 候補・現状の生成形・進め方は doc/optimization.md。
+
+## 実装予定: 基本機能の欠落
+
+switch を第一候補に、関数ポインタ、構造体の値
+セマンティクス、enum/union、小物の順。一覧と
+判断は doc/missing-features.md。最適化はこの
+基本拡張の後 (doc/optimization.md)。
