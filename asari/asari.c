@@ -187,7 +187,7 @@ static int nabs;
 
 /* データ側のレコード (来た順)。
  * 種類: f = func、d = decl、v = var、c = varc、
- * a = arr、i = init、p = iptr */
+ * a = arr、A = ainit (v40)、i = init、p = iptr */
 static char rec_kind[8192];
 static int rec_name[8192];     /* name_pool へのずれ */
 static long rec_n1[8192];      /* func: 入口の命令番号、
@@ -205,6 +205,9 @@ static int nundef;
 static char str_bytes[16384];
 static int str_len;
 static long arrays_n;
+/* 配列の初期値のバイト列 (v40、ainit レコードの素通し) */
+static char ainit_bytes[262144];
+static int ainit_len;
 static char name_pool[131072];
 static int name_used;
 
@@ -450,6 +453,17 @@ static int read_input(char *path) {
             long off = read_num();
             long bytes = read_num();
             if (!add_rec('a', nm, off, bytes))
+                return 0;
+        } else if (ds_streq(tok_buf, "ainit")) {
+            /* 配列の初期値 (v40): バイト列を貯めて、
+             * レコードには置き場と長さを控える */
+            read_tok();
+            ds_strcpy(nm, tok_buf);
+            long n = read_num();
+            int astart = ainit_len;
+            if (!read_hex_bytes(ainit_bytes, &ainit_len, 262144, n))
+                return 0;
+            if (!add_rec('A', nm, astart, n))
                 return 0;
         } else if (ds_streq(tok_buf, "init")) {
             read_tok();
@@ -739,6 +753,13 @@ static int write_object_out(void) {
             out_str(" ");
             out_num(rec_n2[r]);
             out_str("\n");
+        } else if (rec_kind[r] == 'A') {
+            out_str("ainit ");
+            out_str(nm);
+            out_str(" ");
+            out_num(rec_n2[r]);
+            out_str("\n");
+            out_hex(ainit_bytes + rec_n1[r], rec_n2[r]);
         } else if (rec_kind[r] == 'i') {
             out_str("init ");
             out_str(nm);

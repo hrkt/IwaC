@@ -331,8 +331,12 @@ static void write_elf_header(void) {
     unsigned long code_filesz = (unsigned long)code_insts * 4ul;
     /* データ側の実体と確保量 (v28): 2本目は文字列の
      * 実体 + 配列の確保分、3本目はグローバルの実体と
-     * 確保分。差分はローダがゼロ埋めする */
-    unsigned long data_filesz = (unsigned long)str_used;
+     * 確保分。差分はローダがゼロ埋めする。配列に
+     * 初期値があるときは、その末尾までが 2本目の
+     * 実体に入り、3本目のファイル位置も後ろへずれる
+     * (v40。arr_init_end は初期値が無ければ 0) */
+    unsigned long data_filesz = (unsigned long)str_used +
+                                (unsigned long)arr_init_end;
     unsigned long data_memsz = (unsigned long)str_used +
                                (unsigned long)arr_used;
     unsigned long gbl_filesz = 0;
@@ -385,7 +389,9 @@ static void write_elf_header(void) {
     out32le(1);       /* p_type = PT_LOAD */
     out32le(6);       /* p_flags = 読み＋書き (R+W) */
     out64le((unsigned long)elf_data_offset() +
-            (unsigned long)str_used);  /* p_offset (文字列の直後) */
+            (unsigned long)str_used +
+            (unsigned long)arr_init_end);
+    /* p_offset (文字列と配列の初期値の直後、v40) */
     out64le(0x40200000ul + data_memsz);  /* p_vaddr (配列の直後) */
     out64le(0x40200000ul + data_memsz);  /* p_paddr */
     out64le(gbl_filesz);   /* p_filesz */
@@ -394,6 +400,35 @@ static void write_elf_header(void) {
     /* 実データの開始 (4096 バイト目) まで 0 で埋める。
      * ヘッダ部は 64 + 56 x 3 = 232 バイト */
     for (int i = 232; i < 4096; i++)
+        out_byte(0);
+}
+
+/* グローバル配列の初期イメージを書く (v40): 配列
+ * 領域の先頭から end バイト目まで。初期値の書かれた
+ * 範囲は要素の大きさで切り詰めた値を置き、残りは
+ * 0 で埋める。配列は登録順 = 領域の並び順 */
+static void write_arr_image(long end) {
+    long pos = 0;
+    for (int a = 0; a < narr; a++) {
+        if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
+            continue;
+        long nb = (long)arr_init_cnt[a] * arr_esize[a];
+        if ((long)arr_off[a] + nb > end)
+            nb = end - (long)arr_off[a];  /* 末尾の 0 は切る */
+        if (nb < 0)
+            nb = 0;
+        for (; pos < arr_off[a] && pos < end; pos++)
+            out_byte(0);
+        for (long k = 0; k < nb; k++) {
+            int e = (int)(k / arr_esize[a]);
+            int b = (int)(k % arr_esize[a]);
+            unsigned long v =
+                (unsigned long)arr_init_pool[arr_init_off[a] + e];
+            out_byte((int)((v >> (8 * b)) & 0xff));
+        }
+        pos = (long)arr_off[a] + nb;
+    }
+    for (; pos < end; pos++)
         out_byte(0);
 }
 
@@ -416,12 +451,12 @@ static void write_var_image(void) {
     }
 }
 
-/* ベアメタル版の初期イメージ: 配列のゼロの後ろに
- * グローバルの枠を並べる (バイナリそのものがメモリ
- * イメージなので、ゼロも含めて全部書く) */
+/* ベアメタル版の初期イメージ: 配列のイメージの
+ * 後ろにグローバルの枠を並べる (バイナリそのものが
+ * メモリイメージなので、ゼロも含めて全部書く。
+ * 配列の初期値は v40 でイメージに含まれる) */
 static void write_global_image(void) {
-    for (int i = 0; i < arr_used; i++)
-        out_byte(0);
+    write_arr_image(arr_used);
     write_var_image();
 }
 
@@ -467,6 +502,35 @@ static void obj_hex(unsigned char *p, long n) {
         out_byte(hex[p[i] & 15]);
     }
     if (n > 0)
+        out_byte('\n');
+}
+
+/* 配列の初期値を ainit 記録で書く (v40、write_object
+ * と write_asari の共通)。書かれた要素の範囲だけを、
+ * 要素の大きさで切り詰めたバイト列にする (改行の
+ * 置き方は obj_hex と同じ) */
+static void obj_arr_init(int a) {
+    obj_str("ainit ");
+    obj_str(arr_names[a]);
+    obj_str(" ");
+    obj_num((long)arr_init_cnt[a] * arr_esize[a]);
+    obj_str("\n");
+    char *hex = "0123456789abcdef";
+    long col = 0;
+    for (int e = 0; e < arr_init_cnt[a]; e++) {
+        unsigned long v =
+            (unsigned long)arr_init_pool[arr_init_off[a] + e];
+        for (int b = 0; b < arr_esize[a]; b++) {
+            unsigned char byte = (unsigned char)(v & 0xff);
+            v >>= 8;
+            if (col > 0 && col % 32 == 0)
+                out_byte('\n');
+            out_byte(hex[(byte >> 4) & 15]);
+            out_byte(hex[byte & 15]);
+            col++;
+        }
+    }
+    if (col > 0)
         out_byte('\n');
 }
 
@@ -605,6 +669,12 @@ static void write_object(void) {
         obj_str(" ");
         obj_num(bytes);
         obj_str("\n");
+    }
+    /* 配列の初期値 (v40、登録順) */
+    for (int a = 0; a < narr; a++) {
+        if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
+            continue;
+        obj_arr_init(a);
     }
     /* 初期値 (枠の順)。文字列は iptr として出す */
     for (int s = 0; s < var_nglobal; s++) {
@@ -888,6 +958,12 @@ static void write_asari(void) {
         obj_str(" ");
         obj_num(bytes);
         obj_str("\n");
+    }
+    /* 配列の初期値 (v40、write_object と同じ並び) */
+    for (int a = 0; a < narr; a++) {
+        if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
+            continue;
+        obj_arr_init(a);
     }
     for (int s = 0; s < var_nglobal; s++) {
         for (int v = 0; v < nvar; v++) {
@@ -1239,6 +1315,31 @@ static void elf_shdr(int name, int type, long flags, long off,
     elf_sh_entsize = 0;
 }
 
+/* .iwac.arrays の中身を書く (v40): 初期値のある
+ * ときだけ PROGBITS にして、領域全体のイメージ
+ * (初期値の範囲 + 0) を置く。write_arr_image と
+ * 同じ並びで、出す先が ebyte の版 */
+static void elf_arr_image(void) {
+    long pos = 0;
+    for (int a = 0; a < narr; a++) {
+        if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
+            continue;
+        for (; pos < arr_off[a]; pos++)
+            ebyte(0);
+        for (int e = 0; e < arr_init_cnt[a]; e++) {
+            unsigned long v =
+                (unsigned long)arr_init_pool[arr_init_off[a] + e];
+            for (int b = 0; b < arr_esize[a]; b++) {
+                ebyte((int)(v & 0xff));
+                v >>= 8;
+            }
+        }
+        pos = (long)arr_off[a] + (long)arr_init_cnt[a] * arr_esize[a];
+    }
+    for (; pos < arr_used; pos++)
+        ebyte(0);
+}
+
 static void write_elf_object(void) {
     int has_entry = (prog_main >= 0 || prog_stmts != -1 ||
                      prog_has_final);
@@ -1282,10 +1383,15 @@ static void write_elf_object(void) {
     for (int i = 0; i < 11; i++)
         shstrtab_size += ename_len(elf_sec_name(i)) + 1;
 
-    /* 置き場所 */
+    /* 置き場所。.iwac.arrays に中身があるときは
+     * (v40) 文字列の後ろに実体が入り、.data は
+     * その後ろへずれる */
     long text_off = 64;
     long strings_off = text_off + text_size;
+    long arrays_off = strings_off + strings_size;
     long data_off = (strings_off + strings_size + 7) & ~7L;
+    if (arr_init_end > 0)
+        data_off = (arrays_off + arrays_size + 7) & ~7L;
     long rela_text_off = (data_off + data_size + 7) & ~7L;
     long rela_data_off = rela_text_off + (long)nrela_text * 24;
     long symtab_off = (rela_data_off + (long)nrela_data * 24 + 7) & ~7L;
@@ -1323,6 +1429,9 @@ static void write_elf_object(void) {
     }
     /* .iwac.strings */
     ebytes((char *)str_pool, str_used);
+    /* .iwac.arrays の中身 (初期値があるときだけ) */
+    if (arr_init_end > 0)
+        elf_arr_image();
     /* .data (グローバルの初期イメージ) */
     epad(8);
     for (int slot = 0; slot < img_slots; slot++) {
@@ -1449,8 +1558,12 @@ static void write_elf_object(void) {
         elf_shdr((int)noff[3], 8, 3, data_off + data_size,
                  bss_size, 8);
         elf_shdr((int)noff[4], 1, 3, strings_off, strings_size, 1);
-        elf_shdr((int)noff[5], 8, 3, strings_off + strings_size,
-                 arrays_size, 8);
+        if (arr_init_end > 0)
+            elf_shdr((int)noff[5], 1, 3, arrays_off,
+                     arrays_size, 8);
+        else
+            elf_shdr((int)noff[5], 8, 3, strings_off + strings_size,
+                     arrays_size, 8);
         elf_sh_link = 8;
         elf_sh_info = 1;
         elf_sh_entsize = 24;
@@ -1502,11 +1615,16 @@ static void write_binary(void) {
      * 付ける (v24)。ベアメタル版はバイナリそのものが
      * メモリイメージなので配列のゼロも全部書く。
      * KosabaOS 版は枠だけを続けて書き、配列のゼロは
-     * ローダのゼロ埋めに任せる (v28) */
-    if (has_var_inits) {
-        if (target_kosaba)
-            write_var_image();
-        else
+     * ローダのゼロ埋めに任せる (v28)。配列の初期値は
+     * v40 から実体として書き、届く範囲 (arr_init_end)
+     * だけを文字列の後ろに続ける */
+    if (has_var_inits || arr_init_end > 0) {
+        if (target_kosaba) {
+            if (arr_init_end > 0)
+                write_arr_image(arr_init_end);
+            if (has_var_inits)
+                write_var_image();
+        } else
             write_global_image();
     }
 }

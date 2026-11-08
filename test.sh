@@ -1196,6 +1196,75 @@ elf_check asari自身 asari/asari.c libdashi/libdashi.c
 elf_check 構造体 "$TMP/v37sa.c" "$TMP/v37sb.c"
 echo "ok: v39: ELF オブジェクトが nori・Asari 自身・構造体でも一致"
 
+# --- v40: 配列の初期化子 (doc/array-init.md) ---
+# 値は実行コードではなくデータとして運ばれる。
+# まずベアメタルで「読める値・0 埋め・書き戻し」を確かめる
+"$IWAC" 'int32 t[5] = { 10, -20, 300, 0, 0 };
+if (t[0] == 10) putc(65);
+if (t[1] == -20) putc(66);
+if (t[2] == 300) putc(67);
+if (t[3] == 0) putc(68);
+t[3] = 5; if (t[3] == 5) putc(69);
+char m[] = "hi";
+if (m[0] == 104) putc(70);
+if (m[2] == 0) putc(71);
+int a[2][3] = { {1, 2, 3}, {4, 5, 6} };
+if (a[1][2] == 6) putc(72);
+long b[] = { 1000000, -2 };
+if (b[0] + b[1] == 999998) putc(73);' > "$TMP/v40a.bin"
+check_tail "$TMP/v40a.bin" 'ABCDEFGHI' "v40: 配列初期化子の値が読める"
+# KosabaOS 向け: 一括と3つのオブジェクト経路が一致
+cat > "$TMP/v40t.c" <<'V40TEST'
+int32 tbl[5] = { 10, -20, 0x100, 0, 0 };
+char msg[6] = "hello";
+int mat[2][3] = { {1, 2, 3}, {4, 5, 6} };
+long big[] = { 123456789, -1 };
+int get(int i) { return tbl[i]; }
+int main() { return get(1) + msg[1] + mat[1][2]; }
+V40TEST
+"$IWAC" --kosaba "$TMP/v40t.c" > "$TMP/v40d.elf" || fail "v40: 一括出力に失敗"
+"$IWAC" --kosaba --object "$TMP/v40t.c" > "$TMP/v40.iwo" || fail "v40: オブジェクト出力に失敗"
+"$TMP/nori" "$TMP/v40.iwo" > "$TMP/v40a.elf" || fail "v40: .iwo のリンクに失敗"
+cmp -s "$TMP/v40d.elf" "$TMP/v40a.elf" || fail "v40: .iwo 経由が一括と違う"
+"$IWAC" --kosaba --elf "$TMP/v40t.c" > "$TMP/v40.eo" || fail "v40: ELF 出力に失敗"
+"$TMP/nori" "$TMP/v40.eo" > "$TMP/v40b.elf" || fail "v40: ELF のリンクに失敗"
+cmp -s "$TMP/v40d.elf" "$TMP/v40b.elf" || fail "v40: ELF 経由が一括と違う"
+"$IWAC" --kosaba --asari "$TMP/v40t.c" > "$TMP/v40.ias" || fail "v40: Asari 形式の出力に失敗"
+"$TMP/asari" "$TMP/v40.ias" > "$TMP/v40s.iwo" || fail "v40: Asari が失敗"
+"$TMP/nori" "$TMP/v40s.iwo" > "$TMP/v40c.elf" || fail "v40: Asari 経由のリンクに失敗"
+cmp -s "$TMP/v40d.elf" "$TMP/v40c.elf" || fail "v40: Asari 経由が一括と違う"
+echo "ok: v40: 配列初期化子の一括と .iwo・ELF・Asari 経由が一致"
+asari_check 配列初期化子 "$TMP/v40t.c"
+elf_check 配列初期化子 "$TMP/v40t.c"
+# 分割 TU: 仮宣言と初期値つき定義が合併する (両形式・両順)
+cat > "$TMP/v40s1.c" <<'V40TEST'
+int tbl[4];
+int get(int i) { return tbl[i]; }
+V40TEST
+cat > "$TMP/v40s2.c" <<'V40TEST'
+int get(int i);
+int tbl[4] = { 5, 6, 7, 8 };
+int main() { return get(2); }
+V40TEST
+"$IWAC" --kosaba "$TMP/v40s1.c" "$TMP/v40s2.c" > "$TMP/v40sd.elf" || fail "v40: 分割の一括に失敗"
+"$IWAC" --kosaba --object "$TMP/v40s1.c" > "$TMP/v40s1.iwo" || fail "v40: 分割1の出力に失敗"
+"$IWAC" --kosaba --object "$TMP/v40s2.c" > "$TMP/v40s2.iwo" || fail "v40: 分割2の出力に失敗"
+"$TMP/nori" "$TMP/v40s1.iwo" "$TMP/v40s2.iwo" > "$TMP/v40s12.elf" || fail "v40: 分割 .iwo のリンクに失敗"
+cmp -s "$TMP/v40sd.elf" "$TMP/v40s12.elf" || fail "v40: 分割 .iwo 経由が一括と違う"
+"$TMP/nori" "$TMP/v40s2.iwo" "$TMP/v40s1.iwo" > "$TMP/v40s21.elf" || fail "v40: 分割 .iwo 逆順のリンクに失敗"
+cmp -s "$TMP/v40sd.elf" "$TMP/v40s21.elf" || fail "v40: 分割 .iwo 逆順が一括と違う"
+"$IWAC" --kosaba --elf "$TMP/v40s1.c" > "$TMP/v40s1.eo" || fail "v40: 分割1の ELF 出力に失敗"
+"$IWAC" --kosaba --elf "$TMP/v40s2.c" > "$TMP/v40s2.eo" || fail "v40: 分割2の ELF 出力に失敗"
+"$TMP/nori" "$TMP/v40s1.eo" "$TMP/v40s2.eo" > "$TMP/v40se12.elf" || fail "v40: 分割 ELF のリンクに失敗"
+cmp -s "$TMP/v40sd.elf" "$TMP/v40se12.elf" || fail "v40: 分割 ELF 経由が一括と違う"
+"$TMP/nori" "$TMP/v40s2.eo" "$TMP/v40s1.eo" > "$TMP/v40se21.elf" || fail "v40: 分割 ELF 逆順のリンクに失敗"
+cmp -s "$TMP/v40sd.elf" "$TMP/v40se21.elf" || fail "v40: 分割 ELF 逆順が一括と違う"
+echo "ok: v40: 分割 TU の仮宣言と初期値つき定義が合併する"
+# エラーになる形
+check_error 'int a[2] = { 1, 2, 3 }; a[0]' "v40: 初期化子が多すぎる"
+check_error 'int f() { int a[2] = { 1, 2 }; return a[0]; } f()' "v40: 関数の中の配列初期化"
+check_error 'char s[3] = "toolong"; s[0]' "v40: 文字列が配列より長い"
+
 
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る

@@ -22,6 +22,7 @@
 #   文字列プール    16384 → 8192 バイト (個数 512 は不変)
 #   ソース上限      約384KB → 128KB
 #   展開バッファ    約384KB → 128KB
+#   配列初期値プール 65536 → 4096 要素 (v40)
 # 狙いは静的データ 1MB 未満 (K210 のデータ領域)。
 # 出来た ELF のデータ量を最後に測り、1MB 以上なら
 # 失敗として止まる (段6 の判定そのもの)。
@@ -71,6 +72,9 @@ apply 02-parse.c 'nnode >= 20480' 'nnode >= 8192' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 8191' 1
 apply 02-parse.c '[1024]' '[512]' 10
 apply 02-parse.c 'nvar >= 1024' 'nvar >= 512' 1
+# 配列初期値プール (v40): 表と 02b 側のガードを一緒に
+apply 02-parse.c 'arr_init_pool[65536]' 'arr_init_pool[4096]' 1
+apply 02b-decl.c 'arr_init_used >= 65536' 'arr_init_used >= 4096' 2
 # 03-gen.c: 命令表 (5つ+パッチ表+緩和の印) と再配置表
 apply 03-gen.c '[49152]' '[16384]' 7
 apply 03-gen.c 'i < 49152' 'i < 16384' 1

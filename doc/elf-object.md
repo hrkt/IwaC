@@ -164,3 +164,14 @@ decls.c の kosaba_flush のコメント参照)。
 op / rd / rs1 / rs2 の char 化で払った
 (静的データは約 0.97MB 減)。詳しくは
 doc/progress.md の v39 記録。
+
+### v40 での変更 (配列初期化子)
+
+配列に初期値がある TU では、`.iwac.arrays`
+を SHT_NOBITS から SHT_PROGBITS に切り替え、
+節の中身として配列領域全体のイメージ
+(初期値の範囲 + 0) を持つ。nori は中身の
+ある節から各配列の分を取り込み、末尾の 0
+バイトを切り詰めて .iwo の ainit 記録と
+同じ形に揃える (設計は doc/array-init.md)。
+初期値のない TU の .eo は v39 と同形。

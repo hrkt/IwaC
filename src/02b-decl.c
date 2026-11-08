@@ -680,9 +680,249 @@ static int parse_struct_def(void) {
     return 0;
 }
 
+/* 配列初期化子の要素1つを読む (v40、設計は
+ * doc/array-init.md): ノードは作らない (表が何万
+ * 要素にもなるので、式の木を作っていたらノード表
+ * が溢れる)。読めるのは符号つきの10進数・16進数・
+ * 文字リテラルだけ。成功したら 1、失敗は 0 */
+static int parse_init_const(long *out) {
+    skip_spaces();
+    int neg = 0;
+    if (*cur == '-') {
+        neg = 1;
+        cur++;
+        skip_spaces();
+    } else if (*cur == '+') {
+        cur++;
+        skip_spaces();
+    }
+    long v;
+    if (*cur == '\'') {
+        /* 文字リテラル (parse_char_node と同じ読み方) */
+        cur++;
+        if (*cur == '\\') {
+            cur++;
+            if (*cur == 'n')
+                v = '\n';
+            else if (*cur == 't')
+                v = '\t';
+            else if (*cur == 'r')
+                v = '\r';
+            else if (*cur == '0')
+                v = 0;
+            else if (*cur == '\\')
+                v = '\\';
+            else if (*cur == '\'')
+                v = '\'';
+            else if (*cur == '"')
+                v = '"';
+            else {
+                errmsg = "使えるエスケープは \\n \\t \\r \\0 \\\\ \\' \\\" だけです";
+                return 0;
+            }
+            cur++;
+        } else if (*cur == '\'' || *cur == '\0') {
+            errmsg = "文字リテラルが空か、閉じていません";
+            return 0;
+        } else {
+            v = (unsigned char)*cur;
+            cur++;
+        }
+        if (*cur != '\'') {
+            errmsg = "文字リテラルは1文字だけです (閉じの ' が必要です)";
+            return 0;
+        }
+        cur++;
+    } else if (cur[0] == '0' && (cur[1] == 'x' || cur[1] == 'X')) {
+        /* 16進数 (parse_number_node と同じ畳み方) */
+        cur += 2;
+        if (hex_value(*cur) < 0) {
+            errmsg = "0x の後には16進数の数字が必要です";
+            return 0;
+        }
+        unsigned long uv = 0;
+        while (hex_value(*cur) >= 0) {
+            uv = uv * 16ul + (unsigned long)hex_value(*cur);
+            if (uv > 0xFFFFFFFFul) {
+                errmsg = "16進数が大きすぎます (32ビットまで)";
+                return 0;
+            }
+            cur++;
+        }
+        while (*cur == 'u' || *cur == 'U' || *cur == 'l' ||
+               *cur == 'L')
+            cur++;
+        v = (long)(unsigned int)uv;
+        if (v >= 0x80000000L)
+            v = v - 0x80000000L - 0x80000000L;
+    } else if (is_digit(*cur)) {
+        int dv = parse_number_value();
+        if (dv < 0)
+            return 0;
+        v = dv;
+    } else {
+        errmsg = "配列の初期化子は数値の定数だけです";
+        return 0;
+    }
+    *out = neg ? -v : v;
+    return 1;
+}
+
+/* 初期化子の { ... } の中身を読む (v40)。開きの
+ * { は消費済みの前提で、閉じの } まで消費する。
+ * 値は値プールへ来た順に足し、読んだ要素数を返す
+ * (失敗は -1)。行ごとの { } は入れ子で呼んで
+ * 平らに読む (2次元の書き方の吸収) */
+static int parse_init_values(void) {
+    int count = 0;
+    skip_spaces();
+    if (*cur == '}') {
+        cur++;
+        return 0;
+    }
+    for (;;) {
+        skip_spaces();
+        if (*cur == '{') {
+            cur++;
+            int sub = parse_init_values();
+            if (sub < 0)
+                return -1;
+            count = count + sub;
+        } else {
+            long v;
+            if (!parse_init_const(&v))
+                return -1;
+            if (arr_init_used >= 65536) {
+                errmsg = "配列の初期化子が多すぎます (合計65536要素まで)";
+                return -1;
+            }
+            arr_init_pool[arr_init_used] = v;
+            arr_init_used = arr_init_used + 1;
+            count++;
+        }
+        skip_spaces();
+        if (*cur == ',') {
+            cur++;
+            skip_spaces();
+            if (*cur == '}') {
+                cur++;
+                return count;
+            }
+            continue;
+        }
+        if (*cur == '}') {
+            cur++;
+            return count;
+        }
+        errmsg = "初期化子は , か } で区切ります";
+        return -1;
+    }
+}
+
+/* 配列宣言の初期化子を読む (v40)。= は消費済み。
+ * 値をプールに貯めてから大きさを確定し、配列を
+ * 名簿に載せて初期値を結び付ける。rows が -1 なら
+ * 大きさの省略で、要素数から決める (2次元は
+ * 1次元目だけ)。成功したら宣言ノード、失敗は -1 */
+static int parse_array_init(char *name, int len, int rows, int cols,
+                            int esize, int etype, int strct,
+                            int plevel) {
+    int start = arr_init_used;
+    int count = 0;
+    skip_spaces();
+    if (*cur == '"') {
+        /* 文字列リテラル (1次元の char 配列だけ) */
+        if (esize != 1 || plevel != 0 || cols > 0) {
+            errmsg = "文字列で初期化できるのは char の配列だけです";
+            return -1;
+        }
+        int node = parse_string_node();
+        if (node < 0)
+            return -1;
+        int si = node_val[node];
+        int slen = str_len[si];
+        if (rows >= 0 && slen > rows) {
+            errmsg = "文字列が配列より長いです";
+            return -1;
+        }
+        /* 末尾の 0 は、大きさに余りがあるときだけ
+         * 数に入れる (C の約束どおり) */
+        count = slen;
+        if (rows < 0 || rows > slen)
+            count = slen + 1;
+        for (int i = 0; i < count; i++) {
+            if (arr_init_used >= 65536) {
+                errmsg = "配列の初期化子が多すぎます (合計65536要素まで)";
+                return -1;
+            }
+            if (i < slen)
+                arr_init_pool[arr_init_used] =
+                    (unsigned char)str_pool[str_off[si] + i];
+            else
+                arr_init_pool[arr_init_used] = 0;
+            arr_init_used = arr_init_used + 1;
+        }
+    } else if (*cur == '{') {
+        cur++;
+        count = parse_init_values();
+        if (count < 0)
+            return -1;
+    } else {
+        errmsg = "配列の初期化子は { } か文字列です";
+        return -1;
+    }
+    if (!expect_char(';', "宣言の終わりには ; が必要です"))
+        return -1;
+    if (rows < 0) {
+        /* 大きさの省略: 要素数から決める */
+        if (cols > 0)
+            rows = (count + cols - 1) / cols;
+        else
+            rows = count;
+        if (rows < 1) {
+            errmsg = "初期化子が空です";
+            return -1;
+        }
+    }
+    int cap = cols > 0 ? rows * cols : rows;
+    if (count > cap) {
+        errmsg = "初期化子が配列より多いです";
+        return -1;
+    }
+    int a = define_array_s(name, len, rows, cols, esize, etype,
+                           strct, plevel);
+    if (a < 0)
+        return -1;
+    if (arr_init_cnt[a] > 0) {
+        errmsg = "初期値は一つだけです";
+        return -1;
+    }
+    arr_init_off[a] = start;
+    arr_init_cnt[a] = count;
+    /* 実体が届く末尾は「最後の 0 でないバイト」まで。
+     * 末尾の 0 はローダのゼロ埋めに任せる (一括版と
+     * リンク版でファイルの形を揃えるための約束) */
+    int tend = 0;
+    for (int e = count - 1; e >= 0 && tend == 0; e--) {
+        unsigned long v = (unsigned long)arr_init_pool[start + e];
+        for (int b = esize - 1; b >= 0; b--) {
+            if (((v >> (8 * b)) & 0xff) != 0) {
+                tend = e * esize + b + 1;
+                break;
+            }
+        }
+    }
+    int end = arr_off[a] + tend;
+    if (end > arr_init_end)
+        arr_init_end = end;
+    return new_node(NODE_DECL, a, 0, 0);
+}
+
 /* 宣言の文を読む (v21 で変数宣言を追加):
  *   型 名前 [ 大きさ ] ;         配列の宣言 (要素の大きさは
  *   型 名前 [ 行 ] [ 列 ] ;       型から決まる、v23。2次元も)
+ *   型 名前 [ 大きさ ] = { ... }; 配列の初期化子 (v40、
+ *   型 名前 [ ] = "..." ;         ファイル範囲だけ)
  *   型 名前 = 式 ;         初期化つきの変数宣言
  *   型 名前 ;              変数の宣言だけ (値は不定。グローバル
  *                          は静的領域で 0 始まり)
@@ -708,15 +948,19 @@ static int parse_decl_stmt(void) {
         name_buf[i] = ident_buf[i];
     skip_spaces();
     if (*cur == '[') {
-        /* 配列の宣言: [ 大きさ ] または [ 行 ] [ 列 ] (v23) */
+        /* 配列の宣言: [ 大きさ ] または [ 行 ] [ 列 ] (v23)。
+         * 大きさの省略は初期化子があるときだけ (v40) */
         cur++;
         skip_spaces();
-        int size = parse_number_value();
-        if (size < 0)
-            return -1;
-        if (size < 1 || size > 1048576) {
-            errmsg = "配列の大きさは 1 から 1048576 までです";
-            return -1;
+        int size = -1;   /* -1 = 省略 (初期化子から決める) */
+        if (*cur != ']') {
+            size = parse_number_value();
+            if (size < 0)
+                return -1;
+            if (size < 1 || size > 1048576) {
+                errmsg = "配列の大きさは 1 から 1048576 までです";
+                return -1;
+            }
         }
         if (!expect_char(']', "配列の大きさの後には ] が必要です"))
             return -1;
@@ -736,13 +980,39 @@ static int parse_decl_stmt(void) {
             if (!expect_char(']', "配列の大きさの後には ] が必要です"))
                 return -1;
         }
-        if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
-            return -1;
         /* 要素の大きさ (v23): 型に * が付いていれば要素は
          * ポインタなので 8 バイト。そうでなければ型の
          * 基本の大きさ (char は 1、それ以外は 8) */
         int esize = plevel >= 1 ? 8 : bsize;
         int eet = plevel >= 1 ? 8 : etype;
+        skip_spaces();
+        if (*cur == '=') {
+            /* 配列の初期化子 (v40、設計は doc/array-init.md)。
+             * 値は実行コードではなくデータで運ぶので、
+             * 置けるのはファイル範囲の、ポインタでも
+             * 構造体でもない要素の配列だけ */
+            cur++;
+            if (parse_cur_func >= 0) {
+                errmsg = "関数の中の配列初期化はまだできません";
+                return -1;
+            }
+            if (plevel >= 1) {
+                errmsg = "ポインタの配列の初期化はまだできません";
+                return -1;
+            }
+            if (strct >= 0) {
+                errmsg = "構造体の配列の初期化はまだできません";
+                return -1;
+            }
+            return parse_array_init(name_buf, name_len, size, cols,
+                                    esize, eet, strct, plevel);
+        }
+        if (size < 0) {
+            errmsg = "配列の大きさが必要です (省略できるのは初期化子があるときだけです)";
+            return -1;
+        }
+        if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
+            return -1;
         int a = define_array_s(name_buf, name_len, size, cols,
                                esize, eet, strct, plevel);
         if (a < 0)

@@ -417,6 +417,17 @@ static int arr_foff[128];
 static unsigned int arr_addr[128];
 static int narr;      /* 登録された配列の数 */
 static int arr_used;  /* グローバル配列領域の使用済みバイト数 */
+/* 配列の初期値 (v40、設計は doc/array-init.md):
+ *   arr_init_off[i]: 値プールの中の先頭 (要素単位)
+ *   arr_init_cnt[i]: 書かれた要素の数 (0 = 初期値なし)
+ *   arr_init_pool[]: 値そのもの (8バイト/要素で貯める)
+ *   arr_init_end   : 初期値のバイトが届く末尾
+ *                    (配列領域の中の位置。0 = 無し) */
+static int arr_init_off[128];
+static int arr_init_cnt[128];
+static long arr_init_pool[65536];
+static int arr_init_used;
+static int arr_init_end;
 /* func_arr_bytes[f]: 関数 f のフレームに入るローカル
  * 配列の合計バイト数 (v26)。フレーム長の計算 (第2層の
  * func_frame_size) が使う */
@@ -2713,6 +2724,8 @@ static int parse_program(char *program) {
     nfunc = 0;
     narr = 0;
     arr_used = 0;
+    arr_init_used = 0;
+    arr_init_end = 0;
     prog_stmts = -1;
     prog_final = -1;
     prog_has_final = 0;

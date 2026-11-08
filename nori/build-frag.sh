@@ -12,15 +12,18 @@
 #   再配置 約 3,164 / 名前 約 510 (登録順の控え 約 950)
 #
 # 容量プロファイル (標準 → 断片):
-#   名前表         4096 → 1024 (配列 13 本とも)
+#   名前表         4096 → 1024 (配列 15 本とも。
+#     v40 で配列初期値の控え 2 本が増えた)
 #   登録順         4096 → 2048
 #   再配置表      16384 → 5120 (v38 で増量: iwac の
 #     再配置の実測合計が 4,339 になり 4096 を超えた)
 #   入力バッファ 約384KB → 160KB
-#   コード置き場  256KB → 192KB (入力側・出力側とも。
-#     v36 で iwac のコード合計に合わせて増量した)
+#   コード置き場  256KB → 184KB (入力側・出力側とも。
+#     iwac のコード合計の実測 184,092 に合わせた)
 #   文字列置き場  128KB → 16KB
 #   名前プール     64KB → 16KB
+#   配列初期値    256KB → 4KB (v40。断片プロファイルの
+#     仕事は iwac 自身のリンクで、初期値は現れない)
 # 狙いは静的データ 1MB 未満。最後に測り、以上なら
 # 失敗として止まる。
 #
@@ -58,7 +61,7 @@ apply() {
 # 名前表: まず登録順 (seq) を名指しで替えてから残りを一括
 apply nori.c 'seq_sym[4096]' 'seq_sym[2048]' 1
 apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2048' 1
-apply nori.c '[4096]' '[1024]' 13
+apply nori.c '[4096]' '[1024]' 15
 apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 1024' 1
 # 再配置表
 apply nori.c '[16384]' '[5120]' 7
@@ -68,10 +71,13 @@ apply nori.c 'in_buf[393216]' 'in_buf[163840]' 1
 apply nori.c '393216 - in_len' '163840 - in_len' 1
 apply nori.c 'in_len >= 393216' 'in_len >= 163840' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[262144]' 'code_pool[196608]' 1
-apply nori.c '&code_used, 262144' '&code_used, 196608' 1
-apply nori.c 'out_code[262144]' 'out_code[196608]' 1
-apply nori.c '> 262144' '> 196608' 1
+apply nori.c 'code_pool[262144]' 'code_pool[188416]' 1
+apply nori.c '&code_used, 262144' '&code_used, 188416' 1
+apply nori.c 'out_code[262144]' 'out_code[188416]' 1
+apply nori.c '> 262144' '> 188416' 1
+# 配列の初期値の置き場 (v40)
+apply nori.c 'ainit_buf[262144]' 'ainit_buf[4096]' 1
+apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 4096' 1
 # 文字列置き場と名前プール
 apply nori.c 'str_pool[131072]' 'str_pool[16384]' 1
 apply nori.c '&str_used, 131072' '&str_used, 16384' 1

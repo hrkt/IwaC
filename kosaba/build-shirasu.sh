@@ -19,6 +19,7 @@
 #   文字列プール    16384 → 4096 バイト (個数 512 は不変)
 #   ソース上限      約384KB → 約32KB
 #   展開バッファ    約384KB → 約32KB
+#   配列初期値プール 65536 → 1024 要素 (v40)
 # このとき出来る iwac の静的データは約371KB。コンパイル
 # できるのは「小さいプログラム」だけになる (hello.c 級を
 # ボード上でコンパイルするための構成で、iwac 自身の
@@ -82,6 +83,8 @@ apply 02-parse.c 'nnode >= 20480' 'nnode >= 2048' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 4095' 1
 apply 02-parse.c '[1024]' '[256]' 10
 apply 02-parse.c 'nvar >= 1024' 'nvar >= 256' 1
+apply 02-parse.c 'arr_init_pool[65536]' 'arr_init_pool[1024]' 1
+apply 02b-decl.c 'arr_init_used >= 65536' 'arr_init_used >= 1024' 2
 # 03-gen.c: 命令表 (5つ) とパッチ表
 apply 03-gen.c '[49152]' '[4096]' 7
 # branch_long を消すループの上限も命令表に合わせる (v27 で追加

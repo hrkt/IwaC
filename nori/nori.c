@@ -32,11 +32,13 @@ int ds_hexval(int c);
 static int MAX_OBJ = 32;       /* オブジェクトの数 */
 static int MAX_SYM = 4096;     /* 名前表 */
 static int MAX_REL = 16384;    /* 穴の数 */
+static int MAX_AINIT = 262144; /* 配列の初期値の置き場 (v40) */
 static int MAX_SEQ = 4096;     /* 登録順の控え */
 /* バイト列の置き場 (静的データとして持つ) */
 static char in_buf[393216];    /* オブジェクト1つの全文 */
 static char code_pool[262144]; /* 全オブジェクトのコード */
 static char str_pool[131072];  /* 全オブジェクトの文字列 */
+static char ainit_buf[262144]; /* 配列の初期値のバイト列 (v40) */
 static char out_code[262144];  /* 並べた後のコード */
 static char name_pool[65536];  /* 名前の文字列 */
 
@@ -81,6 +83,10 @@ static int sym_init_obj[4096]; /* 文字列の出所のオブジェクト */
 static int sym_init_sym[4096]; /* 種類3の相手の名前 */
 static int sym_place[4096];    /* 関数: 配置後の位置 */
 static long sym_addr[4096];    /* 最終的な住所 */
+static int sym_ainit_off[4096];/* 配列: 初期値の置き場 (v40) */
+static int sym_ainit_len[4096];/* 配列: 初期値のバイト数。
+                                * -1 = 初期値なし */
+static int ainit_used;         /* ainit_buf の使用量 */
 static int name_used;
 
 static int name_eq_at(int off, char *s) {
@@ -129,6 +135,8 @@ static int new_sym(char *name) {
     sym_init_sym[s] = -1;
     sym_place[s] = -1;
     sym_addr[s] = 0;
+    sym_ainit_off[s] = 0;
+    sym_ainit_len[s] = -1;
     return s;
 }
 
@@ -274,10 +282,11 @@ static int esym_sym[16384];  /* 名前 → 名前表の番号 */
 static int eabs_idx[256];
 static long eabs_val[256];
 static int neabs;
-static int edata_off[1024];  /* .data の変数 (初期値の受け口) */
-static int edata_sym[1024];
-static long edata_val[1024];
-static int edata_hit[1024];
+static int edata_off[256];   /* .data の変数 (初期値の受け口。
+                              * 実測ピークは iwac の断片で 57) */
+static int edata_sym[256];
+static long edata_val[256];
+static int edata_hit[256];
 static int nedata;
 
 static int eget8(long off) {
@@ -325,6 +334,36 @@ static void esec_name(long shoff, long shstr_off, int i, char *buf) {
             break;
     }
     buf[31] = '\0';
+}
+
+/* 配列の初期値を in_buf の位置から取り込む (v40)。
+ * 末尾の 0 バイトは実体に入れない (.iwo 側と同じ
+ * 約束)。全部 0 の写しは「初期値なし」と同じで、
+ * 仮定義側のオブジェクトが中身つきの節を持って
+ * いた場合に当たる。既に初期値がある名前とは、
+ * 同じ中身ならよい */
+static int adopt_ainit(int s, long off, long n) {
+    while (n > 0 && in_buf[off + n - 1] == 0)
+        n--;
+    if (n == 0)
+        return 1;
+    if (sym_ainit_len[s] >= 0) {
+        if (sym_ainit_len[s] != n)
+            return fail("配列の初期値が食い違います");
+        for (long i = 0; i < n; i++)
+            if (ainit_buf[sym_ainit_off[s] + i] != in_buf[off + i])
+                return fail("配列の初期値が二つあります");
+        return 1;
+    }
+    if (ainit_used + n > MAX_AINIT)
+        return fail("配列の初期値が大きすぎます");
+    sym_ainit_off[s] = ainit_used;
+    for (long i = 0; i < n; i++) {
+        ainit_buf[ainit_used] = in_buf[off + i];
+        ainit_used++;
+    }
+    sym_ainit_len[s] = (int)n;
+    return 1;
 }
 
 static int read_object_elf(int obj) {
@@ -395,6 +434,14 @@ static int read_object_elf(int obj) {
     if (data_i >= 0) {
         eget_shdr(shoff, data_i);
         data_off = esec_off;
+    }
+    /* 配列の節: 中身 (PROGBITS) があるか (v40) */
+    long earr_off = 0;
+    int earr_type = 0;
+    if (arrays_i >= 0) {
+        eget_shdr(shoff, arrays_i);
+        earr_off = esec_off;
+        earr_type = (int)esec_type;
     }
     if (nsym_e > 16384)
         return fail("シンボルが多すぎます");
@@ -478,7 +525,7 @@ static int read_object_elf(int obj) {
             if (sym_firm[s])
                 return fail("変数の本定義が二つあります");
             sym_firm[s] = 1;
-            if (nedata >= 1024)
+            if (nedata >= 256)
                 return fail("変数が多すぎます");
             edata_off[nedata] = (int)value;
             edata_sym[nedata] = s;
@@ -497,6 +544,12 @@ static int read_object_elf(int obj) {
                 sym_size[s] = (int)size;
                 sym_off[s] = (int)arr_area;
                 arr_area += size;
+            }
+            if (earr_type == 1) {
+                /* 中身のある節 (v40): この配列の分を
+                 * 初期値として取り込む */
+                if (!adopt_ainit(s, earr_off + value, size))
+                    return 0;
             }
         }
     }
@@ -724,6 +777,32 @@ static int read_object(int obj, char *path) {
                 sym_size[s] = size;
                 sym_off[s] = (int)arr_area;
                 arr_area += size;
+            }
+        } else if (ds_streq(tok_buf, "ainit")) {
+            /* 配列の初期値 (v40)。直前の arr で登録された
+             * 配列に、バイト列を結び付ける */
+            read_tok();
+            int s = new_sym(tok_buf);
+            if (s < 0)
+                return 0;
+            long n = read_num();
+            if (!set_kind(s, 3))
+                return 0;
+            if (sym_ainit_len[s] >= 0)
+                return fail("配列の初期値が二つあります");
+            int astart = ainit_used;
+            if (!read_hex_bytes(ainit_buf, &ainit_used, MAX_AINIT, n))
+                return 0;
+            /* 末尾の 0 バイトは実体に入れない (一括版の
+             * arr_init_end と同じ約束。全部 0 なら
+             * 初期値なしと同じ) */
+            long tn = n;
+            while (tn > 0 && ainit_buf[astart + tn - 1] == 0)
+                tn--;
+            ainit_used = astart + (int)tn;
+            if (tn > 0) {
+                sym_ainit_off[s] = astart;
+                sym_ainit_len[s] = (int)tn;
             }
         } else if (ds_streq(tok_buf, "init")) {
             read_tok();
@@ -993,6 +1072,16 @@ static void write_elf(void) {
     for (int s = 0; s < nsym; s++)
         if (sym_kind[s] == 2 && sym_hasinit[s])
             has_inits = 1;
+    /* 配列の初期値が実体として届く末尾 (v40。
+     * iwac 一括版の arr_init_end と同じ考え方) */
+    long ainit_span = 0;
+    for (int s = 0; s < nsym; s++) {
+        if (sym_kind[s] == 3 && sym_ainit_len[s] > 0) {
+            long e = (long)sym_off[s] + sym_ainit_len[s];
+            if (e > ainit_span)
+                ainit_span = e;
+        }
+    }
     long code_base = CODE_BASE;
     long data_base = DATA_BASE;
     long data_off = (4096L + out_len + 4095) & ~4095L;
@@ -1022,9 +1111,10 @@ static void write_elf(void) {
     out16(0);
     out16(0);
     out_phdr(5, 4096, code_base, out_len, out_len, 0x1000);
-    out_phdr(6, data_off, data_base, str_total,
+    out_phdr(6, data_off, data_base, str_total + ainit_span,
              str_total + arr_area, 0x1000);
-    out_phdr(6, data_off + str_total, data_base + str_total + arr_area,
+    out_phdr(6, data_off + str_total + ainit_span,
+             data_base + str_total + arr_area,
              has_inits ? gbl_bytes : 0, gbl_bytes, 1);
     for (int i = 232; i < 4096; i++)
         out_byte(0);
@@ -1033,6 +1123,30 @@ static void write_elf(void) {
         out_byte(0);
     if (str_total > 0)
         write(1, str_pool, str_total);
+    if (ainit_span > 0) {
+        /* 配列の初期値: 始まる位置まで 0 を埋め、
+         * バイト列を置く、を並び順に繰り返す */
+        long pos = 0;
+        for (;;) {
+            int best = -1;
+            for (int s = 0; s < nsym; s++) {
+                if (sym_kind[s] != 3 || sym_ainit_len[s] <= 0)
+                    continue;
+                if (sym_off[s] >= pos &&
+                    (best < 0 || sym_off[s] < sym_off[best]))
+                    best = s;
+            }
+            if (best < 0)
+                break;
+            for (; pos < sym_off[best]; pos++)
+                out_byte(0);
+            write(1, ainit_buf + sym_ainit_off[best],
+                  sym_ainit_len[best]);
+            pos = (long)sym_off[best] + sym_ainit_len[best];
+        }
+        for (; pos < ainit_span; pos++)
+            out_byte(0);
+    }
     if (has_inits) {
         for (int slot = 0; slot < var_slots; slot++) {
             long v = 0;
