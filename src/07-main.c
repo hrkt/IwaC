@@ -99,8 +99,19 @@ int main(int argc, char **argv) {
             print_str(2, "\n");
             return 1;
         }
-        if (loaded == 1)
+        if (loaded == 1) {
             src = src_buf;
+        } else {
+            /* 引数そのものがプログラム: src_buf へ移して
+             * から読む (行継続の処理を揃える、v41) */
+            if (load_text(argv[argi]) < 0) {
+                print_str(2, "iwac: ");
+                print_str(2, errmsg);
+                print_str(2, "\n");
+                return 1;
+            }
+            src = src_buf;
+        }
     }
 
     /* 前処理: #define を展開してから parse に渡す (v13) */

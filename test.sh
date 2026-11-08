@@ -1265,6 +1265,41 @@ check_error 'int a[2] = { 1, 2, 3 }; a[0]' "v40: 初期化子が多すぎる"
 check_error 'int f() { int a[2] = { 1, 2 }; return a[0]; } f()' "v40: 関数の中の配列初期化"
 check_error 'char s[3] = "toolong"; s[0]' "v40: 文字列が配列より長い"
 
+# --- v41: 行継続 (スプライス、doc/splice.md) ---
+# 行末のバックスラッシュ+改行が入力層で消える。
+# 値で確かめる (文字列・コメント・#define・数値)
+cat > "$TMP/v41a.c" <<'V41TEST'
+#define V 12\
+3
+char *s = "abc\
+def";
+i = 0; while (s[i]) i = i + 1;
+if (i == 6) putc(65);
+x = 1; // comment \
+ x = 99;
+if (x == 1) putc(66);
+if (V == 123) putc(67);
+y = 4\
+2;
+if (y == 42) putc(68);
+V41TEST
+"$IWAC" "$TMP/v41a.c" > "$TMP/v41a.bin"
+check_tail "$TMP/v41a.bin" 'ABCD' "v41: 行継続が文字列・コメント・#define・数値で効く"
+# 癖4の再現: 代入文の行またぎ (バックスラッシュつき)
+cat > "$TMP/v41b.c" <<'V41TEST'
+int a[8];
+int b[8];
+int main() { int i; i = 0; b[1] = 7;
+    while (i < 3) { a[i * 2 + 1] \
+ = b[i]; i = i + 1; } return a[1]; }
+V41TEST
+"$IWAC" --kosaba "$TMP/v41b.c" > "$TMP/v41b.elf" || fail "v41: 行またぎの代入がコンパイルできない"
+echo "ok: v41: 代入文の行またぎ (バックスラッシュつき) が通る"
+# バックスラッシュ無しの行またぎは引き続きエラー
+check_error 'int a[8]; int b[8];
+int main() { int i; i = 0; a[1]
+ = b[0]; return a[1]; }' "v41: バックスラッシュ無しの行またぎ"
+
 
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る

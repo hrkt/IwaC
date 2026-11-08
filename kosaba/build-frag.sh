@@ -82,8 +82,8 @@ apply 03-gen.c '[8192]' '[2048]' 3
 apply 03-gen.c 'obj_nreloc < 8192' 'obj_nreloc < 2048' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)、表示 (2か所)
 apply 05-input.c 'src_buf[393216]' 'src_buf[131072]' 1
-apply 05-input.c '393215' '131071' 3
-apply 05-input.c '約384KBまで' '約128KBまで' 2
+apply 05-input.c '393215' '131071' 4
+apply 05-input.c '約384KBまで' '約128KBまで' 3
 # 06-preproc.c: 展開バッファと上限のガード
 apply 06-preproc.c 'exp_buf[393216]' 'exp_buf[131072]' 1
 apply 06-preproc.c 'exp_len >= 393215' 'exp_len >= 131071' 1

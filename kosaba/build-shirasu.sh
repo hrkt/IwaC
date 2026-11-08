@@ -93,8 +93,8 @@ apply 03-gen.c 'i < 49152' 'i < 4096' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)。
 # エラー表示の数字も合わせる (2か所)
 apply 05-input.c 'src_buf[393216]' 'src_buf[32768]' 1
-apply 05-input.c '393215' '32767' 3
-apply 05-input.c '約384KBまで' '約32KBまで' 2
+apply 05-input.c '393215' '32767' 4
+apply 05-input.c '約384KBまで' '約32KBまで' 3
 # 06-preproc.c: 展開バッファと上限のガード
 apply 06-preproc.c 'exp_buf[393216]' 'exp_buf[32768]' 1
 apply 06-preproc.c 'exp_len >= 393215' 'exp_len >= 32767' 1
