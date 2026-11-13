@@ -480,6 +480,10 @@ typedef が直接乗り、構造体が C の移植の
    nori の .iwo 読み口と iwac の --object
    の撤去、mini_nori の引退。決定の記録は
    doc/iwo-retirement.md)
+9. **switch**（済み、v43、2026-11-13、
+   branch `v43`: C どおりの振り分け文。
+   doc/missing-features.md の実装予定の
+   第一候補。設計は doc/switch.md）
 K210 実機の 1MB 確認は順序の外に置き、次の
 実機セッションで一緒に確認する（関門はデータ
 領域よりファイルの置き場かもしれない）。

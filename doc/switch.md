@@ -100,3 +100,36 @@ switch ( 式 ) { 本体 }
   switch の外の case、定数でない case ラベル
 - 振る舞いの一致は check_tail で確認する。
   自己ホストの固定点は従来の節が担保する
+
+## 実装の記録 (2026-11-13、branch `v43`)
+
+設計どおりに実装した。置き場と要点:
+
+- parse (src/02-parse.c の parse_stmt に switch
+  の分岐): 本体 { } の中をラベルで区切りながら
+  parse_stmt で文を読む。eval_const を使うため
+  先行宣言を足し、decls.c の宣言位置も合わせた
+  (並びの約束)。break の可否は parse_loop_depth
+  に parse_switch_depth を加えて判定する
+- 文の振り分け (src/02b-decl.c): キーワードに
+  switch / case / default を追加
+- gen (src/03-gen.c の gen_switch): 制御式の値を
+  スタックへ退避し、case ごとに「値を戻して
+  定数を引いて 0 か」を emit_beq_t1z で見る。
+  飛び先は patch_next で繋ぐ。break の解決には
+  制御構造の種別スタック (ctrl_is_switch) を
+  新設し、ループ側にも push / pop を足した
+- 定数の正規形: 制御式の型 (幅と符号) に合わせた
+  切り詰めと拡張をしてから比べる。uint32 の
+  制御式に case -1 が一致する (検証済み)
+- stmt_needs_stack と type_node に NODE_SWITCH
+  の歩き方を追加
+
+検証: スクラッチ 19 件 (ベア QEMU: 基本・
+fallthrough・default の位置・continue / break
+の優先・入れ子・幅つき型・エラー系) と、case 群
+が 4KB を超える場合の分岐伸長、ELF オブジェクト
+/ nori リンク / Asari の一致を確認。test.sh にも
+v43 節を入れた。digest は len=206411
+hash=151f23caaaaa7b14、静的データ 3,748,860
+バイト、命令数 46,089 (上限 49,152)。

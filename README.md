@@ -17,8 +17,15 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v42（.iwo の引退）を branch `v42` で追加
+## 現在地: v43（switch）を branch `v43` で追加
 
+C どおりの switch 文を足した
+（doc/missing-features.md の実装予定の
+第一候補）。本体は { } 必須、case ラベルは
+定数式まで、fallthrough あり。設計は
+doc/switch.md。
+
+v42（.iwo の引退）は main にマージ済み:
 オブジェクト形式を ELF に一本化した
 （言語の変更はなし）。`--object` を廃止し、
 nori は ELF だけを読み、Asari の出力も

@@ -1940,10 +1940,38 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   利用者を先に移してから本体を撤去する、という順序が安全でした。</p></div>
 </section>
 
+<!-- ================= v43 ================= -->
+<section class="phase" id="v43">
+  <div class="head"><span class="badge b-v4">v43</span><h2>switch — 値で振り分ける文</h2></div>
+  <p class="goal-line">目標：<b>C どおりの switch 文を足す。</b></p>
+  <p>値は1つ、行き先はたくさん、という振り分けは if の連なりでも
+  書けますが読みにくく、デコーダやインタプリタでは頻出します。
+  iwac に無かった基本機能の筆頭（<code>doc/missing-features.md</code> の
+  実装予定）として追加しました。意味は C どおりで、一致した
+  case から下へ落ちていく fallthrough もそのままです。</p>
+  <p>中身の工夫は2つ。parse では本体を case / default のラベルで
+  区切りながら読み、ラベルの定数はコンパイル時に確定させて
+  重複を止めます。gen では制御式の値を退避してから case と
+  1つずつ比べ、case 群を順番に並べるので fallthrough は
+  「何もしない」ことで自然に起きます。break は「一番内側の
+  ループか switch」を抜けるよう、制御構造の種別を積む
+  スタックを新設しました（continue は switch を跨いで
+  ループに効きます）。</p>
+  <div>
+    <span class="chip">C どおりの意味</span><span class="chip">定数は正規形で比較</span><span class="chip">break は内側優先</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  新しい文を足すとき、仕事の半分は「その文そのもの」ではなく
+  「既存の仕組みとの接点」でした。分岐の伸長（届かない分岐を
+  伸ばす仕組み）に素直に乗せる、スタック要否の解析に新しい
+  ノードを教える、宣言の並び順の約束を守る。その接点を
+  丁寧に扱えば、本体は小さく収まります。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-08（v42 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-13（v43 時点）</p>
 </footer>
 
 </div>

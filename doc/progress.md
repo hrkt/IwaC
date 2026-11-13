@@ -1,3 +1,25 @@
+## 2026-11-13: v43 switch
+
+doc/missing-features.md の実装予定の第一候補。
+C どおりの switch を足した (設計は
+doc/switch.md)。parse は parse_stmt に switch の
+分岐を足し、本体 { } の中を case / default の
+ラベルで区切りながら文を読む形 (NODE_SWITCH=57、
+NODE_CASE=58)。ラベルは eval_const で確定し、
+重複チェックつき。gen は制御式の値をスタックへ
+退避し、case ごとに「引いて 0 か」を
+emit_beq_t1z で見る直線比較で、case 群は順に
+並べるので fallthrough は自然に起きる。break の
+解決には制御構造の種別スタック (ループか
+switch か) を新設し、continue は従来どおり
+ループだけを見る。定数は制御式の型の正規形に
+直して比べる (uint32 の制御式に case -1 が
+一致する)。検証はスクラッチ 19 件 (ベア QEMU)
+と、長い case 群での分岐伸長 (4KB 超)、
+ELF / Asari 経路の一致。digest は len=206411
+hash=151f23caaaaa7b14、静的データ 3,748,860
+バイト、命令数 46,089 (上限 49,152)。
+
 ## 2026-11-08: v42 .iwo の引退
 
 ユーザーの決定で、オブジェクト形式を ELF に

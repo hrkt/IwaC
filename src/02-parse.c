@@ -129,6 +129,15 @@ static int NODE_MELEM = 56;  /* 配列メンバの要素 (v37)。
                              * node_val = メンバ番号、
                              * node_lhs = 基底 (住所)、
                              * node_rhs = 添字の式 */
+static int NODE_SWITCH = 57; /* switch 文 (v43)。
+                             * node_lhs = 制御式、
+                             * node_rhs = case 群の連鎖
+                             * (NODE_CASE を node_next で繋ぐ) */
+static int NODE_CASE = 58;   /* switch の case 群 (v43)。
+                             * node_val = case の定数値、
+                             * node_lhs = その case の文の並び、
+                             * node_rhs = 1 なら default
+                             * (node_val は使わない) */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -1771,10 +1780,15 @@ static int parse_struct_def(void);  /* 構造体の定義 (同上、v37) */
 static int parse_decl_stmt(void);   /* 宣言文 (同上、v37) */
 static int parse_stmt_list(int in_brace);
 static int parse_body(void);  /* 制御文の本体 (v25) */
+static int eval_const(int node, long *out);  /* 定数式の評価
+                             * (本体は宣言の節。switch の
+                             * case ラベルで使うため、v43 で
+                             * 先行宣言を追加) */
 
 /* parse の状態 (v20): break / continue が許される深さと、
  * return が許される場所を parse の時点で確かめるために持つ */
 static int parse_loop_depth;  /* while / for の本体の中なら 1 以上 */
+static int parse_switch_depth; /* switch の本体の中なら 1 以上 (v43) */
 static int parse_in_func;     /* 関数の本体の中なら 1 */
 
 /* 今の位置の先 (空白の後ろ) に '*' があるか (v25)。
@@ -2375,9 +2389,147 @@ static int parse_stmt(void) {
         return new_node(NODE_FOR, init, cond, body);
     }
 
+    if (ident_is("switch")) {
+        /* switch ( 制御式 ) { case 群... } (v43、設計は
+         * doc/switch.md)。本体は { } 必須。case / default の
+         * ラベルで区切られた文の並びを NODE_CASE の連鎖にし、
+         * NODE_SWITCH の rhs に置く。ラベルの定数は
+         * eval_const で確定し、重複はエラーにする */
+        if (!expect_char('(', "switch の後には ( が必要です"))
+            return -1;
+        int cond = parse_expr();
+        if (cond < 0)
+            return -1;
+        if (!expect_char(')', "switch の制御式の後には ) が必要です"))
+            return -1;
+        skip_spaces();
+        if (*cur != '{') {
+            errmsg = "switch の本体は { } で書きます";
+            return -1;
+        }
+        cur++;
+        parse_switch_depth++;
+        int groups = -1;
+        int gtail = -1;
+        int group = -1;   /* 今の NODE_CASE */
+        int stail = -1;   /* 今の case の文の末尾 */
+        int seen_default = 0;
+        int failed = 0;
+        for (;;) {
+            skip_spaces();
+            if (*cur == '}') {
+                cur++;
+                break;
+            }
+            if (*cur == '\0') {
+                errmsg = "switch の本体が } で閉じていません";
+                failed = 1;
+                break;
+            }
+            /* ラベルかどうかを先読みする */
+            char *save = cur;
+            int is_label = 0;
+            int is_default = 0;
+            int label_val = 0;
+            if (is_ident_start(*cur) && parse_ident()) {
+                if (ident_is("case")) {
+                    int e = parse_expr();
+                    if (e < 0) {
+                        failed = 1;
+                        break;
+                    }
+                    long v;
+                    if (eval_const(e, &v) != 1) {
+                        errmsg = "case の後には定数が必要です";
+                        failed = 1;
+                        break;
+                    }
+                    if (v > 2147483647L || v < -2147483647L - 1) {
+                        errmsg = "case の値が大きすぎます";
+                        failed = 1;
+                        break;
+                    }
+                    label_val = (int)v;
+                    is_label = 1;
+                } else if (ident_is("default")) {
+                    is_default = 1;
+                    is_label = 1;
+                }
+            }
+            if (is_label) {
+                if (!expect_char(':',
+                                 "case / default の後には : が必要です")) {
+                    failed = 1;
+                    break;
+                }
+                if (is_default) {
+                    if (seen_default) {
+                        errmsg = "default は1つだけです";
+                        failed = 1;
+                        break;
+                    }
+                    seen_default = 1;
+                } else {
+                    int dup = 0;
+                    for (int g = groups; g != -1; g = node_next[g]) {
+                        if (node_rhs[g] == 0 &&
+                            node_val[g] == label_val)
+                            dup = 1;
+                    }
+                    if (dup) {
+                        errmsg = "case の値が重なっています";
+                        failed = 1;
+                        break;
+                    }
+                }
+                int gnode = new_node(NODE_CASE, label_val, -1,
+                                     is_default);
+                if (gnode < 0) {
+                    failed = 1;
+                    break;
+                }
+                if (groups < 0)
+                    groups = gnode;
+                else
+                    node_next[gtail] = gnode;
+                gtail = gnode;
+                group = gnode;
+                stail = -1;
+                continue;
+            }
+            cur = save;  /* ラベルではなかった。文として読む */
+            if (group < 0) {
+                errmsg = "switch の本体は case か default から書きます";
+                failed = 1;
+                break;
+            }
+            int s = parse_stmt();
+            if (s < 0) {
+                failed = 1;
+                break;
+            }
+            if (node_lhs[group] < 0)
+                node_lhs[group] = s;
+            else
+                node_next[stail] = s;
+            stail = s;
+            while (node_next[stail] >= 0)
+                stail = node_next[stail];
+        }
+        parse_switch_depth--;
+        if (failed)
+            return -1;
+        return new_node(NODE_SWITCH, 0, cond, groups);
+    }
+
+    if (ident_is("case") || ident_is("default")) {
+        errmsg = "case と default は switch の中でだけ使えます";
+        return -1;
+    }
+
     if (ident_is("break")) {
-        if (parse_loop_depth == 0) {
-            errmsg = "break はループの中でだけ使えます";
+        if (parse_loop_depth == 0 && parse_switch_depth == 0) {
+            errmsg = "break はループか switch の中でだけ使えます";
             return -1;
         }
         if (!expect_char(';', "break の後には ; が必要です"))

@@ -143,7 +143,8 @@ static int parse_stmt_list(int in_brace) {
             int is_keyword = ident_is("while") || ident_is("putc") ||
                              ident_is("if") || ident_is("for") ||
                              ident_is("break") || ident_is("continue") ||
-                             ident_is("return");
+                             ident_is("return") || ident_is("switch") ||
+                             ident_is("case") || ident_is("default");
             int is_type = is_type_word() || ident_is("const") || ident_is("static") ||
                           is_typedef_name() || ident_is("struct");
             if (is_type) {

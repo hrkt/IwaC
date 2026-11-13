@@ -1097,6 +1097,28 @@ printf 'iwacobj 1\ntarget kosaba\nend\n' > "$TMP/v42fake.iwo"
 "$TMP/nori" "$TMP/v42fake.iwo" >/dev/null 2>&1 && fail "v42: nori が .iwo を受けてしまった"
 echo "ok: v42: nori は ELF オブジェクトだけを読む"
 
+# --- v43: switch (doc/switch.md) ---
+# 振る舞いはベア QEMU の出力で確かめる
+"$IWAC" 'x=2; switch (x) { case 1: putc(65); break; case 2: putc(66); break; default: putc(67); }' > "$TMP/v43a.bin"
+check_tail "$TMP/v43a.bin" 'B' "v43: switch の基本の振り分け"
+"$IWAC" 'x=1; switch (x) { case 1: putc(65); case 2: putc(66); case 3: putc(67); }' > "$TMP/v43b.bin"
+check_tail "$TMP/v43b.bin" 'ABC' "v43: fallthrough"
+"$IWAC" 'x=9; switch (x) { case 1: putc(65); default: putc(68); case 2: putc(66); }' > "$TMP/v43c.bin"
+check_tail "$TMP/v43c.bin" 'DB' "v43: default が真ん中 (後ろへ落ちる)"
+"$IWAC" 'i=0; while (i < 5) { switch (i) { case 1: i = i + 1; continue; case 3: putc(35); break; default: putc(48 + i); } putc(42); i = i + 1; }' > "$TMP/v43d.bin"
+check_tail "$TMP/v43d.bin" '0*2*#*4*' "v43: ループ中の switch (continue はループへ、break は switch を抜ける)"
+"$IWAC" 'x=1; switch (x) { case 1: j=0; while (j < 3) { if (j == 1) break; putc(120); j = j + 1; } putc(89); case 2: putc(90); }' > "$TMP/v43e.bin"
+check_tail "$TMP/v43e.bin" 'xYZ' "v43: case の中のループの break はループを抜ける"
+"$IWAC" 'x=1; y=2; switch (x) { case 1: switch (y) { case 2: putc(73); break; default: putc(63); } putc(79); break; default: putc(63); }' > "$TMP/v43f.bin"
+check_tail "$TMP/v43f.bin" 'IO' "v43: switch の入れ子"
+"$IWAC" 'uint32 w; w = 0xFFFFFFFF; switch (w) { case -1: putc(85); break; default: putc(63); }' > "$TMP/v43g.bin"
+check_tail "$TMP/v43g.bin" 'U' "v43: 幅つき型の制御式 (uint32 と case -1)"
+check_error 'x=1; switch (x) { case 1: putc(65); case 1: putc(66); }' "v43: case の重複"
+check_error 'x=1; switch (x) { default: putc(65); default: putc(66); }' "v43: default の重複"
+check_error 'x=1; switch (x) { putc(65); case 1: putc(66); }' "v43: ラベルの前の文"
+check_error 'x=1; y=2; switch (x) { case y: putc(65); }' "v43: 定数でない case"
+check_error 'x=1; switch (x) case 1: putc(65);' "v43: 本体の { } が無い"
+
 
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る

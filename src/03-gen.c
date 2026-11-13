@@ -669,6 +669,11 @@ static void type_node(int node) {
         type_list(node_rhs[node]);
     } else if (k == NODE_FORSTEP) {
         type_node(node_val[node]);
+    } else if (k == NODE_SWITCH) {
+        /* switch (v43): 制御式と、各 case 群の文の並び */
+        type_node(node_lhs[node]);
+        for (int g = node_rhs[node]; g != -1; g = node_next[g])
+            type_list(node_lhs[g]);
     } else if (k == NODE_COND) {
         type_node(node_lhs[node]);
         type_node(node_val[node]);
@@ -1329,6 +1334,12 @@ static int gen_elem_addr(int node) {
 static int loop_depth;
 static int loop_break_head[32];
 static int loop_cont_head[32];
+static int sw_depth;            /* switch の入れ子の深さ (v43) */
+static int sw_break_head[32];   /* switch の break の飛び先リスト */
+static int ctrl_depth;          /* 制御構造 (ループと switch) の
+                                 * 入れ子の深さ。break が最も内側の
+                                 * どちらを抜けるかを決める (v43) */
+static char ctrl_is_switch[65]; /* 深さごとの種別: 1 なら switch */
 static int patch_next[49152];
 
 /* 関数の return の飛び先 (出口は関数の生成の最後まで
@@ -1349,6 +1360,9 @@ static void apply_patches(int head, int target) {
     for (int i = head; i != -1; i = patch_next[i])
         asm_imm[i] = target;
 }
+
+static int gen_switch(int node);  /* switch の生成 (本体は
+                                   * gen_stmt の後ろ、v43) */
 
 static int gen_stmt(int node) {
     int kind = node_kind[node];
@@ -1498,6 +1512,8 @@ static int gen_stmt(int node) {
         loop_depth++;
         loop_break_head[loop_depth] = -1;
         loop_cont_head[loop_depth] = -1;
+        ctrl_depth++;
+        ctrl_is_switch[ctrl_depth] = 0;
         int body = node_rhs[node];
         for (int s = body; s != -1; s = node_next[s]) {
             if (!gen_stmt(s))
@@ -1513,6 +1529,7 @@ static int gen_stmt(int node) {
          * 書き直す */
         asm_imm[beq_index] = nasm;
         apply_patches(loop_break_head[loop_depth], nasm);
+        ctrl_depth--;
         loop_depth--;
         return 1;
     }
@@ -1543,6 +1560,8 @@ static int gen_stmt(int node) {
         loop_depth++;
         loop_break_head[loop_depth] = -1;
         loop_cont_head[loop_depth] = -1;
+        ctrl_depth++;
+        ctrl_is_switch[ctrl_depth] = 0;
         int cont_done = 0;
         int body = node_rhs[node];
         for (int s = body; s != -1; s = node_next[s]) {
@@ -1562,13 +1581,22 @@ static int gen_stmt(int node) {
         asm_push(OP_JAL, 0, 0, 0, l_cond);
         asm_imm[beq_index] = nasm;
         apply_patches(loop_break_head[loop_depth], nasm);
+        ctrl_depth--;
         loop_depth--;
         return 1;
     }
+    if (kind == NODE_SWITCH) {
+        return gen_switch(node);
+    }
     if (kind == NODE_BREAK) {
-        /* 脱出: 飛び先はループの生成の最後に書き直す */
+        /* 脱出: 最も内側の制御構造 (ループか switch) を
+         * 抜ける。飛び先はその構造の生成の最後に書き直す */
+        if (ctrl_depth > 0 && ctrl_is_switch[ctrl_depth]) {
+            emit_patch_jump(&sw_break_head[sw_depth]);
+            return 1;
+        }
         if (loop_depth == 0) {
-            errmsg = "break はループの中でだけ使えます";
+            errmsg = "break はループか switch の中でだけ使えます";
             return 0;
         }
         emit_patch_jump(&loop_break_head[loop_depth]);
@@ -1601,6 +1629,103 @@ static int gen_stmt(int node) {
     }
     errmsg = "内部エラー: 知らない種類の文です";
     return 0;
+}
+
+/* switch の生成 (v43、設計は doc/switch.md):
+ *   制御式を計算 (値は t1)
+ *   制御式の値をスタックへ退避 (比べる並びが t1 / t2 を
+ *     使うため。二項演算の退避と同じ形)
+ *   case ごとに: 値を t1 に戻し、定数を t2 に作って引き、
+ *     0 なら (emit_beq_t1z) その case 群へ飛ぶ
+ *   jal で default 群 (あれば) か末尾へ (外れたとき)
+ *   退避を戻す
+ *   case 群を順に並べる (fallthrough は自然に起きる)
+ * 比べる分岐には条件分岐の伸長 (v27) と同じ
+ * emit_beq_t1z を使う。飛び先は patch_next で繋いでおき、
+ * case 群を並べるときに順に確定させる。
+ * 定数は制御式の型の正規形に直してから比べる: 幅に
+ * 切り詰め、符号なしは 0 埋め、符号つきは符号拡張
+ * (v35 の正規形の約束に合わせる)。定数の作り方は
+ * gen_load_u32 (32ビットのパターンを 0 埋めで広げる)
+ * に、負なら slli / srai 32 の符号拡張を足す形で、
+ * 式の中の数リテラルと同じ流儀に揃える */
+static int gen_switch(int node) {
+    if (!gen_expr(node_lhs[node]))
+        return 0;
+    int et = node_etype[node_lhs[node]];
+    int esz = et & 15;
+    int euns = (et & 16) != 0;
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+    asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+    int head = -1;
+    int tail = -1;
+    for (int g = node_rhs[node]; g != -1; g = node_next[g]) {
+        if (node_rhs[g] != 0)
+            continue;  /* default は比べない */
+        int v = node_val[g];
+        long cv = v;
+        if (esz == 1) {
+            cv = v & 0xFF;
+            if (!euns && cv >= 128)
+                cv = cv - 256;
+        } else if (esz == 2) {
+            cv = v & 0xFFFF;
+            if (!euns && cv >= 32768)
+                cv = cv - 65536;
+        } else if (esz == 4 && euns) {
+            cv = v & 0xFFFFFFFFL;
+        }
+        asm_push(OP_LD, REG_T1, REG_SP, 0, 0);
+        gen_load_u32(REG_T2, (int)cv);
+        if (cv < 0) {
+            /* 32ビットのパターンを符号拡張する */
+            asm_push(OP_SLLI, REG_T2, REG_T2, 0, 32);
+            asm_push(OP_SRAI, REG_T2, REG_T2, 0, 32);
+        }
+        asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
+        int s = emit_beq_t1z();
+        patch_next[s] = -1;
+        if (head < 0)
+            head = s;
+        else
+            patch_next[tail] = s;
+        tail = s;
+    }
+    /* どれにも合わなければ default 群 (あれば) か末尾へ */
+    int miss = nasm;
+    asm_push(OP_JAL, 0, 0, 0, 0);
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+    if (sw_depth >= 32) {
+        errmsg = "switch の入れ子が深すぎます";
+        return 0;
+    }
+    sw_depth++;
+    sw_break_head[sw_depth] = -1;
+    ctrl_depth++;
+    ctrl_is_switch[ctrl_depth] = 1;
+    int site = head;
+    int def_target = -1;
+    for (int g = node_rhs[node]; g != -1; g = node_next[g]) {
+        if (node_rhs[g] == 0) {
+            /* この case への分岐の飛び先をここに確定 */
+            asm_imm[site] = nasm;
+            site = patch_next[site];
+        } else {
+            def_target = nasm;  /* default 群の頭を控える */
+        }
+        for (int s = node_lhs[g]; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+    }
+    if (def_target >= 0)
+        asm_imm[miss] = def_target;
+    else
+        asm_imm[miss] = nasm;
+    apply_patches(sw_break_head[sw_depth], nasm);
+    sw_depth--;
+    ctrl_depth--;
+    return 1;
 }
 
 /* スタックの天井の住所 (第2層が2パス間で確定させる)。
@@ -1760,6 +1885,19 @@ static int stmt_needs_stack(int node) {
                list_needs_stack(node_rhs[node]);
     if (k == NODE_FORSTEP)
         return stmt_needs_stack(node_val[node]);
+    if (k == NODE_SWITCH) {
+        /* switch (v43): 制御式と各 case 群の文を見る。
+         * 比べる並びは制御式の値をスタックへ退避するので、
+         * default でない case が1つでもあれば要る */
+        int need = expr_needs_stack(node_lhs[node]);
+        for (int g = node_rhs[node]; g != -1; g = node_next[g]) {
+            if (node_rhs[g] == 0)
+                need = 1;
+            if (list_needs_stack(node_lhs[g]))
+                need = 1;
+        }
+        return need;
+    }
     if (k == NODE_STORE)
         return expr_needs_stack(node_rhs[node]);
     if (k == NODE_INDEX_STORE)
@@ -1798,6 +1936,8 @@ static int gen_all(void) {
     obj_nabs = 0;
     obj_flush_site = -1;
     loop_depth = 0;    /* 2パス生成のたびに数え直す (v20) */
+    sw_depth = 0;      /* switch の深さも同じく数え直す (v43) */
+    ctrl_depth = 0;
     branch_ord = 0;    /* 条件分岐の通し番号も数え直す (v27) */
     gen_in_func = 0;
     if (!target_kosaba) {
