@@ -1119,6 +1119,119 @@ check_error 'x=1; switch (x) { putc(65); case 1: putc(66); }' "v43: ラベルの
 check_error 'x=1; y=2; switch (x) { case y: putc(65); }' "v43: 定数でない case"
 check_error 'x=1; switch (x) case 1: putc(65);' "v43: 本体の { } が無い"
 
+# --- v44: 関数ポインタ (doc/funcptr.md) ---
+# 振る舞いはベア QEMU の出力で確かめる
+cat > "$TMP/v44mini.c" <<'V44MINI'
+typedef int (*op)(int);
+int st;
+int op_inc(int pc) { st = st + 1; return pc + 1; }
+int op_dbl(int pc) { st = st * 2; return pc + 1; }
+op table[3] = { op_inc, op_dbl, 0 };
+int main() {
+    int prog[4];
+    int pc;
+    prog[0] = 0; prog[1] = 0; prog[2] = 1; prog[3] = 9;
+    st = 1; pc = 0;
+    while (prog[pc] != 9) {
+        op h = table[prog[pc]];
+        pc = h(pc);
+    }
+    putc(st == 6 ? 'Y' : 'N');
+    return 0;
+}
+V44MINI
+"$IWAC" "$TMP/v44mini.c" > "$TMP/v44a.bin"
+check_tail "$TMP/v44a.bin" 'Y' "v44: ハンドラ表で回す小さなインタプリタ"
+"$IWAC" 'int inc(int x) { return x + 1; } int dbl(int x) { return x * 2; } int (*fp)(int) = inc; int (*tbl[2])(int) = { inc, dbl }; putc(tbl[1](fp(10)) == 22 ? 89 : 78);' > "$TMP/v44b.bin"
+check_tail "$TMP/v44b.bin" 'Y' "v44: 直接宣言子 (変数と配列、初期化子つき)"
+"$IWAC" 'int inc(int x) { return x + 1; } typedef int (*op)(int); int apply(op f, int v) { return f(v); } putc(apply(inc, 41) == 42 ? 89 : 78);' > "$TMP/v44c.bin"
+check_tail "$TMP/v44c.bin" 'Y' "v44: コールバック (関数ポインタの引数)"
+cat > "$TMP/v44d.c" <<'V44D'
+typedef int (*op)(int);
+int inc(int x) { return x + 1; }
+op tbl[2];
+int main() {
+    tbl[0] = inc;
+    op h = tbl[0];
+    putc((*h)(1) == 2 && tbl[1] == 0 ? 'Y' : 'N');
+    return 0;
+}
+V44D
+"$IWAC" "$TMP/v44d.c" > "$TMP/v44d.bin"
+check_tail "$TMP/v44d.bin" 'Y' "v44: (*h)(x) の形と NULL チェック"
+cat > "$TMP/v44mem.c" <<'V44MEM'
+typedef int (*op)(int);
+int inc(int x) { return x + 1; }
+int dbl(int x) { return x * 2; }
+struct Dev { op f; op tbl[2]; int base; };
+int main() {
+    struct Dev d;
+    struct Dev *p;
+    p = &d;
+    d.f = dbl;
+    d.tbl[0] = inc;
+    d.tbl[1] = dbl;
+    d.base = 10;
+    putc(p->f(3) + d.tbl[0](1) + p->tbl[1](d.base) == 28 ? 'Y' : 'N');
+    return 0;
+}
+V44MEM
+"$IWAC" "$TMP/v44mem.c" > "$TMP/v44e.bin"
+check_tail "$TMP/v44e.bin" 'Y' "v44: 構造体のメンバの関数ポインタ"
+cat > "$TMP/v44rec.c" <<'V44REC'
+typedef int (*op)(int);
+int fact_step(int x);
+op cur = fact_step;
+int fact_step(int x) {
+    if (x <= 1) return 1;
+    return x * cur(x - 1);
+}
+op pick(int i) { return cur; }
+int main() {
+    op h = pick(0);
+    putc(h(5) == 120 ? 'Y' : 'N');
+    return 0;
+}
+V44REC
+"$IWAC" "$TMP/v44rec.c" > "$TMP/v44f.bin"
+check_tail "$TMP/v44f.bin" 'Y' "v44: 再帰するハンドラと、ハンドラを返す関数"
+check_error 'typedef int (*A)(int); typedef int (*B)(int, int); int f(int x) { return x; } A a = f; B b; b = a;' "v44: 署名の違う代入"
+check_error 'typedef int (*op)(int); int f(int x) { return x; } op h = f; h(1, 2);' "v44: 引数の数が違う間接呼び出し"
+check_error 'typedef int (*op)(int); int f(int x); op h = f;' "v44: 本体の無い関数の住所 (初期化子)"
+check_error 'typedef int (*op)(int); int g(int x, int y) { return x; } op tbl[1] = { g };' "v44: 署名の違う関数を表の初期化子に"
+check_error 'int x; x(1);' "v44: 関数ポインタでないものの呼び出し"
+check_error 'int f(int x) { return x; } int g = f;' "v44: 関数の住所を int の初期化子に"
+# オブジェクト経路: 初期化子つきの関数ポインタでも
+# リンク結果が一括ビルドと一致し、Asari のオブジェクトが
+# iwac と一致すること
+cat > "$TMP/v44obj.c" <<'V44OBJ'
+typedef int (*handler)(int);
+int op_inc(int x) { return x + 1; }
+int op_dbl(int x) { return x * 2; }
+handler cur = op_inc;
+handler table[3] = { op_inc, op_dbl, 0 };
+int main() {
+    handler h = op_dbl;
+    return h(10) + table[0](cur(1));
+}
+V44OBJ
+cat > "$TMP/v44rt.c" <<'V44RT'
+int flushed;
+void kosaba_flush() { flushed = 1; }
+V44RT
+printf 'void kosaba_flush();\n' > "$TMP/v44pre.c"
+"$IWAC" --kosaba "$TMP/v44pre.c" "$TMP/v44obj.c" "$TMP/v44rt.c" > "$TMP/v44direct.elf" || fail "v44: 一括ビルドに失敗"
+"$IWAC" --kosaba --elf "$TMP/v44pre.c" "$TMP/v44obj.c" > "$TMP/v44obj.eo" || fail "v44: オブジェクト出力に失敗"
+"$IWAC" --kosaba --elf "$TMP/v44pre.c" "$TMP/v44rt.c" > "$TMP/v44rt.eo" || fail "v44: rt のオブジェクト出力に失敗"
+"$TMP/nori" "$TMP/v44obj.eo" "$TMP/v44rt.eo" > "$TMP/v44link.elf" || fail "v44: nori でのリンクに失敗"
+cmp -s "$TMP/v44direct.elf" "$TMP/v44link.elf" || fail "v44: リンク結果が一括ビルドと違う"
+echo "ok: v44: 関数ポインタ (初期化子つき) のリンクが一括と一致"
+"$IWAC" --kosaba --asari "$TMP/v44pre.c" "$TMP/v44obj.c" "$TMP/v44rt.c" > "$TMP/v44.ias" || fail "v44: Asari 形式の出力に失敗"
+"$TMP/asari" "$TMP/v44.ias" > "$TMP/v44asari.eo" || fail "v44: Asari が失敗"
+"$IWAC" --kosaba --elf "$TMP/v44pre.c" "$TMP/v44obj.c" "$TMP/v44rt.c" > "$TMP/v44iwac.eo" || fail "v44: オブジェクト出力 (一括) に失敗"
+cmp -s "$TMP/v44iwac.eo" "$TMP/v44asari.eo" || fail "v44: Asari のオブジェクトが iwac と違う"
+echo "ok: v44: Asari のオブジェクトが iwac と一致 (関数ポインタ)"
+
 
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る

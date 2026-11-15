@@ -45,6 +45,8 @@ doc/iwo-retirement.md。本文中の「現行の .iwo」
   グローバルと配列の領域)、.iwac.strings
   (文字列の実体)、.symtab / .strtab /
   .shstrtab、再配置は .rela.text と .rela.data
+  (v44 で .rela.iwac.arrays を追加し、節は
+  12 個になった。下の v44 の節を参照)
 - 配置 (アドレスの決定) は今までどおり nori の
   仕事で、規則は現行と同一にする: 入口の接頭辞を
   先頭に、関数本体は登録順、データは
@@ -100,6 +102,20 @@ doc/iwo-retirement.md。本文中の「現行の .iwo」
 - `addrstr <位置> <文字列の位置>`: 組の作りは
   addr と同じで、HI20 の相手が .iwac.strings の
   セクションシンボル + addend になる
+- `addr <位置> func <名前>` (v44): 組の作りは
+  addr と同じで、相手が関数のシンボルになる
+  (関数ポインタの値 = 関数の住所を作る)
+- `fptr <名前> func <関数名>` (v44): .data への
+  再配置 R_RISCV_64。相手は関数のシンボル
+  (関数ポインタ変数の初期値)
+- `afref <配列名> <バイト位置> <関数名>` (v44):
+  新しい節 **.rela.iwac.arrays** への再配置
+  R_RISCV_64。相手は関数のシンボルで、位置は
+  .iwac.arrays の中でのバイト位置 (関数ポインタ
+  配列の初期化子の要素。節の中身には 0 が
+  置いてあり、リンク時に住所が書かれる)。
+  .rela.iwac.arrays は .rela.data の後ろ、
+  .symtab の前に置く (節番号 8)
 - `addabs <位置> <絶対アドレス>`: 絶対アドレスを
   値に持つ **SHN_ABS のローカルシンボル** を
   値ごとに1つ作り、HI20 / LO12_I の組で指す

@@ -177,7 +177,8 @@ static int ncall;
 
 /* 住所作りの注記 (来た順) */
 static int addr_site[8192];
-static int addr_kind[8192];    /* 1 = addrstr、2 = var、3 = arr */
+static int addr_kind[8192];    /* 1 = addrstr、2 = var、
+                                * 3 = arr、4 = func (v44) */
 static int addr_name[8192];    /* var / arr の名前 (pool へのずれ) */
 static long addr_val[8192];    /* addrstr のオフセット */
 static int naddr;
@@ -189,7 +190,8 @@ static int nabs;
 
 /* データ側のレコード (来た順)。
  * 種類: f = func、d = decl、v = var、c = varc、
- * a = arr、A = ainit (v40)、i = init、p = iptr */
+ * a = arr、A = ainit (v40)、i = init、p = iptr、
+ * F = fptr (v44、n1 は関数名の置き場) */
 static char rec_kind[8192];
 static int rec_name[8192];     /* name_pool へのずれ */
 static long rec_n1[8192];      /* func: 入口の命令番号、
@@ -202,6 +204,12 @@ static int nrec;
 /* undef (出す順序が最後なので分けて持つ) */
 static int undef_name[1024];
 static int nundef;
+
+/* 関数ポインタ配列の初期値の注記 (v44、afref) */
+static int af_arr[1024];       /* 配列名 (pool へのずれ) */
+static long af_off[1024];      /* 節の中でのバイト位置 */
+static int af_func[1024];      /* 関数名 (pool へのずれ) */
+static int naf;
 
 /* 文字列の実体と、名前の置き場 */
 static char str_bytes[16384];
@@ -410,7 +418,12 @@ static int read_input(char *path) {
                 return fail("addr 注記が多すぎます");
             addr_site[naddr] = (int)read_num();
             read_tok();
-            addr_kind[naddr] = ds_streq(tok_buf, "var") ? 2 : 3;
+            if (ds_streq(tok_buf, "var"))
+                addr_kind[naddr] = 2;
+            else if (ds_streq(tok_buf, "func"))
+                addr_kind[naddr] = 4;
+            else
+                addr_kind[naddr] = 3;
             read_tok();
             int off = put_name(tok_buf);
             if (off < 0)
@@ -481,6 +494,34 @@ static int read_input(char *path) {
             long off = read_num();
             if (!add_rec('p', nm, off, 0))
                 return 0;
+        } else if (ds_streq(tok_buf, "fptr")) {
+            /* 関数へのポインタの初期値 (v44) */
+            read_tok();
+            ds_strcpy(nm, tok_buf);
+            if (!expect_tok("func"))
+                return 0;
+            read_tok();
+            int off = put_name(tok_buf);
+            if (off < 0)
+                return fail("名前の置き場が足りません");
+            if (!add_rec('F', nm, off, 0))
+                return 0;
+        } else if (ds_streq(tok_buf, "afref")) {
+            /* 関数ポインタ配列の初期値の要素 (v44) */
+            if (naf >= 1024)
+                return fail("afref 注記が多すぎます");
+            read_tok();
+            int aoff = put_name(tok_buf);
+            if (aoff < 0)
+                return fail("名前の置き場が足りません");
+            af_arr[naf] = aoff;
+            af_off[naf] = read_num();
+            read_tok();
+            int foff = put_name(tok_buf);
+            if (foff < 0)
+                return fail("名前の置き場が足りません");
+            af_func[naf] = foff;
+            naf++;
         } else if (ds_streq(tok_buf, "undef")) {
             if (nundef >= MAX_UNDEF)
                 return fail("undef が多すぎます");
@@ -721,6 +762,14 @@ static int cnt_iptr(void) {
     return n;
 }
 
+static int cnt_fptr(void) {
+    int n = 0;
+    for (int r = 0; r < nrec; r++)
+        if (rec_kind[r] == 'F')
+            n++;
+    return n;
+}
+
 /* kosaba_flush が関数として届いているか */
 static int flush_in_recs(void) {
     for (int r = 0; r < nrec; r++)
@@ -843,6 +892,14 @@ static long ainit_end(void) {
         if (cand > best)
             best = cand;
     }
+    /* 関数参照の要素は像では 0 だが、リンクで住所が
+     * 入るので実体として数える (v44。本体の
+     * arr_init_end の数え方に合わせる) */
+    for (int i = 0; i < naf; i++) {
+        long cand = af_off[i] + 8;
+        if (cand > best)
+            best = cand;
+    }
     return best;
 }
 
@@ -866,9 +923,10 @@ static char *esec_name(int i) {
     if (i == 5) return ".iwac.arrays";
     if (i == 6) return ".rela.text";
     if (i == 7) return ".rela.data";
-    if (i == 8) return ".symtab";
-    if (i == 9) return ".strtab";
-    if (i == 10) return ".shstrtab";
+    if (i == 8) return ".rela.iwac.arrays";
+    if (i == 9) return ".symtab";
+    if (i == 10) return ".strtab";
+    if (i == 11) return ".shstrtab";
     return "";
 }
 
@@ -1015,6 +1073,7 @@ static long el_aend;
 static long el_data_off;
 static long el_rela_text_off;
 static long el_rela_data_off;
+static long el_rela_arrays_off;
 static long el_symtab_off;
 static long el_strtab_off;
 static long el_strtab_size;
@@ -1063,7 +1122,7 @@ static void elf_part1(void) {
         strtab_size += ds_strlen(esym_name(s2, nlocals,
                              has_entry, el_start)) + 1;
     long shstrtab_size = 0;
-    for (int i = 0; i < 11; i++)
+    for (int i = 0; i < 12; i++)
         shstrtab_size += ds_strlen(esec_name(i)) + 1;
     long text_off = 64;
     long strings_off = text_off + text_size;
@@ -1077,7 +1136,7 @@ static void elf_part1(void) {
     el_na = na;
     el_nlocals = nlocals;
     el_nsym = nlocals + nglob;
-    el_nrela_data = cnt_iptr();
+    el_nrela_data = cnt_iptr() + cnt_fptr();
     el_data_size = img * 8;
     el_bss_size = total_var_slots() * 8 - img * 8;
     el_strings_off = strings_off;
@@ -1088,8 +1147,10 @@ static void elf_part1(void) {
     el_rela_text_off = rela_text_off;
     el_rela_data_off = rela_text_off +
         (long)(ncall + 2 * naddr + 2 * nabs) * 24;
-    el_symtab_off = (el_rela_data_off +
-        (long)el_nrela_data * 24 + 7) / 8 * 8;
+    el_rela_arrays_off = el_rela_data_off +
+        (long)el_nrela_data * 24;
+    el_symtab_off = (el_rela_arrays_off +
+        (long)naf * 24 + 7) / 8 * 8;
     el_strtab_off = el_symtab_off + (long)el_nsym * 24;
     el_strtab_size = strtab_size;
     el_shstrtab_off = el_strtab_off + strtab_size;
@@ -1112,8 +1173,8 @@ static void elf_part1(void) {
     eu16(0);
     eu16(0);
     eu16(64);
+    eu16(12);
     eu16(11);
-    eu16(10);
     /* .text (呼び出しの穴は encode_inst が正規形に) */
     for (int i = el_start; i < ninst; i++)
         eu32(encode_inst(i));
@@ -1189,6 +1250,10 @@ static void elf_part2(void) {
         } else if (addr_kind[r] == 2) {
             sym = el_nlocals + el_off0 + el_nf +
                   var_rank(name_pool + addr_name[r]);
+        } else if (addr_kind[r] == 4) {
+            /* 関数のシンボル (v44) */
+            sym = el_nlocals + el_off0 +
+                  func_rank(name_pool + addr_name[r]);
         } else {
             sym = el_nlocals + el_off0 + el_nf + el_nv +
                   arr_rank(name_pool + addr_name[r]);
@@ -1210,13 +1275,29 @@ static void elf_part2(void) {
         eu64(((long)sym << 32) | 27);  /* R_RISCV_LO12_I */
         eu64(0);
     }
-    /* .rela.data: 文字列へのポインタの初期値 */
+    /* .rela.data: 文字列と関数へのポインタの初期値
+     * (レコードの順 = 枠の順、本体と同じ並び) */
     for (int r = 0; r < nrec; r++) {
-        if (rec_kind[r] != 'p')
-            continue;
-        eu64(var_slotpos(name_pool + rec_name[r]) * 8);
-        eu64(((long)4 << 32) | 2);  /* R_RISCV_64 */
-        eu64(rec_n1[r]);
+        if (rec_kind[r] == 'p') {
+            eu64(var_slotpos(name_pool + rec_name[r]) * 8);
+            eu64(((long)4 << 32) | 2);  /* R_RISCV_64 */
+            eu64(rec_n1[r]);
+        } else if (rec_kind[r] == 'F') {
+            int sym = el_nlocals + el_off0 +
+                      func_rank(name_pool + rec_n1[r]);
+            eu64(var_slotpos(name_pool + rec_name[r]) * 8);
+            eu64(((long)sym << 32) | 2);  /* R_RISCV_64 */
+            eu64(0);
+        }
+    }
+    /* .rela.iwac.arrays: 関数ポインタ配列の初期値
+     * (v44) */
+    for (int i = 0; i < naf; i++) {
+        int sym = el_nlocals + el_off0 +
+                  func_rank(name_pool + af_func[i]);
+        eu64(af_off[i]);
+        eu64(((long)sym << 32) | 2);  /* R_RISCV_64 */
+        eu64(0);
     }
 }
 
@@ -1244,16 +1325,16 @@ static void elf_part3(void) {
         ebytes(nm, ds_strlen(nm));
         ebyte(0);
     }
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < 12; i++) {
         ebytes(esec_name(i), ds_strlen(esec_name(i)));
         ebyte(0);
     }
     epad8();
     eshdr(0, 0, 0, 0, 0, 0);
     {
-        long noff[11];
+        long noff[12];
         long acc = 0;
-        for (int i = 0; i < 11; i++) {
+        for (int i = 0; i < 12; i++) {
             noff[i] = acc;
             acc += ds_strlen(esec_name(i)) + 1;
         }
@@ -1271,24 +1352,29 @@ static void elf_part3(void) {
             eshdr((int)noff[5], 8, 3,
                   el_strings_off + el_strings_size,
                   el_arrays_size, 8);
-        esh_link = 8;
+        esh_link = 9;
         esh_info = 1;
         esh_entsize = 24;
         eshdr((int)noff[6], 4, 0, el_rela_text_off,
               (long)(ncall + 2 * naddr + 2 * nabs) * 24, 8);
-        esh_link = 8;
+        esh_link = 9;
         esh_info = 2;
         esh_entsize = 24;
         eshdr((int)noff[7], 4, 0, el_rela_data_off,
               (long)el_nrela_data * 24, 8);
         esh_link = 9;
+        esh_info = 5;
+        esh_entsize = 24;
+        eshdr((int)noff[8], 4, 0, el_rela_arrays_off,
+              (long)naf * 24, 8);
+        esh_link = 10;
         esh_info = el_nlocals;
         esh_entsize = 24;
-        eshdr((int)noff[8], 2, 0, el_symtab_off,
+        eshdr((int)noff[9], 2, 0, el_symtab_off,
               (long)el_nsym * 24, 8);
-        eshdr((int)noff[9], 3, 0, el_strtab_off,
+        eshdr((int)noff[10], 3, 0, el_strtab_off,
               el_strtab_size, 1);
-        eshdr((int)noff[10], 3, 0, el_shstrtab_off,
+        eshdr((int)noff[11], 3, 0, el_shstrtab_off,
               el_shstrtab_size, 1);
     }
 }

@@ -36,11 +36,16 @@ static int MAX_REL = 16384;    /* 穴の数 */
 static int MAX_AINIT = 262144; /* 配列の初期値の置き場 (v40) */
 static int MAX_SEQ = 4096;     /* 登録順の控え */
 /* バイト列の置き場 (静的データとして持つ) */
-static char in_buf[393216];    /* オブジェクト1つの全文 */
+/* in_buf と out_code は相乗り (v44): in_buf はオブジェクトを
+   読む間だけ、out_code は全部読み終わってから最終 ELF を
+   組む間だけ使うので、置き場所を共有できる。断片プロファイル
+   の 1MB 枠に収めるための手 (doc/notes.md の手札を実行) */
+static char share_buf[393216]; /* in_buf と out_code の共有置き場 */
+static char *in_buf;           /* オブジェクト1つの全文 (share_buf) */
 static char code_pool[262144]; /* 全オブジェクトのコード */
 static char str_pool[131072];  /* 全オブジェクトの文字列 */
 static char ainit_buf[262144]; /* 配列の初期値のバイト列 (v40) */
-static char out_code[262144];  /* 並べた後のコード */
+static char *out_code;         /* 並べた後のコード (share_buf) */
 static char name_pool[65536];  /* 名前の文字列 */
 
 /* 配置の約束 (KosabaOS のユーザープログラム) */
@@ -88,6 +93,18 @@ static int sym_ainit_off[4096];/* 配列: 初期値の置き場 (v40) */
 static int sym_ainit_len[4096];/* 配列: 初期値のバイト数。
                                 * -1 = 初期値なし */
 static int ainit_used;         /* ainit_buf の使用量 */
+/* 関数ポインタ配列の初期値の穴埋め (v44):
+ * .rela.iwac.arrays の記録。配置が決まってから
+ * ainit_buf の中に住所を書く */
+static int afix_arr[1024];     /* 配列の名前 */
+static int afix_off[1024];     /* 配列の像の中でのずれ */
+static int afix_func[1024];    /* 関数の名前 */
+static int nafix;
+/* 読み込み中のオブジェクトの配列と、その像の
+ * 中での値 (再配置の相手を探すため) */
+static int obj_arr_sym[128];
+static int obj_arr_val[128];
+static int obj_arr_n;
 static int name_used;
 
 static int name_eq_at(int off, char *s) {
@@ -281,7 +298,30 @@ static int adopt_ainit(int s, long off, long n) {
     return 1;
 }
 
+/* 配列の初期値の置き場を need バイトまで広げる
+ * (v44)。末尾の 0 を切り捨てた分や、像が全部 0
+ * だった分は、0 で埋めた新しい置き場に移す。
+ * 関数ポインタの住所を書く場所を確保するため */
+static int ainit_reserve(int s, long need) {
+    if (sym_ainit_len[s] >= need)
+        return 1;
+    if (ainit_used + need > MAX_AINIT)
+        return fail("配列の初期値が大きすぎます");
+    int noff = ainit_used;
+    for (long i = 0; i < need; i++) {
+        int b = 0;
+        if (sym_ainit_len[s] > 0 && i < sym_ainit_len[s])
+            b = ainit_buf[sym_ainit_off[s] + (int)i] & 0xff;
+        ainit_buf[ainit_used] = (char)b;
+        ainit_used++;
+    }
+    sym_ainit_off[s] = noff;
+    sym_ainit_len[s] = (int)need;
+    return 1;
+}
+
 static int read_object_elf(int obj) {
+    obj_arr_n = 0;
     if (eget8(4) != 2 || eget8(5) != 1)
         return fail("ELF の形が違います (64ビット LE のみ)");
     if (eget16(16) != 1 || eget16(18) != 243)
@@ -460,6 +500,11 @@ static int read_object_elf(int obj) {
                 sym_off[s] = (int)arr_area;
                 arr_area += size;
             }
+            if (obj_arr_n < 128) {
+                obj_arr_sym[obj_arr_n] = s;
+                obj_arr_val[obj_arr_n] = (int)value;
+                obj_arr_n++;
+            }
             if (earr_type == 1) {
                 /* 中身のある節 (v40): この配列の分を
                  * 初期値として取り込む */
@@ -479,7 +524,8 @@ static int read_object_elf(int obj) {
         esec_name(shoff, shstr_off, target_i, tnm);
         int is_text = ds_streq(tnm, ".text");
         int is_data = ds_streq(tnm, ".data");
-        if (!is_text && !is_data)
+        int is_arrays = ds_streq(tnm, ".iwac.arrays");
+        if (!is_text && !is_data && !is_arrays)
             continue;
         long cnt = esec_size / 24;
         for (long ri = 0; ri < cnt; ri++) {
@@ -489,9 +535,45 @@ static int read_object_elf(int obj) {
             long rsym = rinfo / (1L << 32);
             long rtype = rinfo % (1L << 32);
             long radd = eget64(rb + 16);
+            if (is_arrays) {
+                /* 関数ポインタ配列の初期値 (v44、
+                 * R_RISCV_64): 相手は関数。埋めるのは
+                 * 配置が決まってから (afix に記録) */
+                if (rtype != 2 || rsym < 0 ||
+                    esym_sym[rsym] < 0 ||
+                    sym_kind[esym_sym[rsym]] != 1)
+                    return fail("知らない配列再配置があります");
+                int as = -1;
+                int aoff = 0;
+                for (int e = 0; e < obj_arr_n; e++) {
+                    int sz = sym_size[obj_arr_sym[e]];
+                    if ((long)obj_arr_val[e] <= roff &&
+                        roff < (long)obj_arr_val[e] + sz) {
+                        as = obj_arr_sym[e];
+                        aoff = (int)(roff - obj_arr_val[e]);
+                    }
+                }
+                if (as < 0)
+                    return fail("配列再配置の受け口がありません");
+                if (nafix >= 1024)
+                    return fail("関数ポインタの初期値が多すぎます");
+                afix_arr[nafix] = as;
+                afix_off[nafix] = aoff;
+                afix_func[nafix] = esym_sym[rsym];
+                nafix++;
+                continue;
+            }
             if (is_data) {
-                /* 文字列へのポインタ初期値 (R_RISCV_64) */
-                if (rtype != 2 || esym_tag[rsym] != 1)
+                /* 文字列か関数へのポインタ初期値
+                 * (R_RISCV_64) */
+                if (rtype != 2)
+                    return fail("知らないデータ再配置があります");
+                int is_str = (esym_tag[rsym] == 1);
+                int fsym = -1;
+                if (!is_str && rsym >= 0 && esym_sym[rsym] >= 0 &&
+                    sym_kind[esym_sym[rsym]] == 1)
+                    fsym = esym_sym[rsym];
+                if (!is_str && fsym < 0)
                     return fail("知らないデータ再配置があります");
                 int hit = -1;
                 for (int e = 0; e < nedata; e++)
@@ -503,9 +585,17 @@ static int read_object_elf(int obj) {
                 if (sym_hasinit[vs])
                     return fail("初期値が二つあります");
                 sym_hasinit[vs] = 1;
-                sym_init_kind[vs] = 2;
-                sym_init_val[vs] = radd;
-                sym_init_obj[vs] = obj;
+                if (is_str) {
+                    sym_init_kind[vs] = 2;
+                    sym_init_val[vs] = radd;
+                    sym_init_obj[vs] = obj;
+                } else {
+                    /* 関数へのポインタ (v44): 種類3
+                     * (名前) で、相手は関数 */
+                    sym_init_kind[vs] = 3;
+                    sym_init_sym[vs] = fsym;
+                    sym_init_val[vs] = radd;
+                }
                 edata_hit[hit] = 1;
                 continue;
             }
@@ -648,6 +738,22 @@ static int layout(void) {
         else if (sym_kind[s] == 2)
             sym_addr[s] = DATA_BASE + str_total + arr_area +
                           (long)sym_off[s] * 8;
+    }
+    /* 関数ポインタ配列の初期値 (v44): 関数の住所が
+     * 決まったので、ainit の像に書く。書く場所は
+     * 先に確保する (末尾 0 の切り捨てで消えた分も
+     * ここで戻る) */
+    for (int i = 0; i < nafix; i++) {
+        if (!ainit_reserve(afix_arr[i], (long)afix_off[i] + 8))
+            return 0;
+    }
+    for (int i = 0; i < nafix; i++) {
+        long v = sym_addr[afix_func[i]];
+        int p = sym_ainit_off[afix_arr[i]] + afix_off[i];
+        for (int b = 0; b < 8; b++) {
+            ainit_buf[p + b] = (char)(v & 0xff);
+            v = v >> 8;
+        }
     }
     return 1;
 }
@@ -880,6 +986,8 @@ static void write_elf(void) {
 
 int main(int argc, char **argv) {
     int base;
+    in_buf = share_buf;
+    out_code = share_buf;
     base = 1;
     /* nori --out <名前> obj... : OS 上での出力名 (v34) */
     if (argc >= 4 && ds_streq(argv[1], "--out")) {

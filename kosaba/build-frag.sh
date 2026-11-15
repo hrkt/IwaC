@@ -15,13 +15,13 @@
 #     (展開後もほぼ同量)
 #
 # 容量プロファイル (標準 → 断片):
-#   ノード表        20480 → 8192
-#   命令表          49152 → 16384 (パッチ表と分岐緩和の印も)
+#   ノード表        24576 → 8192
+#   命令表          57344 → 16384 (パッチ表と分岐緩和の印も)
 #   再配置表         8192 → 2048
-#   変数表           1024 → 512
+#   変数表           1280 → 512
 #   文字列プール    16384 → 8192 バイト (個数 512 は不変)
-#   ソース上限      約384KB → 128KB
-#   展開バッファ    約384KB → 128KB
+#   ソース上限      約448KB → 128KB
+#   展開バッファ    約448KB → 128KB
 #   配列初期値プール 65536 → 4096 要素 (v40)
 # 狙いは静的データ 1MB 未満 (K210 のデータ領域)。
 # 出来た ELF のデータ量を最後に測り、1MB 以上なら
@@ -67,26 +67,28 @@ apply() {
 
 # 02-parse.c: ノード表・変数表・文字列プール
 apply 02-parse.c 'str_pool[16384]' 'str_pool[8192]' 1
-apply 02-parse.c '[20480]' '[8192]' 6
-apply 02-parse.c 'nnode >= 20480' 'nnode >= 8192' 1
+apply 02-parse.c '[24576]' '[8192]' 6
+apply 02-parse.c 'nnode >= 24576' 'nnode >= 8192' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 8191' 1
-apply 02-parse.c '[1024]' '[512]' 10
-apply 02-parse.c 'nvar >= 1024' 'nvar >= 512' 1
+apply 02-parse.c '[1280]' '[512]' 11
+apply 02-parse.c '[1024]' '[512]' 2
+apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 512' 1
+apply 02-parse.c 'nvar >= 1280' 'nvar >= 512' 1
 # 配列初期値プール (v40): 表と 02b 側のガードを一緒に
 apply 02-parse.c 'arr_init_pool[65536]' 'arr_init_pool[4096]' 1
-apply 02b-decl.c 'arr_init_used >= 65536' 'arr_init_used >= 4096' 2
+apply 02b-decl.c 'arr_init_used >= 65536' 'arr_init_used >= 4096' 3
 # 03-gen.c: 命令表 (5つ+パッチ表+緩和の印) と再配置表
-apply 03-gen.c '[49152]' '[16384]' 7
-apply 03-gen.c 'i < 49152' 'i < 16384' 1
+apply 03-gen.c '[57344]' '[16384]' 7
+apply 03-gen.c 'i < 57344' 'i < 16384' 1
 apply 03-gen.c '[8192]' '[2048]' 3
 apply 03-gen.c 'obj_nreloc < 8192' 'obj_nreloc < 2048' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)、表示 (2か所)
-apply 05-input.c 'src_buf[393216]' 'src_buf[131072]' 1
-apply 05-input.c '393215' '131071' 4
-apply 05-input.c '約384KBまで' '約128KBまで' 3
+apply 05-input.c 'src_buf[458752]' 'src_buf[163840]' 1
+apply 05-input.c '458751' '163839' 4
+apply 05-input.c '約448KBまで' '約160KBまで' 3
 # 06-preproc.c: 展開バッファと上限のガード
-apply 06-preproc.c 'exp_buf[393216]' 'exp_buf[131072]' 1
-apply 06-preproc.c 'exp_len >= 393215' 'exp_len >= 131071' 1
+apply 06-preproc.c 'exp_buf[458752]' 'exp_buf[163840]' 1
+apply 06-preproc.c 'exp_len >= 458751' 'exp_len >= 163839' 1
 
 # 断片プロファイルの iwac (ホスト版) と標準の iwac を作る
 cat "$WORK"/0*.c > "$WORK/iwac_all.c"

@@ -484,6 +484,11 @@ typedef が直接乗り、構造体が C の移植の
    branch `v43`: C どおりの振り分け文。
    doc/missing-features.md の実装予定の
    第一候補。設計は doc/switch.md）
+10. **関数ポインタ**（済み、v44、2026-11-15、
+    branch `v44`: 間接呼び出しとハンドラ表。
+    署名の intern と fsig の印、初期化子と
+    オブジェクト経路（.rela.iwac.arrays）まで。
+    設計は doc/funcptr.md）
 K210 実機の 1MB 確認は順序の外に置き、次の
 実機セッションで一緒に確認する（関門はデータ
 領域よりファイルの置き場かもしれない）。

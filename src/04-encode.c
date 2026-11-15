@@ -424,6 +424,13 @@ static void write_arr_image(long end) {
             int b = (int)(k % arr_esize[a]);
             unsigned long v =
                 (unsigned long)arr_init_pool[arr_init_off[a] + e];
+            /* 関数参照の要素は関数の住所が入る (v44。
+             * 一括出力ではこの場で確定できる) */
+            int fr = (arr_nfref > 0)
+                ? fref_at(arr_init_off[a] + e) : -1;
+            if (fr >= 0)
+                v = (unsigned long)(LOAD_BASE +
+                      (unsigned int)func_entry[fr] * 4u);
             out_byte((int)((v >> (8 * b)) & 0xff));
         }
         pos = (long)arr_off[a] + nb;
@@ -444,6 +451,10 @@ static void write_var_image(void) {
                     val = (unsigned long)var_init_val[v];
                 else if (var_init_kind[v] == 2)
                     val = (unsigned long)str_addr[var_init_val[v]];
+                else if (var_init_kind[v] == 3)
+                    /* 関数の住所 (v44) */
+                    val = (unsigned long)(LOAD_BASE +
+                          (unsigned int)func_entry[var_init_val[v]] * 4u);
                 break;
             }
         }
@@ -539,6 +550,9 @@ static void obj_arr_init(int a) {
  * バイト列」の代わりに「命令列そのもの」を書くことと、
  * 穴の位置をバイト数でなく命令番号で書くこと
  * ================================================================ */
+
+static long fref_byte_off(int pool_idx);  /* 本体は ELF
+                             * 書き手の節 (v44) */
 
 /* op の名前。番号は iwac 内部の事情なので持ち出さず、
  * 名前を仕様の通貨にする (doc/asari.md) */
@@ -652,6 +666,12 @@ static void write_asari(void) {
             obj_str(" var ");
             obj_str(var_names[obj_reloc_idx[r]]);
             obj_str("\n");
+        } else if (obj_reloc_kind[r] == RLOC_FUNC) {
+            obj_str("addr ");
+            obj_num(obj_reloc_site[r]);
+            obj_str(" func ");
+            obj_str(func_names[obj_reloc_idx[r]]);
+            obj_str("\n");
         } else {
             obj_str("addr ");
             obj_num(obj_reloc_site[r]);
@@ -741,6 +761,20 @@ static void write_asari(void) {
         if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
             continue;
         obj_arr_init(a);
+        /* 関数参照の要素 (v44): イメージは 0 で、
+         * 埋める場所と関数名を afref で伝える */
+        for (int i = 0; i < arr_nfref; i++) {
+            if (arr_fref_off[i] < arr_init_off[a] ||
+                arr_fref_off[i] >= arr_init_off[a] + arr_init_cnt[a])
+                continue;
+            obj_str("afref ");
+            obj_str(arr_names[a]);
+            obj_str(" ");
+            obj_num(fref_byte_off(arr_fref_off[i]));
+            obj_str(" ");
+            obj_str(func_names[arr_fref_func[i]]);
+            obj_str("\n");
+        }
     }
     for (int s = 0; s < var_nglobal; s++) {
         for (int v = 0; v < nvar; v++) {
@@ -757,6 +791,12 @@ static void write_asari(void) {
                 obj_str(var_names[v]);
                 obj_str(" str ");
                 obj_num(str_off[var_init_val[v]]);
+                obj_str("\n");
+            } else if (var_init_kind[v] == 3) {
+                obj_str("fptr ");
+                obj_str(var_names[v]);
+                obj_str(" func ");
+                obj_str(func_names[var_init_val[v]]);
                 obj_str("\n");
             }
             break;
@@ -1035,7 +1075,9 @@ static char *elf_sym_name(int s, int nlocals, int has_entry,
 }
 
 
-/* セクション名 (番号順。0 は空) */
+/* セクション名 (番号順。0 は空)。
+ * 8 の .rela.iwac.arrays は v44 で追加 (関数ポインタ
+ * 配列の初期化子の再配置) */
 static char *elf_sec_name(int i) {
     if (i == 1) return ".text";
     if (i == 2) return ".data";
@@ -1044,9 +1086,10 @@ static char *elf_sec_name(int i) {
     if (i == 5) return ".iwac.arrays";
     if (i == 6) return ".rela.text";
     if (i == 7) return ".rela.data";
-    if (i == 8) return ".symtab";
-    if (i == 9) return ".strtab";
-    if (i == 10) return ".shstrtab";
+    if (i == 8) return ".rela.iwac.arrays";
+    if (i == 9) return ".symtab";
+    if (i == 10) return ".strtab";
+    if (i == 11) return ".shstrtab";
     return "";
 }
 
@@ -1116,6 +1159,22 @@ static void elf_arr_image(void) {
         ebyte(0);
 }
 
+/* 関数参照 (初期化子の中の関数名) の、.iwac.arrays
+ * 節の中でのバイト位置 (v44): 池の位置から、その
+ * 配列の中の要素の位置へ直す */
+static long fref_byte_off(int pool_idx) {
+    for (int a = 0; a < narr; a++) {
+        if (arr_owner[a] >= 0 || arr_init_cnt[a] <= 0)
+            continue;
+        if (pool_idx >= arr_init_off[a] &&
+            pool_idx < arr_init_off[a] + arr_init_cnt[a])
+            return (long)arr_off[a] +
+                   (long)(pool_idx - arr_init_off[a]) *
+                   arr_esize[a];
+    }
+    return 0;
+}
+
 static void write_elf_object(void) {
     int has_entry = (prog_main >= 0 || prog_stmts != -1 ||
                      prog_has_final);
@@ -1136,8 +1195,11 @@ static void write_elf_object(void) {
     int nrela_text = ncalls + 2 * obj_nreloc + 2 * obj_nabs;
     int nrela_data = 0;
     for (int v = 0; v < nvar; v++)
-        if (var_owner[v] < 0 && var_init_kind[v] == 2)
+        if (var_owner[v] < 0 && (var_init_kind[v] == 2 ||
+                                 var_init_kind[v] == 3))
             nrela_data++;
+    /* 関数ポインタ配列の初期化子の再配置 (v44) */
+    int nrela_arrays = arr_nfref;
     int img_slots = 0;
     for (int v = 0; v < nvar; v++) {
         if (var_owner[v] >= 0 || var_init_kind[v] == 0)
@@ -1156,7 +1218,7 @@ static void write_elf_object(void) {
         strtab_size += ename_len(elf_sym_name(s2, nlocals,
                              has_entry, start, flush_extra)) + 1;
     long shstrtab_size = 0;
-    for (int i = 0; i < 11; i++)
+    for (int i = 0; i < 12; i++)
         shstrtab_size += ename_len(elf_sec_name(i)) + 1;
 
     /* 置き場所。.iwac.arrays に中身があるときは
@@ -1170,7 +1232,8 @@ static void write_elf_object(void) {
         data_off = (arrays_off + arrays_size + 7) & ~7L;
     long rela_text_off = (data_off + data_size + 7) & ~7L;
     long rela_data_off = rela_text_off + (long)nrela_text * 24;
-    long symtab_off = (rela_data_off + (long)nrela_data * 24 + 7) & ~7L;
+    long rela_arrays_off = rela_data_off + (long)nrela_data * 24;
+    long symtab_off = (rela_arrays_off + (long)nrela_arrays * 24 + 7) & ~7L;
     long strtab_off = symtab_off + (long)nsym * 24;
     long shstrtab_off = strtab_off + strtab_size;
     long shoff = (shstrtab_off + shstrtab_size + 7) & ~7L;
@@ -1192,8 +1255,8 @@ static void write_elf_object(void) {
     eu16(0);          /* phentsize */
     eu16(0);          /* phnum */
     eu16(64);         /* shentsize */
-    eu16(11);         /* shnum */
-    eu16(10);         /* shstrndx */
+    eu16(12);         /* shnum (v44 で .rela.iwac.arrays を追加) */
+    eu16(11);         /* shstrndx */
 
     /* .text (呼び出しの穴はオフセット 0 に正規化) */
     for (int i = start; i < nasm; i++) {
@@ -1255,6 +1318,9 @@ static void write_elf_object(void) {
         } else if (obj_reloc_kind[r] == RLOC_VAR) {
             sym = elf_var_symidx(obj_reloc_idx[r],
                                  nlocals + off0 + nfunc);
+        } else if (obj_reloc_kind[r] == RLOC_FUNC) {
+            /* 関数のシンボル (v44): 関数表の順のまま */
+            sym = nlocals + off0 + obj_reloc_idx[r];
         } else {
             sym = elf_arr_symidx(obj_reloc_idx[r],
                                  nlocals + off0 + nfunc +
@@ -1276,13 +1342,31 @@ static void write_elf_object(void) {
         eu64(((long)sym << 32) | 27);  /* R_RISCV_LO12_I */
         eu64(0);
     }
-    /* .rela.data (文字列へのポインタの初期値) */
+    /* .rela.data (文字列へのポインタと、関数への
+     * ポインタの初期値) */
     for (int v = 0; v < nvar; v++) {
-        if (var_owner[v] >= 0 || var_init_kind[v] != 2)
+        if (var_owner[v] >= 0 || (var_init_kind[v] != 2 &&
+                                  var_init_kind[v] != 3))
             continue;
         eu64((long)var_slot[v] * 8);
-        eu64(((long)4 << 32) | 2);  /* R_RISCV_64、相手は文字列 */
-        eu64(str_off[var_init_val[v]]);
+        if (var_init_kind[v] == 2) {
+            eu64(((long)4 << 32) | 2);  /* R_RISCV_64、相手は文字列 */
+            eu64(str_off[var_init_val[v]]);
+        } else {
+            /* R_RISCV_64、相手は関数のシンボル (v44) */
+            int sym = nlocals + off0 + (int)var_init_val[v];
+            eu64(((long)sym << 32) | 2);
+            eu64(0);
+        }
+    }
+    /* .rela.iwac.arrays (関数ポインタ配列の初期化子、v44):
+     * イメージには 0 が置いてあり、リンク時に R_RISCV_64
+     * で関数の住所を書く */
+    for (int i = 0; i < arr_nfref; i++) {
+        int sym = nlocals + off0 + arr_fref_func[i];
+        eu64(fref_byte_off(arr_fref_off[i]));
+        eu64(((long)sym << 32) | 2);
+        eu64(0);
     }
     /* .symtab */
     epad(8);
@@ -1312,7 +1396,7 @@ static void write_elf_object(void) {
         ebyte(0);
     }
     /* .shstrtab */
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < 12; i++) {
         ebytes(elf_sec_name(i), ename_len(elf_sec_name(i)));
         ebyte(0);
     }
@@ -1323,9 +1407,9 @@ static void write_elf_object(void) {
     elf_sh_entsize = 0;
     elf_shdr(0, 0, 0, 0, 0, 0);
     {
-        long noff[11];
+        long noff[12];
         long acc = 0;
-        for (int i = 0; i < 11; i++) {
+        for (int i = 0; i < 12; i++) {
             noff[i] = acc;
             acc += ename_len(elf_sec_name(i)) + 1;
         }
@@ -1340,23 +1424,28 @@ static void write_elf_object(void) {
         else
             elf_shdr((int)noff[5], 8, 3, strings_off + strings_size,
                      arrays_size, 8);
-        elf_sh_link = 8;
+        elf_sh_link = 9;
         elf_sh_info = 1;
         elf_sh_entsize = 24;
         elf_shdr((int)noff[6], 4, 0, rela_text_off,
                  (long)nrela_text * 24, 8);
-        elf_sh_link = 8;
+        elf_sh_link = 9;
         elf_sh_info = 2;
         elf_sh_entsize = 24;
         elf_shdr((int)noff[7], 4, 0, rela_data_off,
                  (long)nrela_data * 24, 8);
         elf_sh_link = 9;
+        elf_sh_info = 5;
+        elf_sh_entsize = 24;
+        elf_shdr((int)noff[8], 4, 0, rela_arrays_off,
+                 (long)nrela_arrays * 24, 8);
+        elf_sh_link = 10;
         elf_sh_info = nlocals;
         elf_sh_entsize = 24;
-        elf_shdr((int)noff[8], 2, 0, symtab_off,
+        elf_shdr((int)noff[9], 2, 0, symtab_off,
                  (long)nsym * 24, 8);
-        elf_shdr((int)noff[9], 3, 0, strtab_off, strtab_size, 1);
-        elf_shdr((int)noff[10], 3, 0, shstrtab_off, shstrtab_size, 1);
+        elf_shdr((int)noff[10], 3, 0, strtab_off, strtab_size, 1);
+        elf_shdr((int)noff[11], 3, 0, shstrtab_off, shstrtab_size, 1);
     }
 }
 

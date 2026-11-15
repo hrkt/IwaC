@@ -138,6 +138,12 @@ static int NODE_CASE = 58;   /* switch の case 群 (v43)。
                              * node_lhs = その case の文の並び、
                              * node_rhs = 1 なら default
                              * (node_val は使わない) */
+static int NODE_ICALL = 59;  /* 関数ポインタ経由の呼び出し
+                             * (v44)。node_val = 署名番号、
+                             * node_lhs = 呼び先の式、
+                             * node_rhs = 引数の並び */
+static int NODE_FADDR = 60;  /* 関数の住所 (v44)。
+                             * node_val = 関数番号 */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -155,13 +161,13 @@ static int NODE_STORE = 13; /* メモリ書き込み文。
                              * (変数 = ポインタ、数 = 絶対アドレス)、
                              * node_rhs = 書く値の式 */
 
-static int node_kind[20480];
-static int node_val[20480];
-static int node_lhs[20480];
-static int node_rhs[20480];
-static int node_next[20480]; /* 文の並び用: 次の文ノード (-1 で終わり)。
+static char node_kind[24576];  /* 種類は 60 まで (v44 で char 化して容量を節約) */
+static int node_val[24576];
+static int node_lhs[24576];
+static int node_rhs[24576];
+static int node_next[24576]; /* 文の並び用: 次の文ノード (-1 で終わり)。
                             * 式のノードでは使わない */
-static int node_etype[20480]; /* 式の型タグ (生成時に付ける、v35) */
+static int node_etype[24576]; /* 式の型タグ (生成時に付ける、v35) */
 static int nnode;  /* 作ったノードの数 */
 
 /* --- 変数の名簿 (記号表) ---
@@ -178,30 +184,34 @@ static int nnode;  /* 作ったノードの数 */
  * ローカルと、グローバルだけが見える。他の関数のローカルは
  * 見えない (同名でも別物)。ローカルが同名のグローバルを
  * 隠す (シャドーイング)。名前は最大31文字 */
-static char var_names[1024][32];
-static int var_name_len[1024];
-static int var_owner[1024];
-static int var_slot[1024];
-static int var_bsize[1024];
+static char var_names[1280][32];
+static int var_name_len[1280];
+static int var_owner[1280];
+static int var_slot[1280];
+static int var_bsize[1280];
 /* 型タグ (v35): 基本サイズ (1/2/4/8) に、符号なし
  * なら 16、幅つきの型なら 32 を足したもの。従来の
  * 型は char が 1、それ以外は 8 (印なし) */
-static int var_etype[1024];
-static char var_struct[1024];  /* 構造体番号 + 1 (v37、0 = 構造体で
+static int var_etype[1280];
+static char var_struct[1280];  /* 構造体番号 + 1 (v37、0 = 構造体で
                                * ない。char に詰めるための +1 符号化)。
                                * plevel 0 ならその構造体の値、
                                * 1 以上ならその構造体へのポインタ。
                                * 占めるスロット数は var_slot の差から
                                * 分かるので表は持たない) */
-static int var_plevel[1024];
+static int var_plevel[1280];
+static char var_fsig[1280];  /* 関数ポインタなら署名番号 + 1、
+                             * そうでなければ 0 (v44) */
 /* グローバル変数の初期値 (v24): ファイル範囲の宣言の
  * 初期化子を定数として記録し、静的領域の初期イメージ
  * としてバイナリに埋めるための情報。
  *   var_init_kind[i]: 0 = 初期値なし、1 = 数値、
- *                     2 = 文字列 (値はその住所になる)
+ *                     2 = 文字列 (値はその住所になる)、
+ *                     3 = 関数 (値は関数番号、その住所に
+ *                     なる。v44)
  *   var_init_val[i] : 数値そのもの、または文字列番号 */
-static int var_init_kind[1024];
-static long var_init_val[1024];
+static int var_init_kind[1280];
+static long var_init_val[1280];
 static int has_var_inits;  /* 初期値つきグローバルがあるか */
 static int nvar;       /* 登録された変数の数 (全スコープ合計) */
 static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
@@ -221,6 +231,8 @@ static int tdef_etype[64];
 static int tdef_bsize[64];
 static int tdef_plevel[64];
 static char tdef_struct[64];  /* 構造体番号 + 1 (v37、0 = なし) */
+static char tdef_fsig[64];    /* 関数ポインタの typedef なら
+                             * 署名番号 + 1 (v44、0 = なし) */
 static int ntdef;
 
 /* 名前の一致だけを見る小物 */
@@ -302,7 +314,7 @@ static int define_var_full(char *name, int len, int bsize,
         if (found >= 0)
             return found;
     }
-    if (nvar >= 1024) {
+    if (nvar >= 1280) {
         errmsg = "変数が多すぎます";
         return -1;
     }
@@ -381,9 +393,89 @@ static int func_entry[192];
  *                     生成の入口でエラーにする */
 static int func_has_body[192];
 static int func_called[192];
+static int func_sig[192];     /* その関数の署名番号 (v44) */
 /* func_nlocals[192] : フレームの枠数 (引数を含む、v21)。
  * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
+
+/* 署名 (シグネチャ) の名簿 (v44、設計は doc/funcptr.md):
+ * 関数ポインタの型は「戻り値の型 + 引数の型の並び」で
+ * 決まる。同じ署名は同じ番号を共有する (intern)。
+ *   sig_ret_etype[s] : 戻り値の型タグ
+ *   sig_ret_plevel[s]: 戻り値のポインタ段数
+ *   sig_ret_struct[s]: 戻り値の構造体番号 + 1 (0 = なし)
+ *   sig_ret_fsig[s]  : 戻り値が関数ポインタなら、その
+ *                      署名番号 + 1 (0 = なし)
+ *   sig_nparams[s]   : 引数の数
+ *   sig_petype[s][i] : 引数 i の型タグ
+ *   sig_pplevel[s][i]: 引数 i のポインタ段数
+ *   sig_pstruct[s][i]: 引数 i の構造体番号 + 1
+ *   sig_pfsig[s][i]  : 引数 i が関数ポインタなら、その
+ *                      署名番号 + 1 (0 = なし)
+ * すべての関数も署名番号を持つ (func_sig)。関数ポインタ
+ * の代入や受け渡しは、署名番号の一致で検査する */
+static int sig_ret_etype[128];
+static char sig_ret_plevel[128];
+static char sig_ret_struct[128];
+static char sig_ret_fsig[128];
+static char sig_nparams[128];
+static int sig_petype[128][8];
+static char sig_pplevel[128][8];
+static char sig_pstruct[128][8];
+static char sig_pfsig[128][8];
+static int nsig;
+
+/* sig_intern へ引数の型を渡す作業場。引数を並べると
+ * 8 個の上限 (iwac 自身の決まり) を超えるので、
+ * 引数リストの部分はここへ置いてから呼ぶ */
+static int sig_scr_pet[8];
+static int sig_scr_ppl[8];
+static int sig_scr_pst[8];
+static int sig_scr_pfs[8];
+
+/* 署名を名簿から引く。無ければ足す。ret_st と
+ * sig_scr_pst は構造体番号そのもの (-1 = なし) で
+ * 受け、ret_fs と sig_scr_pfs は「署名番号 + 1
+ * (0 = なし)」の符号化で受ける。引数の型は作業場
+ * sig_scr_* に置いてあること */
+static int sig_intern(int ret_et, int ret_pl, int ret_st,
+                      int ret_fs, int np) {
+    for (int s = 0; s < nsig; s++) {
+        if (sig_ret_etype[s] != ret_et ||
+            sig_ret_plevel[s] != ret_pl ||
+            sig_ret_struct[s] != ret_st + 1 ||
+            sig_ret_fsig[s] != ret_fs ||
+            sig_nparams[s] != np)
+            continue;
+        int same = 1;
+        for (int i = 0; i < np; i++) {
+            if (sig_petype[s][i] != sig_scr_pet[i] ||
+                sig_pplevel[s][i] != sig_scr_ppl[i] ||
+                sig_pstruct[s][i] != sig_scr_pst[i] + 1 ||
+                sig_pfsig[s][i] != sig_scr_pfs[i])
+                same = 0;
+        }
+        if (same)
+            return s;
+    }
+    if (nsig >= 128) {
+        errmsg = "関数の署名が多すぎます (128まで)";
+        return -1;
+    }
+    int s = nsig++;
+    sig_ret_etype[s] = ret_et;
+    sig_ret_plevel[s] = (char)ret_pl;
+    sig_ret_struct[s] = (char)(ret_st + 1);
+    sig_ret_fsig[s] = (char)ret_fs;
+    sig_nparams[s] = (char)np;
+    for (int i = 0; i < np; i++) {
+        sig_petype[s][i] = sig_scr_pet[i];
+        sig_pplevel[s][i] = (char)sig_scr_ppl[i];
+        sig_pstruct[s][i] = (char)(sig_scr_pst[i] + 1);
+        sig_pfsig[s][i] = (char)sig_scr_pfs[i];
+    }
+    return s;
+}
 
 /* --- 配列の名簿 ---
  * 配列は変数と違い、メモリに置き場所が要る。置き場所は
@@ -412,18 +504,20 @@ static int nfunc;
  *                 (第2層が決める。ローカルでは使わない)
  * 配列は最大128個、グローバルの合計 4MB まで
  * (v25 で実測に合わせて拡大) */
-static char arr_names[128][32];
-static int arr_name_len[128];
-static int arr_size[128];
-static int arr_cols[128];
-static int arr_esize[128];
-static int arr_etype[128];   /* 要素の型タグ (v35) */
-static char arr_struct[128];  /* 要素の構造体番号 + 1 (v37、0 = なし) */
-static char arr_plevel[128];  /* 要素のポインタ段数 (v37) */
-static int arr_owner[128];
-static int arr_off[128];
-static int arr_foff[128];
-static unsigned int arr_addr[128];
+static char arr_names[192][32];
+static int arr_name_len[192];
+static int arr_size[192];
+static int arr_cols[192];
+static int arr_esize[192];
+static int arr_etype[192];   /* 要素の型タグ (v35) */
+static char arr_struct[192];  /* 要素の構造体番号 + 1 (v37、0 = なし) */
+static char arr_plevel[192];  /* 要素のポインタ段数 (v37) */
+static char arr_fsig[192];    /* 要素が関数ポインタなら
+                             * 署名番号 + 1 (v44、0 = なし) */
+static int arr_owner[192];
+static int arr_off[192];
+static int arr_foff[192];
+static unsigned int arr_addr[192];
 static int narr;      /* 登録された配列の数 */
 static int arr_used;  /* グローバル配列領域の使用済みバイト数 */
 /* 配列の初期値 (v40、設計は doc/array-init.md):
@@ -432,11 +526,27 @@ static int arr_used;  /* グローバル配列領域の使用済みバイト数 
  *   arr_init_pool[]: 値そのもの (8バイト/要素で貯める)
  *   arr_init_end   : 初期値のバイトが届く末尾
  *                    (配列領域の中の位置。0 = 無し) */
-static int arr_init_off[128];
-static int arr_init_cnt[128];
+static int arr_init_off[192];
+static int arr_init_cnt[192];
 static long arr_init_pool[65536];
 static int arr_init_used;
 static int arr_init_end;
+/* 配列初期化子の中の関数参照 (v44): 関数ポインタの
+ * 配列の要素に関数名が書かれた場合、住所はリンク時に
+ * しか決まらないので、池には 0 を置き、こちらに
+ * 「池の位置 → 関数番号」を控える */
+static int arr_fref_off[1024];
+static int arr_fref_func[1024];
+static int arr_nfref;
+
+/* 池の位置 pool_idx に関数参照があれば関数番号、
+ * 無ければ -1 */
+static int fref_at(int pool_idx) {
+    for (int i = 0; i < arr_nfref; i++)
+        if (arr_fref_off[i] == pool_idx)
+            return arr_fref_func[i];
+    return -1;
+}
 /* func_arr_bytes[f]: 関数 f のフレームに入るローカル
  * 配列の合計バイト数 (v26)。フレーム長の計算 (第2層の
  * func_frame_size) が使う */
@@ -491,6 +601,8 @@ static int smem_etype[160];
 static int smem_plevel[160];
 static char smem_struct[160];  /* 構造体番号 + 1 (0 = なし) */
 static int smem_count[160];
+static char smem_fsig[160];   /* メンバが関数ポインタなら
+                             * 署名番号 + 1 (v44、0 = なし) */
 static int nsmem;
 
 /* タグ名から構造体を探す。あれば番号、無ければ -1 */
@@ -557,8 +669,8 @@ static int define_array_s(char *name, int len, int rows, int cols,
         errmsg = "その名前は既に使われています";
         return -1;
     }
-    if (narr >= 128) {
-        errmsg = "配列は128個までです";
+    if (narr >= 192) {
+        errmsg = "配列は192個までです";
         return -1;
     }
     int elems = cols > 0 ? rows * cols : rows;
@@ -638,7 +750,7 @@ static unsigned int str_addr[512];  /* 第2層が確定させる住所 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
-    if (nnode >= 20480) {
+    if (nnode >= 24576) {
         errmsg = "プログラムが大きすぎます (ノード数上限)";
         return -1;
     }
@@ -891,14 +1003,18 @@ static int ident_is(char *word);  /* syscall3 の判定で先に使う (v27) */
  * v25 で 4 から 8 に拡大)。
  * 式の材料 (parse_primary_node) からも、呼び出し文
  * (parse_stmt) からも使う共通の道具。成功 1、失敗 0 */
-static int parse_call_list(int f, int *head_out) {
+/* 呼び出しの引数の並びを読む (v44 で引数の数を引く形に
+ * 一般化): '(' は消費済み、')' までを読む。引数の数が
+ * nparams と合わなければエラー。引数の並びの先頭を
+ * *head_out に入れる (引数なしなら -1) */
+static int parse_call_list_n(int nparams, int *head_out) {
     int head = -1;
     int tail = -1;
     int n = 0;
     skip_spaces();
     if (*cur == ')') {
         cur++;
-        if (func_nparams[f] != 0) {
+        if (nparams != 0) {
             errmsg = "引数の数が関数の定義と合いません";
             return 0;
         }
@@ -928,12 +1044,20 @@ static int parse_call_list(int f, int *head_out) {
     }
     if (!expect_char(')', "呼び出しの後には ) が必要です"))
         return 0;
-    if (n != func_nparams[f]) {
+    if (n != nparams) {
         errmsg = "引数の数が関数の定義と合いません";
         return 0;
     }
-    func_called[f] = 1;  /* 呼ばれた印 (未定義検査用、v24) */
     *head_out = head;
+    return 1;
+}
+
+/* 直接呼び出しの引数 (v22〜): 相手の関数の名簿で
+ * 数の検査をして、呼ばれた印を付ける */
+static int parse_call_list(int f, int *head_out) {
+    if (!parse_call_list_n(func_nparams[f], head_out))
+        return 0;
+    func_called[f] = 1;  /* 呼ばれた印 (未定義検査用、v24) */
     return 1;
 }
 
@@ -1069,7 +1193,10 @@ static int parse_primary_node(void) {
         }
         /* 関数の名前で、次が '(' なら呼び出し (v22 で式に
          * なった)。戻り値が式の材料になる。呼べるのは
-         * 定義済みの関数だけ (「使う前に定義」の約束) */
+         * 定義済みの関数だけ (「使う前に定義」の約束)。
+         * '(' が続かなければ、その関数の住所そのものが
+         * 値になる (v44、関数ポインタへの代入や初期化で
+         * 使う。C の「名前は住所に化ける」と同じ) */
         int f = find_func(ident_buf, ident_len);
         if (f >= 0) {
             skip_spaces();
@@ -1080,6 +1207,9 @@ static int parse_primary_node(void) {
                     return -1;
                 return new_node(NODE_CALL, f, args, 0);
             }
+            func_called[f] = 1;  /* 住所を取られた関数も
+                                  * 本体が要る (v44) */
+            return new_node(NODE_FADDR, f, 0, 0);
         }
         /* 配列の名前なら、要素読みか「先頭アドレス」か */
         int arr = find_array(ident_buf, ident_len);
@@ -1175,33 +1305,51 @@ static int parse_postfix_expr(void) {
     /* メンバアクセス (. / ->) のために、今のノードの値の
      * 型を追う (v37): ts = 構造体番号 (-1 = 構造体でない)、
      * tp = ポインタ段数、tarr = 配列か (配列メンバの直後
-     * だけ 1) */
+     * だけ 1)。v44 で tf = 関数ポインタなら署名番号 + 1
+     * (0 = なし) も一緒に追う (呼び出しの後置のため) */
     int ts = -1;
     int tp = 0;
     int tarr = 0;
+    int tf = 0;
     {
         int k = node_kind[node];
         if (k == NODE_VAR) {
             int v = node_val[node];
             ts = var_struct[v] - 1;
             tp = var_plevel[v];
+            tf = var_fsig[v];
         } else if (k == NODE_ARRAY || k == NODE_ROWADDR) {
             /* 配列名 (と2次元の行) は先頭要素へのポインタ */
             int a = node_val[node];
             ts = arr_struct[a] - 1;
             tp = arr_plevel[a] + 1;
+            tf = arr_fsig[a];
         } else if (k == NODE_INDEX || k == NODE_INDEX2) {
             int a = node_val[node];
             ts = arr_struct[a] - 1;
             tp = arr_plevel[a];
+            tf = arr_fsig[a];
         } else if (k == NODE_PINDEX) {
             int v = node_val[node];
             ts = var_struct[v] - 1;
             tp = var_plevel[v] - 1;
+            tf = var_fsig[v];
         } else if (k == NODE_CALL) {
             int f = node_val[node];
             ts = func_ret_struct[f] - 1;
             tp = ts >= 0 ? 1 : 0;
+            tf = sig_ret_fsig[func_sig[f]];
+        } else if (k == NODE_ICALL) {
+            int s = node_val[node];
+            ts = sig_ret_struct[s] - 1;
+            tp = ts >= 0 ? 1 : sig_ret_plevel[s];
+            tf = sig_ret_fsig[s];
+        } else if (k == NODE_FADDR) {
+            tf = func_sig[node_val[node]] + 1;
+        } else if (k == NODE_MEMBER || k == NODE_MELEM) {
+            int mi = node_val[node];
+            tp = smem_plevel[mi];
+            tf = smem_fsig[mi];
         } else if (k == NODE_DEREF) {
             /* *p の形: 相手が変数なら、その指す先の型 */
             int o = node_lhs[node];
@@ -1209,11 +1357,19 @@ static int parse_postfix_expr(void) {
                 int v = node_val[o];
                 ts = var_struct[v] - 1;
                 tp = var_plevel[v] - 1;
+                tf = var_fsig[v];
+                if (tf > 0 && tp < 0)
+                    /* 関数ポインタの * は関数そのものを
+                     * 指す (C と同じ。段数は 0 に戻す) */
+                    tp = 0;
+            } else if (node_kind[o] == NODE_FADDR) {
+                tf = func_sig[node_val[o]] + 1;
             }
         }
         if (tp < 0) {
             ts = -1;
             tp = 0;
+            tf = 0;
         }
     }
     for (;;) {
@@ -1238,6 +1394,7 @@ static int parse_postfix_expr(void) {
             ts = smem_struct[mi] - 1;
             tp = smem_plevel[mi];
             tarr = smem_count[mi] > 0;
+            tf = smem_fsig[mi];
             continue;
         }
         if (cur[0] == '-' && cur[1] == '>') {
@@ -1263,6 +1420,7 @@ static int parse_postfix_expr(void) {
             ts = smem_struct[mi] - 1;
             tp = smem_plevel[mi];
             tarr = smem_count[mi] > 0;
+            tf = smem_fsig[mi];
             continue;
         }
         if (*cur == '[' && tarr) {
@@ -1277,7 +1435,26 @@ static int parse_postfix_expr(void) {
             node = new_node(NODE_MELEM, mi, node, idx);
             if (node < 0)
                 return -1;
-            tarr = 0;  /* 要素の型 (ts / tp) はメンバのまま */
+            tarr = 0;  /* 要素の型 (ts / tp / tf) はメンバのまま */
+            continue;
+        }
+        if (*cur == '(' && tf > 0 && tp == 0 && !tarr) {
+            /* 関数ポインタ経由の呼び出し (v44):
+             * fp(...)、table[i](...)、z->op(...) の形。
+             * 引数の数は署名と照らして検査する */
+            int sig = tf - 1;
+            cur++;
+            int args;
+            if (!parse_call_list_n(sig_nparams[sig], &args))
+                return -1;
+            node = new_node(NODE_ICALL, sig, node, args);
+            if (node < 0)
+                return -1;
+            /* 戻り値の型で追跡を続ける */
+            ts = sig_ret_struct[sig] - 1;
+            tp = ts >= 0 ? 1 : sig_ret_plevel[sig];
+            tf = sig_ret_fsig[sig];
+            tarr = 0;
             continue;
         }
         int is_post_inc;
@@ -1321,6 +1498,7 @@ static int parse_postfix_expr(void) {
             return -1;
         ts = -1;  /* 増減の結果は数値。メンバはもう辿れない */
         tarr = 0;
+        tf = 0;
     }
 }
 
@@ -1402,6 +1580,9 @@ static int parse_unary_expr(void) {
         if (operand < 0)
             return -1;
         int ok = node_kind[operand];
+        if (ok == NODE_FADDR)
+            /* &関数名 は関数の住所そのもの (v44) */
+            return operand;
         if (ok != NODE_VAR && ok != NODE_ARRAY &&
             !is_elem_node(operand)) {
             errmsg = "& の相手は変数か配列か要素だけです";
@@ -1837,11 +2018,14 @@ static int is_typedef_name(void) {
 }
 
 static int parse_type_bsize;   /* char を含めば 1、それ以外は 8 */
+static int parse_type_fsig;    /* 型そのものが関数ポインタなら
+                                * その署名番号 + 1 (v44、0 = なし) */
 /* parse_type_struct は前方で宣言済み (v37) */
 /* parse_type_plevel と parse_type_etype は前方で宣言済み */
 
 static int parse_type(void) {
     parse_type_struct = -1;
+    parse_type_fsig = 0;
     if (!is_ident_start(*cur))
         return 0;
     if (!parse_ident())
@@ -1895,6 +2079,7 @@ static int parse_type(void) {
         parse_type_bsize = tdef_bsize[td];
         parse_type_plevel = tdef_plevel[td] + stars;
         parse_type_struct = tdef_struct[td] - 1;
+        parse_type_fsig = tdef_fsig[td];
         return 1;
     }
     int has_char = ident_is("char");
@@ -1936,6 +2121,159 @@ static int parse_type(void) {
         parse_type_etype = parse_type_bsize;
     }
     parse_type_plevel = stars;
+    return 1;
+}
+
+/* 関数ポインタの引数の並びを読む (v44)。本体は
+ * 宣言子の後ろに置く (互いに呼び合うため先行宣言) */
+static int parse_fptr_params(int ret_et, int ret_pl, int ret_st,
+                             int ret_fs, int *sig_out);
+
+/* 関数ポインタの宣言子を読む (v44、設計は
+ * doc/funcptr.md): カーソルは '(' の位置。
+ *   ( * [名前] [ [大きさ] ] ) ( 引数の型の並び )
+ * 名前は name_out / *len_out へ (無ければ *len_out = 0)、
+ * [大きさ] があれば *arr_out へ (無ければ -1)、署名は
+ * *sig_out へ。ret_* は戻り値の型 (parse_type の結果)。
+ * 成功したら 1、失敗は 0 */
+static int parse_fptr_decl(int ret_et, int ret_pl, int ret_st,
+                           int ret_fs, char *name_out,
+                           int *len_out, int *arr_out,
+                           int *sig_out) {
+    *len_out = 0;
+    *arr_out = -1;
+    if (!expect_char('(', "関数ポインタの宣言は (*名前) (引数) の形です"))
+        return 0;
+    skip_spaces();
+    if (*cur != '*') {
+        errmsg = "関数ポインタの宣言は (*名前) (引数) の形です";
+        return 0;
+    }
+    cur++;
+    skip_spaces();
+    if (is_ident_start(*cur)) {
+        if (!parse_ident())
+            return 0;
+        *len_out = ident_len;
+        for (int i = 0; i < ident_len; i++)
+            name_out[i] = ident_buf[i];
+        skip_spaces();
+    }
+    if (*cur == '[') {
+        /* (*名前[N]) の形: 関数ポインタの配列 */
+        cur++;
+        skip_spaces();
+        int size = parse_number_value();
+        if (size < 1 || size > 1048576) {
+            errmsg = "配列の大きさは 1 から 1048576 までです";
+            return 0;
+        }
+        if (!expect_char(']', "配列の大きさの後には ] が必要です"))
+            return 0;
+        *arr_out = size;
+        skip_spaces();
+    }
+    if (!expect_char(')', "関数ポインタの宣言子の後には ) が必要です"))
+        return 0;
+    return parse_fptr_params(ret_et, ret_pl, ret_st, ret_fs,
+                             sig_out);
+}
+
+/* 関数ポインタの引数の型の並びを読む (v44): カーソルは
+ * 引数の '(' の位置。(void) は引数なし、() だけの形
+ * (型を書かない宣言) は断る。引数の名前はあっても
+ * 捨てる。署名を引いて *sig_out に入れる */
+static int parse_fptr_params(int ret_et, int ret_pl, int ret_st,
+                             int ret_fs, int *sig_out) {
+    int pet[8];
+    int ppl[8];
+    int pst[8];
+    int pfs[8];
+    int np = 0;
+    if (!expect_char('(', "関数ポインタの引数は ( で始めます"))
+        return 0;
+    skip_spaces();
+    if (*cur == ')') {
+        errmsg = "関数ポインタの引数は型を書きます ((void) は引数なし)";
+        return 0;
+    }
+    {
+        /* (void) の先読み (parse_funcdef と同じやり方) */
+        char *save_v = cur;
+        if (parse_ident() && ident_is("void") && !is_ptr_ahead()) {
+            skip_spaces();
+            if (*cur == ')') {
+                cur++;
+                int s = sig_intern(ret_et, ret_pl, ret_st,
+                                   ret_fs, 0);
+                if (s < 0)
+                    return 0;
+                *sig_out = s;
+                return 1;
+            }
+        }
+        cur = save_v;
+    }
+    for (;;) {
+        if (np >= 8) {
+            errmsg = "引数は8つまでです";
+            return 0;
+        }
+        skip_spaces();
+        if (!parse_type()) {
+            errmsg = "引数は 型 の形で書きます";
+            return 0;
+        }
+        pet[np] = parse_type_etype;
+        ppl[np] = parse_type_plevel;
+        pst[np] = parse_type_struct;
+        pfs[np] = parse_type_fsig;
+        skip_spaces();
+        if (*cur == '(') {
+            /* 入れ子の関数ポインタ引数 (int (*)(...) の形) */
+            char dummy[32];
+            int dlen;
+            int darr;
+            int nsig;
+            if (!parse_fptr_decl(pet[np], ppl[np], pst[np],
+                                 pfs[np], dummy, &dlen, &darr,
+                                 &nsig))
+                return 0;
+            if (darr >= 0) {
+                errmsg = "関数ポインタの配列は引数にできません";
+                return 0;
+            }
+            pet[np] = 8;
+            ppl[np] = 0;
+            pst[np] = -1;
+            pfs[np] = nsig + 1;
+        } else if (is_ident_start(*cur)) {
+            /* 引数の名前は捨てる */
+            if (!parse_ident())
+                return 0;
+        }
+        np++;
+        skip_spaces();
+        if (*cur == ',') {
+            cur++;
+            continue;
+        }
+        break;
+    }
+    if (!expect_char(')', "引数の後には ) が必要です"))
+        return 0;
+    {
+        for (int i = 0; i < np; i++) {
+            sig_scr_pet[i] = pet[i];
+            sig_scr_ppl[i] = ppl[i];
+            sig_scr_pst[i] = pst[i];
+            sig_scr_pfs[i] = pfs[i];
+        }
+        int s = sig_intern(ret_et, ret_pl, ret_st, ret_fs, np);
+        if (s < 0)
+            return 0;
+        *sig_out = s;
+    }
     return 1;
 }
 
@@ -1985,6 +2323,9 @@ static int parse_funcdef(void) {
         func_called[f] = 0;
     }
     func_ret_etype[f] = parse_type_etype;  /* 戻り値の型 (v35) */
+    int ret_pl = parse_type_plevel;   /* 署名用に控える (v44) */
+    int ret_st = parse_type_struct;
+    int ret_fs = parse_type_fsig;
     func_ret_struct[f] = parse_type_struct + 1;  /* 戻り値の構造体 (v37) */
     if (parse_type_struct >= 0 && parse_type_plevel == 0) {
         errmsg = "構造体は値で返せません (ポインタで返してください)";
@@ -2002,6 +2343,7 @@ static int parse_funcdef(void) {
     int pet[8];   /* 引数の型タグ (v35) */
     int ppl[8];
     int pst[8];   /* 引数の構造体番号 (v37) */
+    int pfs[8];   /* 引数の関数ポインタ署名 + 1 (v44) */
     int np = 0;
     int params_done = 0;  /* (void) は引数なしと同義 (v25) */
     skip_spaces();
@@ -2042,13 +2384,32 @@ static int parse_funcdef(void) {
             pet[np] = parse_type_etype;
             ppl[np] = parse_type_plevel;
             pst[np] = parse_type_struct;
+            pfs[np] = parse_type_fsig;
             if (pst[np] >= 0 && ppl[np] == 0) {
                 errmsg = "構造体は値で渡せません (ポインタで渡してください)";
                 return 0;
             }
             plens[np] = 0;
             skip_spaces();
-            if (is_ident_start(*cur)) {
+            if (*cur == '(') {
+                /* 関数ポインタ引数の直接の形 (v44):
+                 * 型 (*名前) (引数の型の並び) */
+                int dsig;
+                int darr;
+                if (!parse_fptr_decl(pet[np], ppl[np], pst[np],
+                                     pfs[np], pnames[np],
+                                     &plens[np], &darr, &dsig))
+                    return 0;
+                if (darr >= 0) {
+                    errmsg = "関数ポインタの配列は引数にできません";
+                    return 0;
+                }
+                pbs[np] = 8;
+                pet[np] = 8;
+                ppl[np] = 0;
+                pst[np] = -1;
+                pfs[np] = dsig + 1;
+            } else if (is_ident_start(*cur)) {
                 if (!parse_ident())
                     return 0;
                 plens[np] = ident_len;
@@ -2071,6 +2432,17 @@ static int parse_funcdef(void) {
         return 0;
     }
     func_nparams[f] = np;
+    /* 署名を引く (v44): 関数ポインタとの照合に使う */
+    for (int i = 0; i < np; i++) {
+        sig_scr_pet[i] = pet[i];
+        sig_scr_ppl[i] = ppl[i];
+        sig_scr_pst[i] = pst[i];
+        sig_scr_pfs[i] = pfs[i];
+    }
+    func_sig[f] = sig_intern(func_ret_etype[f], ret_pl, ret_st,
+                             ret_fs, np);
+    if (func_sig[f] < 0)
+        return 0;
     skip_spaces();
     if (*cur == ';') {
         /* プロトタイプ (宣言だけ、v24)。本体は後から
@@ -2100,6 +2472,7 @@ static int parse_funcdef(void) {
                                   ppl[k], 1, pet[k], pst[k], 1);
         if (var < 0)
             return 0;
+        var_fsig[var] = (char)pfs[k];
         func_param_var[f][k] = var;
     }
     /* main という名前の関数は特別扱い (v12): プログラムの

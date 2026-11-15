@@ -66,17 +66,16 @@ apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2048' 1
 apply nori.c '[4096]' '[1024]' 15
 apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 1024' 1
 # 再配置表
-apply nori.c '[16384]' '[5120]' 7
-apply nori.c 'MAX_REL = 16384' 'MAX_REL = 5120' 1
-# 入力バッファと読みのガード
-apply nori.c 'in_buf[393216]' 'in_buf[184320]' 1
-apply nori.c '393216 - in_len' '184320 - in_len' 1
-apply nori.c 'in_len >= 393216' 'in_len >= 184320' 1
+apply nori.c '[16384]' '[6144]' 7
+apply nori.c 'MAX_REL = 16384' 'MAX_REL = 6144' 1
+# 共有バッファ (in_buf と out_code の相乗り、v44) と読みのガード
+apply nori.c 'share_buf[393216]' 'share_buf[221184]' 1
+apply nori.c '393216 - in_len' '221184 - in_len' 1
+apply nori.c 'in_len >= 393216' 'in_len >= 221184' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[262144]' 'code_pool[188416]' 1
-apply nori.c 'code_used >= 262144' 'code_used >= 188416' 1
-apply nori.c 'out_code[262144]' 'out_code[188416]' 1
-apply nori.c '> 262144' '> 188416' 1
+apply nori.c 'code_pool[262144]' 'code_pool[221184]' 1
+apply nori.c 'code_used >= 262144' 'code_used >= 221184' 1
+apply nori.c '> 262144' '> 221184' 1
 # 配列の初期値の置き場 (v40)
 apply nori.c 'ainit_buf[262144]' 'ainit_buf[4096]' 1
 apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 4096' 1

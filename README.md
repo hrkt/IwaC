@@ -17,13 +17,23 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v43（switch）を branch `v43` で追加
+## 現在地: v44（関数ポインタ）を branch `v44` で追加
 
-C どおりの switch 文を足した
-（doc/missing-features.md の実装予定の
-第一候補）。本体は { } 必須、case ラベルは
-定数式まで、fallthrough あり。設計は
-doc/switch.md。
+関数ポインタ（間接呼び出し）を足した。
+動機は命令ディスパッチ（Z80 エミュレータの
+ハンドラ表）。typedef と直接宣言子、変数・
+配列・引数・構造体メンバ、ファイル範囲の
+初期化子（要素は関数名か 0）まで。署名は
+名簿に intern して照合する。設計は
+doc/funcptr.md。あわせて、iwac 自身の
+ソースの成長に合わせて容量を増やした
+（バッファ約 448KB、ノード 24576、
+変数 1280、配列 192、命令 57344）。
+
+v43（switch）は main にマージ済み:
+C どおりの switch 文（本体は { } 必須、
+case ラベルは定数式まで、fallthrough
+あり。設計は doc/switch.md）。
 
 v42（.iwo の引退）は main にマージ済み:
 オブジェクト形式を ELF に一本化した

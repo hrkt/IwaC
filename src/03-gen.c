@@ -87,23 +87,24 @@ static int OP_REMU = 37; /* 符号なし剰余 (v35、M 拡張) */
 static int OP_SRL = 38;  /* 論理右シフト (v35) */
 static int OP_SRAI = 39; /* 算術右シフト即値 (v35) */
 
-/* 命令表の上限は 49152 (v39 で 40960 から増量。
+/* 命令表の上限は 57344 (v39 で 40960 → 49152、
+ * v44 で → 57344 と増量)。
  * v38 の時点で一括セルフコンパイルが約44K命令に
  * 達して上限を超え、asm_push が無言で表の外へ
  * 書いて隣の表を壊していた (点検は asm_push と
  * gen_program にある)。op / rd / rs1 / rs2 は
  * 小さい値しか入らないので char にして、増量の
  * 対価 (imm と patch_next の増分) を払った */
-static char asm_op[49152];
-static char asm_rd[49152];
-static char asm_rs1[49152];
-static char asm_rs2[49152];
-static int asm_imm[49152];
+static char asm_op[57344];
+static char asm_rd[57344];
+static char asm_rs1[57344];
+static char asm_rs2[57344];
+static int asm_imm[57344];
 static int nasm;  /* 並べた命令の数 */
 
 /* 命令を1つ、命令列の末尾に積む */
 static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
-    if (nasm >= 49152) {
+    if (nasm >= 57344) {
         /* 上限あふれ: 表の外へは書かない (v39)。
          * 生成は最後まで回るが、gen_program が
          * nasm を見て失敗にする */
@@ -134,7 +135,7 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
  * 指す。届く分岐は従来どおり beq 1命令のままなので、
  * 今まで正しく作れていたプログラムの出力は変わらない */
 static int branch_ord;         /* 条件分岐の通し番号 */
-static char branch_long[49152]; /* 伸ばす分岐の印 */
+static char branch_long[57344]; /* 伸ばす分岐の印 */
 
 /* 「t1 が 0 なら飛ぶ」条件分岐を置く。戻り値は、飛び先
  * (命令番号) を asm_imm に書き込むべき命令の番号:
@@ -267,12 +268,13 @@ static int obj_flush_site;    /* 入口の kosaba_flush
 /* 住所作りの穴 (auipc + addi の組) の控え。
  * 種類 (番号は命令番号、idx は対象の番号):
  *   1 = 文字列 (文字列番号)、2 = グローバル変数、
- *   3 = グローバル配列。
+ *   3 = グローバル配列、4 = 関数 (v44)。
  * 絶対アドレス (デバイスの窓口) は数が少ないので
  * 別の小さな表に分ける (値そのものを持つ) */
 static int RLOC_STR = 1;
 static int RLOC_VAR = 2;
 static int RLOC_ARR = 3;
+static int RLOC_FUNC = 4;  /* 関数 (添字 = 関数番号、v44) */
 static int obj_reloc_site[8192];
 static int obj_reloc_kind[8192];
 static int obj_reloc_idx[8192];
@@ -280,6 +282,15 @@ static int obj_nreloc;
 static int obj_abs_site[256];
 static int obj_abs_val[256];
 static int obj_nabs;
+/* 一括出力で関数の住所を作った場所の控え (v44):
+ * 関数の住所は分岐緩和が落ち着くまで決まらないので、
+ * auipc + addi の組だけ置いておき、命令列の最後に
+ * (JAL の飛び先と同じ段階で) 即値を埋める。
+ * dfaddr_site[i] = auipc の命令番号、dfaddr_func[i]
+ * = 関数番号。溢れたら dfaddr_n が -1 になる */
+static int dfaddr_site[1024];
+static int dfaddr_func[1024];
+static int dfaddr_n;
 
 static void gen_load_addr(int reg, unsigned int addr) {
     /* この auipc 命令自身が置かれる住所 (命令列の今の末尾) */
@@ -300,6 +311,20 @@ static void gen_load_addr(int reg, unsigned int addr) {
  * (kind の代わりに 0) は idx が住所そのもの */
 static void gen_load_addr_sym(int reg, int kind, int idx) {
     if (!obj_mode) {
+        if (kind == RLOC_FUNC) {
+            /* 関数の住所 (v44): コード側の住所は分岐
+             * 緩和が落ち着くまで決まらないので、組だけ
+             * 置いて控えに残し、最後に埋める */
+            if (dfaddr_n >= 0 && dfaddr_n < 1024) {
+                dfaddr_site[dfaddr_n] = nasm;
+                dfaddr_func[dfaddr_n] = idx;
+                dfaddr_n++;
+            } else
+                dfaddr_n = -1;  /* あふれの印 */
+            asm_push(OP_AUIPC, reg, 0, 0, 0);
+            asm_push(OP_ADDI, reg, reg, 0, 0);
+            return;
+        }
         if (kind == RLOC_STR)
             gen_load_addr(reg, str_addr[idx]);
         else if (kind == RLOC_VAR)
@@ -569,6 +594,29 @@ static void gen_store_var(int var, int reg) {
  *   ポインタ読み: 指す先の大きさで読む (v27。char* は
  *             1バイト、int* は 8バイト)。住所は、
  *             変数ならその値、数なら絶対アドレスそのもの */
+/* *式 の相手が関数ポインタそのものか (v44): 関数
+ * ポインタの * は関数そのものを指す (C と同じ) ので、
+ * メモリの読み出しは起きず、住所がそのまま値になる */
+static int deref_is_funcptr(int node) {
+    int o = node_lhs[node];
+    int k = node_kind[o];
+    if (k == NODE_FADDR)
+        return 1;
+    if (k == NODE_VAR)
+        return var_plevel[node_val[o]] == 0 &&
+               var_fsig[node_val[o]] != 0;
+    if (k == NODE_PINDEX)
+        return var_plevel[node_val[o]] == 1 &&
+               var_fsig[node_val[o]] != 0;
+    if (k == NODE_INDEX || k == NODE_INDEX2)
+        return arr_plevel[node_val[o]] == 0 &&
+               arr_fsig[node_val[o]] != 0;
+    if (k == NODE_MEMBER || k == NODE_MELEM)
+        return smem_plevel[node_val[o]] == 0 &&
+               smem_fsig[node_val[o]] != 0;
+    return 0;
+}
+
 static void gen_load_leaf(int reg, int leaf) {
     int k = node_kind[leaf];
     if (k == NODE_NUM) {
@@ -597,6 +645,16 @@ static void gen_load_leaf(int reg, int leaf) {
         gen_load_arr_base(reg, node_val[leaf]);
     else { /* NODE_DEREF: lhs が住所を表すノード */
         int operand = node_lhs[leaf];
+        if (deref_is_funcptr(leaf)) {
+            /* 関数ポインタの * は住所そのもの (v44):
+             * 読み出さず、相手の値をそのまま使う */
+            if (node_kind[operand] == NODE_VAR)
+                gen_load_var(reg, node_val[operand]);
+            else /* NODE_FADDR */
+                gen_load_addr_sym(reg, RLOC_FUNC,
+                                  node_val[operand]);
+            return;
+        }
         /* 読む幅は指す先の大きさで決める (v27: 以前は
          * 常に1バイトで、int* の読みが切れていた) */
         int op = mem_load_op(deref_etype(operand));
@@ -680,6 +738,13 @@ static void type_node(int node) {
         type_node(node_rhs[node]);
     } else if (k == NODE_CALL || k == NODE_SYSCALL3) {
         type_list(node_lhs[node]);
+    } else if (k == NODE_ICALL) {
+        /* 間接呼び出し (v44): lhs = 呼び先の式、
+         * rhs = 引数の並び */
+        type_node(node_lhs[node]);
+        type_list(node_rhs[node]);
+    } else if (k == NODE_FADDR) {
+        /* 関数の住所 (v44): 子はない */
     } else if (k == NODE_NUM || k == NODE_VAR ||
                k == NODE_STR || k == NODE_ARRAY ||
                k == NODE_DECL || k == NODE_VDECL ||
@@ -716,6 +781,10 @@ static void type_node(int node) {
         et = deref_etype(node_lhs[node]);
     else if (k == NODE_CALL)
         et = func_ret_etype[node_val[node]];
+    else if (k == NODE_ICALL)
+        et = sig_ret_etype[node_val[node]];
+    else if (k == NODE_FADDR)
+        et = 8;  /* 住所は8バイト */
     else if (k == NODE_CAST)
         et = node_val[node];
     else if (k == NODE_ADD || k == NODE_SUB || k == NODE_MUL ||
@@ -746,6 +815,66 @@ static void type_node(int node) {
     node_etype[node] = et;
 }
 
+/* 式の値に結び付く関数ポインタの署名 (v44): 値そのものが
+ * 関数ポインタ、または関数ポインタへのポインタのとき、
+ * その署名番号 + 1 を返す。関係なければ 0。代入や
+ * 引数の受け渡しの照合に使う */
+static int value_fsig(int node) {
+    int k = node_kind[node];
+    if (k == NODE_VAR)
+        return var_fsig[node_val[node]];
+    if (k == NODE_FADDR)
+        return func_sig[node_val[node]] + 1;
+    if (k == NODE_ARRAY || k == NODE_ROWADDR ||
+        k == NODE_INDEX || k == NODE_INDEX2)
+        return arr_fsig[node_val[node]];
+    if (k == NODE_PINDEX)
+        return var_fsig[node_val[node]];
+    if (k == NODE_MEMBER || k == NODE_MELEM)
+        return smem_fsig[node_val[node]];
+    if (k == NODE_CALL)
+        return sig_ret_fsig[func_sig[node_val[node]]];
+    if (k == NODE_ICALL)
+        return sig_ret_fsig[node_val[node]];
+    if (k == NODE_DEREF || k == NODE_ADDR || k == NODE_CAST)
+        return value_fsig(node_lhs[node]);
+    if (k == NODE_COND) {
+        int t = value_fsig(node_val[node]);
+        int e = value_fsig(node_rhs[node]);
+        return t == e ? t : 0;
+    }
+    return 0;
+}
+
+/* 要素を表すノード (要素への書き込みの住所側) に
+ * 結び付く関数ポインタの署名 (v44)。無ければ 0 */
+static int elem_fsig_of(int node) {
+    int k = node_kind[node];
+    if (k == NODE_INDEX || k == NODE_INDEX2)
+        return arr_fsig[node_val[node]];
+    if (k == NODE_PINDEX)
+        return var_fsig[node_val[node]];
+    if (k == NODE_MEMBER || k == NODE_MELEM)
+        return smem_fsig[node_val[node]];
+    return 0;
+}
+
+/* 関数ポインタの受け渡しの照合 (v44): 受け側の署名
+ * (want、+1 符号化) が分かっていて、渡す側の署名も
+ * 分かっているのに食い違うときだけ止める。渡す側が
+ * 数や素のポインタなど署名の分からない値なら、
+ * 今の緩い型の流儀どおり通す */
+static int check_fsig(int want, int expr) {
+    if (want == 0)
+        return 1;
+    int got = value_fsig(expr);
+    if (got != 0 && got != want) {
+        errmsg = "関数ポインタの型 (署名) が合いません";
+        return 0;
+    }
+    return 1;
+}
+
 static int gen_expr(int node) {
     if (node_kind[node] == NODE_VAR &&
         var_struct[node_val[node]] > 0 &&
@@ -768,6 +897,9 @@ static int gen_expr(int node) {
         return 1;
     }
     if (node_kind[node] == NODE_DEREF) {
+        if (deref_is_funcptr(node))
+            /* 関数ポインタの * は住所そのもの (v44) */
+            return gen_expr(node_lhs[node]);
         /* 相手が計算式のポインタ読み: 住所を t1 で計算し、
          * その住所から1バイト読む。計算式だと指す先の型が
          * 分からないので、従来どおり1バイトのまま
@@ -835,6 +967,13 @@ static int gen_expr(int node) {
         asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
         return 1;
     }
+    if (node_kind[node] == NODE_FADDR) {
+        /* 関数の住所 (v44): 住所作りの組を出す。
+         * 一括では命令列の最後に埋め、オブジェクトでは
+         * リンカが埋める (gen_load_addr_sym の説明参照) */
+        gen_load_addr_sym(REG_T1, RLOC_FUNC, node_val[node]);
+        return 1;
+    }
     if (node_kind[node] == NODE_SYSCALL3) {
         /* 組み込み syscall3 (v27、KosabaOS ターゲット専用):
          *   引数を右から評価してスタックに積む (関数呼び
@@ -871,6 +1010,17 @@ static int gen_expr(int node) {
         int nargs = 0;
         for (int a = node_lhs[node]; a != -1; a = node_next[a])
             nargs++;
+        if (func_has_body[node_val[node]]) {
+            /* 引数が関数ポインタなら署名を照合する
+             * (v44。本体のある関数だけ引数の変数が
+             * 名簿に載っている) */
+            int ai = 0;
+            for (int a = node_lhs[node]; a != -1; a = node_next[a]) {
+                if (!check_fsig(var_fsig[func_param_var[node_val[node]][ai]], a))
+                    return 0;
+                ai++;
+            }
+        }
         if (!gen_call_args(node_lhs[node]))
             return 0;
         if (nargs > 0) {
@@ -883,6 +1033,42 @@ static int gen_expr(int node) {
         asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
         /* 戻り値の型が幅つきなら正規形に直す (v35) */
         emit_canon(func_ret_etype[node_val[node]]);
+        return 1;
+    }
+    if (node_kind[node] == NODE_ICALL) {
+        /* 関数ポインタ経由の呼び出し (v44):
+         *   引数を右から評価してスタックに積む
+         *   呼び先の式を評価して t1 に住所を得る
+         *   積んだ引数を a0〜 へ移してスタックを戻す
+         *   jalr ra, t1, 0
+         *   addi t1, a0, 0 (戻り値を式の値の場所へ)
+         * 引数の積み下ろし (a0〜 への ld) は t1 に
+         * 触らないので、呼び先の住所は壊れない */
+        int sig = node_val[node];
+        int nargs = 0;
+        for (int a = node_rhs[node]; a != -1; a = node_next[a])
+            nargs++;
+        {
+            int ai = 0;
+            for (int a = node_rhs[node]; a != -1; a = node_next[a]) {
+                if (!check_fsig(sig_pfsig[sig][ai], a))
+                    return 0;
+                ai++;
+            }
+        }
+        if (!gen_call_args(node_rhs[node]))
+            return 0;
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        if (nargs > 0) {
+            for (int k = 0; k < nargs; k++)
+                asm_push(OP_LD, REG_A0 + k, REG_SP, 0, k * 16);
+            asm_push(OP_ADDI, REG_SP, REG_SP, 0, nargs * 16);
+        }
+        asm_push(OP_JALR, REG_RA, REG_T1, 0, 0);
+        asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
+        /* 戻り値の型が幅つきなら正規形に直す */
+        emit_canon(sig_ret_etype[sig]);
         return 1;
     }
     if (node_kind[node] == NODE_LAND) {
@@ -1340,7 +1526,7 @@ static int ctrl_depth;          /* 制御構造 (ループと switch) の
                                  * 入れ子の深さ。break が最も内側の
                                  * どちらを抜けるかを決める (v43) */
 static char ctrl_is_switch[65]; /* 深さごとの種別: 1 なら switch */
-static int patch_next[49152];
+static int patch_next[57344];
 
 /* 関数の return の飛び先 (出口は関数の生成の最後まで
  * 分からない) も同じ道具で積む */
@@ -1351,6 +1537,10 @@ static int gen_in_func;  /* 関数の生成中なら 1 */
 static void emit_patch_jump(int *head) {
     int i = nasm;
     asm_push(OP_JAL, 0, 0, 0, 0);
+    if (nasm == i)
+        return;  /* 表が一杯で push が止まった (v44)。
+                  * 生成の最後で「命令が多すぎます」に
+                  * なるので、ここでは繋がない */
     patch_next[i] = *head;
     *head = i;
 }
@@ -1391,6 +1581,14 @@ static int gen_stmt(int node) {
         int addr_node = (kind == NODE_INDEX_STORE) ? node
                                                    : node_lhs[node];
         int val_node = node_rhs[node];
+        /* 要素が関数ポインタなら署名を照合する (v44) */
+        {
+            int want = (kind == NODE_INDEX_STORE)
+                ? arr_fsig[node_val[node]]
+                : elem_fsig_of(node_lhs[node]);
+            if (!check_fsig(want, val_node))
+                return 0;
+        }
         if (!gen_elem_addr(addr_node))
             return 0;
         if (!is_leaf(val_node)) {
@@ -1413,6 +1611,9 @@ static int gen_stmt(int node) {
         return 1;
     }
     if (kind == NODE_ASSIGN) {
+        /* 代入先が関数ポインタなら署名を照合する (v44) */
+        if (!check_fsig(var_fsig[node_val[node]], node_lhs[node]))
+            return 0;
         if (!gen_expr(node_lhs[node]))
             return 0;
         /* 結果 (t1) を変数の置き場所へ書く (代入、v21) */
@@ -1456,10 +1657,12 @@ static int gen_stmt(int node) {
                  0, REG_T2, REG_T1, 0);
         return 1;
     }
-    if (kind == NODE_CALL || kind == NODE_SYSCALL3) {
+    if (kind == NODE_CALL || kind == NODE_SYSCALL3 ||
+        kind == NODE_ICALL) {
         /* 呼び出し文: 式として生成し、戻り値 (t1) は
          * 捨てる (v22 で呼び出しが式になったための形。
-         * syscall3 の文も同じ、v27) */
+         * syscall3 の文も同じ、v27。間接呼び出しも
+         * 同じ、v44) */
         return gen_expr(node);
     }
     if (kind == NODE_IF) {
@@ -1838,6 +2041,18 @@ static int expr_needs_stack(int node) {
         }
         return 0;
     }
+    if (k == NODE_ICALL) {
+        /* 間接呼び出し (v44): 呼び先の式と引数の並び */
+        if (expr_needs_stack(node_lhs[node]))
+            return 1;
+        for (int a = node_rhs[node]; a != -1; a = node_next[a]) {
+            if (expr_needs_stack(a))
+                return 1;
+        }
+        return 0;
+    }
+    if (k == NODE_FADDR)
+        return 0;
     if (k == NODE_DEREF)
         return expr_needs_stack(node_lhs[node]);
     if (k == NODE_INDEX)
@@ -1872,6 +2087,16 @@ static int stmt_needs_stack(int node) {
     if (k == NODE_CALL) {
         /* 引数の式の並びのどれかが退避を要するか (v22) */
         for (int a = node_lhs[node]; a != -1; a = node_next[a]) {
+            if (expr_needs_stack(a))
+                return 1;
+        }
+        return 0;
+    }
+    if (k == NODE_ICALL) {
+        /* 間接呼び出しの文 (v44) */
+        if (expr_needs_stack(node_lhs[node]))
+            return 1;
+        for (int a = node_rhs[node]; a != -1; a = node_next[a]) {
             if (expr_needs_stack(a))
                 return 1;
         }
@@ -1934,6 +2159,7 @@ static int gen_all(void) {
     nasm = 0;
     obj_nreloc = 0;    /* 穴の控えも数え直す (v31) */
     obj_nabs = 0;
+    dfaddr_n = 0;      /* 関数の住所の控えも同じく (v44) */
     obj_flush_site = -1;
     loop_depth = 0;    /* 2パス生成のたびに数え直す (v20) */
     sw_depth = 0;      /* switch の深さも同じく数え直す (v43) */
@@ -2097,6 +2323,21 @@ static int gen_all(void) {
             if (asm_op[i] == OP_JAL && asm_imm[i] < 0)
                 asm_imm[i] = func_entry[-asm_imm[i] - 1];
         }
+        /* 関数の住所の組 (auipc + addi) の即値を埋める
+         * (v44): 相手の住所 = LOAD_BASE + 入口の命令
+         * 番号 × 4。分け方は gen_load_addr と同じ */
+        for (int i = 0; i < dfaddr_n; i++) {
+            int site = dfaddr_site[i];
+            unsigned int pc = LOAD_BASE +
+                              (unsigned int)site * 4u;
+            unsigned int addr = LOAD_BASE +
+                (unsigned int)func_entry[dfaddr_func[i]] * 4u;
+            long diff = (long)addr - (long)pc;
+            long hi = (diff + 0x800) >> 12;
+            long lo = diff - (hi << 12);
+            asm_imm[site] = (int)hi;
+            asm_imm[site + 1] = (int)lo;
+        }
     }
     return 1;
 }
@@ -2142,7 +2383,7 @@ static int gen_program(void) {
      * 伸ばす。伸ばすと別の分岐が届かなくなることがある
      * ので、印が増えなくなるまで1回目の生成を繰り返す
      * (emit_beq_t1z の説明参照) */
-    for (int i = 0; i < 49152; i++)
+    for (int i = 0; i < 57344; i++)
         branch_long[i] = 0;
     for (;;) {
         if (!gen_all())
@@ -2150,7 +2391,7 @@ static int gen_program(void) {
         if (!relax_scan())
             break;
     }
-    if (nasm >= 49152) {
+    if (nasm >= 57344) {
         /* asm_push が上限で止めた分 (v39) */
         errmsg = "命令が多すぎます";
         return 0;
@@ -2158,6 +2399,10 @@ static int gen_program(void) {
     code_insts = nasm;
     if (obj_mode && (obj_nreloc < 0 || obj_nabs < 0)) {
         errmsg = "穴のメモが多すぎます (オブジェクト出力の上限)";
+        return 0;
+    }
+    if (!obj_mode && dfaddr_n < 0) {
+        errmsg = "関数の住所を作る場所が多すぎます";
         return 0;
     }
     /* 静的データ (文字列 → 配列 → グローバル) の

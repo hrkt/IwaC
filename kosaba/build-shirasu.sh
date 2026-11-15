@@ -13,12 +13,12 @@
 # 標準と同じ kosaba_crt.S / kosaba_lib.c / kosaba.ld で組む。
 #
 # 容量プロファイル (標準 → 小容量):
-#   ノード表        20480 → 2048
-#   命令表          49152 → 4096 (パッチ表と分岐緩和の印も同じ数)
-#   変数表          1024  → 256
+#   ノード表        24576 → 2048
+#   命令表          57344 → 4096 (パッチ表と分岐緩和の印も同じ数)
+#   変数表          1280  → 256
 #   文字列プール    16384 → 4096 バイト (個数 512 は不変)
-#   ソース上限      約384KB → 約32KB
-#   展開バッファ    約384KB → 約32KB
+#   ソース上限      約448KB → 約32KB
+#   展開バッファ    約448KB → 約32KB
 #   配列初期値プール 65536 → 1024 要素 (v40)
 # このとき出来る iwac の静的データは約371KB。コンパイル
 # できるのは「小さいプログラム」だけになる (hello.c 級を
@@ -78,26 +78,28 @@ apply() {
 # 02-parse.c: ノード表と変数表と文字列プール。
 # str_pool は [16384] が他と重なるので先に名指しで替える
 apply 02-parse.c 'str_pool[16384]' 'str_pool[4096]' 1
-apply 02-parse.c '[20480]' '[2048]' 6
-apply 02-parse.c 'nnode >= 20480' 'nnode >= 2048' 1
+apply 02-parse.c '[24576]' '[2048]' 6
+apply 02-parse.c 'nnode >= 24576' 'nnode >= 2048' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 4095' 1
-apply 02-parse.c '[1024]' '[256]' 10
-apply 02-parse.c 'nvar >= 1024' 'nvar >= 256' 1
+apply 02-parse.c '[1280]' '[256]' 11
+apply 02-parse.c '[1024]' '[256]' 2
+apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 256' 1
+apply 02-parse.c 'nvar >= 1280' 'nvar >= 256' 1
 apply 02-parse.c 'arr_init_pool[65536]' 'arr_init_pool[1024]' 1
-apply 02b-decl.c 'arr_init_used >= 65536' 'arr_init_used >= 1024' 2
+apply 02b-decl.c 'arr_init_used >= 65536' 'arr_init_used >= 1024' 3
 # 03-gen.c: 命令表 (5つ) とパッチ表
-apply 03-gen.c '[49152]' '[4096]' 7
+apply 03-gen.c '[57344]' '[4096]' 7
 # branch_long を消すループの上限も命令表に合わせる (v27 で追加
 # されたループ。これを忘れると小さい配列をはみ出して書く)
-apply 03-gen.c 'i < 49152' 'i < 4096' 1
+apply 03-gen.c 'i < 57344' 'i < 4096' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)。
 # エラー表示の数字も合わせる (2か所)
-apply 05-input.c 'src_buf[393216]' 'src_buf[32768]' 1
-apply 05-input.c '393215' '32767' 4
-apply 05-input.c '約384KBまで' '約32KBまで' 3
+apply 05-input.c 'src_buf[458752]' 'src_buf[32768]' 1
+apply 05-input.c '458751' '32767' 4
+apply 05-input.c '約448KBまで' '約32KBまで' 3
 # 06-preproc.c: 展開バッファと上限のガード
-apply 06-preproc.c 'exp_buf[393216]' 'exp_buf[32768]' 1
-apply 06-preproc.c 'exp_len >= 393215' 'exp_len >= 32767' 1
+apply 06-preproc.c 'exp_buf[458752]' 'exp_buf[32768]' 1
+apply 06-preproc.c 'exp_len >= 458751' 'exp_len >= 32767' 1
 
 # 小容量の iwac (ホスト版) と、標準の iwac (ホスト版) を作る
 cat "$WORK"/0*.c > "$WORK/iwac_all.c"

@@ -157,7 +157,12 @@ static int parse_stmt_list(int in_brace) {
                 int is_decl_stmt = 0;
                 if (parse_type()) {
                     skip_spaces();
-                    if (parse_ident()) {
+                    if (*cur == '(') {
+                        /* 型の直後の '(' は関数ポインタの
+                         * 宣言 (v44)。関数定義は名前で
+                         * 始まるので、こちらは宣言の文 */
+                        is_decl_stmt = 1;
+                    } else if (parse_ident()) {
                         skip_spaces();
                         is_decl_stmt = (*cur == '[' || *cur == '=' ||
                                         *cur == ';');
@@ -334,6 +339,11 @@ static int parse_stmt_list(int in_brace) {
  * 文字列の住所で、生成のときに決まる)、0 = 定数でない */
 static int eval_const(int node, long *out) {
     int k = node_kind[node];
+    if (k == NODE_FADDR) {
+        /* 関数の住所 (v44): 値は関数番号、種別は 3 */
+        *out = node_val[node];
+        return 3;
+    }
     if (k == NODE_NUM) {
         /* 16進リテラルは parse の時点で int の範囲に
          * 畳んであるが、値としては符号なし32ビットの
@@ -428,15 +438,44 @@ static int parse_typedef(void) {
     int bs = parse_type_bsize;
     int pl = parse_type_plevel;
     int st = parse_type_struct;
-    skip_spaces();
-    if (!parse_ident()) {
-        errmsg = "typedef には付ける名前が必要です";
-        return -1;
-    }
+    int fs = parse_type_fsig;
     char name_buf[32];
-    int name_len = ident_len;
-    for (int i = 0; i < name_len; i++)
-        name_buf[i] = ident_buf[i];
+    int name_len;
+    skip_spaces();
+    if (*cur == '(') {
+        /* 関数ポインタの typedef (v44):
+         * typedef 戻り値 (*名前) (引数の型の並び) ; */
+        int arr;
+        int sig;
+        if (!parse_fptr_decl(et, pl, st, fs, name_buf,
+                             &name_len, &arr, &sig))
+            return -1;
+        if (arr >= 0) {
+            errmsg = "配列の typedef はできません";
+            return -1;
+        }
+        if (name_len == 0) {
+            errmsg = "typedef には付ける名前が必要です";
+            return -1;
+        }
+        et = 8;
+        bs = 8;
+        pl = 0;
+        st = -1;
+        fs = sig + 1;
+        /* 名前の衝突検査が ident_buf を見るので戻しておく */
+        ident_len = name_len;
+        for (int i = 0; i < name_len; i++)
+            ident_buf[i] = name_buf[i];
+    } else {
+        if (!parse_ident()) {
+            errmsg = "typedef には付ける名前が必要です";
+            return -1;
+        }
+        name_len = ident_len;
+        for (int i = 0; i < name_len; i++)
+            name_buf[i] = ident_buf[i];
+    }
     skip_spaces();
     if (*cur != ';') {
         errmsg = "typedef の終わりには ; が必要です (名前は1つだけ付けられます)";
@@ -456,7 +495,8 @@ static int parse_typedef(void) {
          * 複数のファイルで共有する形のため)。違う型への
          * 付け直しはエラー */
         if (tdef_etype[existing] == et && tdef_bsize[existing] == bs &&
-            tdef_plevel[existing] == pl && tdef_struct[existing] == st + 1)
+            tdef_plevel[existing] == pl && tdef_struct[existing] == st + 1 &&
+            tdef_fsig[existing] == fs)
             return 0;
         errmsg = "その typedef 名は違う型で既にあります";
         return -1;
@@ -480,6 +520,7 @@ static int parse_typedef(void) {
     tdef_bsize[td] = bs;
     tdef_plevel[td] = pl;
     tdef_struct[td] = st + 1;
+    tdef_fsig[td] = (char)fs;
     return 0;
 }
 
@@ -555,6 +596,7 @@ static int parse_struct_def(void) {
         int met = parse_type_etype;
         int mpl = parse_type_plevel;
         int mst = parse_type_struct;
+        int mfs = parse_type_fsig;
         skip_spaces();
         if (!parse_ident()) {
             errmsg = "メンバには名前が必要です";
@@ -628,6 +670,7 @@ static int parse_struct_def(void) {
         smem_etype[mi] = met;
         smem_plevel[mi] = mpl;
         smem_struct[mi] = mst + 1;
+        smem_fsig[mi] = (char)mfs;
         smem_count[mi] = marr;
         mcount++;
     }
@@ -655,6 +698,7 @@ static int parse_struct_def(void) {
                     smem_etype[a] != smem_etype[b] ||
                     smem_plevel[a] != smem_plevel[b] ||
                     smem_struct[a] != smem_struct[b] ||
+                    smem_fsig[a] != smem_fsig[b] ||
                     smem_count[a] != smem_count[b])
                     same = 0;
                 if (same) {
@@ -919,6 +963,118 @@ static int parse_array_init(char *name, int len, int rows, int cols,
     return new_node(NODE_DECL, a, 0, 0);
 }
 
+/* 関数ポインタの配列の初期化子を読む (v44)。= は
+ * 消費済み。要素は関数名 (その住所) か 0 だけ。
+ * 住所はリンク時にしか決まらないので、池には 0 を
+ * 置き、関数参照は別表 (arr_fref_off / arr_fref_func)
+ * に控える。末尾の扱いは parse_array_init と同じ
+ * 約束だが、関数参照のある要素は「0 でない」もの
+ * として数える (住所が入るので実体が届く) */
+static int parse_funcptr_array_init(char *name, int len,
+                                    int rows, int cols,
+                                    int sig) {
+    if (cols > 0) {
+        errmsg = "関数ポインタの配列の初期化は1次元だけです";
+        return -1;
+    }
+    int start = arr_init_used;
+    int count = 0;
+    skip_spaces();
+    if (*cur != '{') {
+        errmsg = "配列の初期化子は { } で書きます";
+        return -1;
+    }
+    cur++;
+    skip_spaces();
+    if (*cur == '}') {
+        errmsg = "初期化子が空です";
+        return -1;
+    }
+    for (;;) {
+        skip_spaces();
+        if (arr_init_used >= 65536) {
+            errmsg = "配列の初期化子が多すぎます (合計65536要素まで)";
+            return -1;
+        }
+        if (is_ident_start(*cur)) {
+            if (!parse_ident())
+                return -1;
+            int f = find_func(ident_buf, ident_len);
+            if (f < 0) {
+                errmsg = "初期化子に置けるのは定義済みの関数名か 0 だけです";
+                return -1;
+            }
+            if (func_sig[f] != sig) {
+                errmsg = "関数ポインタの型 (署名) が合いません";
+                return -1;
+            }
+            if (arr_nfref >= 1024) {
+                errmsg = "関数ポインタの初期化子が多すぎます";
+                return -1;
+            }
+            arr_fref_off[arr_nfref] = arr_init_used;
+            arr_fref_func[arr_nfref] = f;
+            arr_nfref++;
+            func_called[f] = 1;
+            arr_init_pool[arr_init_used] = 0;
+            arr_init_used++;
+        } else if (is_digit(*cur)) {
+            long v;
+            if (!parse_init_const(&v))
+                return -1;
+            if (v != 0) {
+                errmsg = "初期化子に置けるのは定義済みの関数名か 0 だけです";
+                return -1;
+            }
+            arr_init_pool[arr_init_used] = 0;
+            arr_init_used++;
+        } else {
+            errmsg = "初期化子に置けるのは定義済みの関数名か 0 だけです";
+            return -1;
+        }
+        count++;
+        skip_spaces();
+        if (*cur == ',') {
+            cur++;
+            skip_spaces();
+            if (*cur == '}')
+                break;  /* 末尾のカンマは受ける */
+            continue;
+        }
+        break;
+    }
+    if (!expect_char('}', "初期化子の終わりには } が必要です"))
+        return -1;
+    if (!expect_char(';', "宣言の終わりには ; が必要です"))
+        return -1;
+    if (rows < 0)
+        rows = count;
+    if (count > rows) {
+        errmsg = "初期化子が配列より多いです";
+        return -1;
+    }
+    int a = define_array_s(name, len, rows, 0, 8, 8, -1, 0);
+    if (a < 0)
+        return -1;
+    if (arr_init_cnt[a] > 0) {
+        errmsg = "初期値は一つだけです";
+        return -1;
+    }
+    arr_fsig[a] = (char)(sig + 1);
+    arr_init_off[a] = start;
+    arr_init_cnt[a] = count;
+    int tend = 0;
+    for (int e = count - 1; e >= 0 && tend == 0; e--) {
+        if (arr_init_pool[start + e] != 0 ||
+            fref_at(start + e) >= 0)
+            tend = (e + 1) * 8;
+    }
+    int end = arr_off[a] + tend;
+    if (end > arr_init_end)
+        arr_init_end = end;
+    return new_node(NODE_DECL, a, 0, 0);
+}
+
 /* 宣言の文を読む (v21 で変数宣言を追加):
  *   型 名前 [ 大きさ ] ;         配列の宣言 (要素の大きさは
  *   型 名前 [ 行 ] [ 列 ] ;       型から決まる、v23。2次元も)
@@ -938,7 +1094,98 @@ static int parse_decl_stmt(void) {
     int plevel = parse_type_plevel;
     int etype = parse_type_etype;
     int strct = parse_type_struct;
+    int fsig = parse_type_fsig;
     skip_spaces();
+    if (*cur == '(') {
+        /* 関数ポインタの宣言 (v44):
+         *   型 (*名前) (引数) ;          変数
+         *   型 (*名前) (引数) = 関数名 ;  初期化つき
+         *   型 (*名前[N]) (引数) ;       配列 */
+        char dname[32];
+        int dlen;
+        int darr;
+        int dsig;
+        if (!parse_fptr_decl(etype, plevel, strct, fsig,
+                             dname, &dlen, &darr, &dsig))
+            return -1;
+        if (dlen == 0) {
+            errmsg = "宣言には名前が必要です";
+            return -1;
+        }
+        if (darr >= 0) {
+            skip_spaces();
+            if (*cur == '=') {
+                cur++;
+                if (parse_cur_func >= 0) {
+                    errmsg = "関数の中の配列初期化はまだできません";
+                    return -1;
+                }
+                return parse_funcptr_array_init(dname, dlen,
+                                                darr, 0, dsig);
+            }
+            if (!expect_char(';', "配列の宣言の終わりには ; が必要です"))
+                return -1;
+            int a = define_array_s(dname, dlen, darr, 0,
+                                   8, 8, -1, 0);
+            if (a < 0)
+                return -1;
+            arr_fsig[a] = (char)(dsig + 1);
+            return new_node(NODE_DECL, a, 0, 0);
+        }
+        skip_spaces();
+        if (*cur == '=') {
+            cur++;
+            int expr = parse_expr();
+            if (expr < 0)
+                return -1;
+            int var = define_var_full(dname, dlen, 8, 0, 1,
+                                      8, -1, 1);
+            if (var < 0)
+                return -1;
+            var_fsig[var] = (char)(dsig + 1);
+            if (!expect_char(';', "宣言の終わりには ; が必要です"))
+                return -1;
+            if (parse_cur_func < 0) {
+                /* ファイル範囲: 定数の初期化だけ (下の
+                 * 通常の形と同じ約束)。置けるのは
+                 * 署名の合う関数名か 0 */
+                long v;
+                int kind = eval_const(expr, &v);
+                if (var_init_kind[var] != 0) {
+                    errmsg = "初期値は一つだけです";
+                    return -1;
+                }
+                if (kind == 3) {
+                    if (func_sig[v] != dsig) {
+                        errmsg = "関数ポインタの型 (署名) が合いません";
+                        return -1;
+                    }
+                    var_init_kind[var] = 3;
+                    var_init_val[var] = v;
+                } else if (kind == 1 && v == 0) {
+                    var_init_kind[var] = 1;
+                    var_init_val[var] = 0;
+                } else {
+                    errmsg = "関数ポインタの初期化子は関数名か 0 だけです";
+                    return -1;
+                }
+                has_var_inits = 1;
+                return new_node(NODE_VDECL, var, 0, 0);
+            }
+            return new_node(NODE_ASSIGN, var, expr, 0);
+        }
+        if (*cur == ';') {
+            cur++;
+            int var = define_var_full(dname, dlen, 8, 0, 1,
+                                      8, -1, 1);
+            if (var < 0)
+                return -1;
+            var_fsig[var] = (char)(dsig + 1);
+            return new_node(NODE_VDECL, var, 0, 0);
+        }
+        errmsg = "宣言は 型 (*名前) (引数) ; の形です";
+        return -1;
+    }
     if (!parse_ident()) {
         errmsg = "宣言には名前が必要です";
         return -1;
@@ -997,6 +1244,11 @@ static int parse_decl_stmt(void) {
                 errmsg = "関数の中の配列初期化はまだできません";
                 return -1;
             }
+            if (fsig > 0) {
+                /* 関数ポインタの配列の初期化子 (v44) */
+                return parse_funcptr_array_init(name_buf, name_len,
+                                                size, cols, fsig - 1);
+            }
             if (plevel >= 1) {
                 errmsg = "ポインタの配列の初期化はまだできません";
                 return -1;
@@ -1018,6 +1270,7 @@ static int parse_decl_stmt(void) {
                                esize, eet, strct, plevel);
         if (a < 0)
             return -1;
+        arr_fsig[a] = (char)fsig;
         return new_node(NODE_DECL, a, 0, 0);
     }
     if (*cur == '=') {
@@ -1035,6 +1288,7 @@ static int parse_decl_stmt(void) {
                                   etype, strct, 1);
         if (var < 0)
             return -1;
+        var_fsig[var] = (char)fsig;
         if (!expect_char(';', "宣言の終わりには ; が必要です"))
             return -1;
         if (parse_cur_func < 0) {
@@ -1046,6 +1300,17 @@ static int parse_decl_stmt(void) {
             int kind = eval_const(expr, &v);
             if (kind == 0) {
                 errmsg = "ファイル範囲の初期化子は定数 (数や文字列) だけです";
+                return -1;
+            }
+            if (kind == 3) {
+                /* 関数の住所 (v44): 置けるのは関数ポインタの
+                 * 変数に、署名の合う関数だけ */
+                if (fsig == 0 || func_sig[v] + 1 != fsig) {
+                    errmsg = "関数ポインタの型 (署名) が合いません";
+                    return -1;
+                }
+            } else if (fsig != 0 && !(kind == 1 && v == 0)) {
+                errmsg = "関数ポインタの初期化子は関数名か 0 だけです";
                 return -1;
             }
             if (var_init_kind[var] != 0) {
@@ -1071,6 +1336,7 @@ static int parse_decl_stmt(void) {
                                   etype, strct, nslots);
         if (var < 0)
             return -1;
+        var_fsig[var] = (char)fsig;
         return new_node(NODE_VDECL, var, 0, 0);
     }
     errmsg = "宣言は 型 名前 ; か 型 名前 = 式 ; の形です";
