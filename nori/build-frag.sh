@@ -12,19 +12,18 @@
 #   再配置 約 3,164 / 名前 約 510 (登録順の控え 約 950)
 #
 # 容量プロファイル (標準 → 断片):
-#   名前表         4096 → 1024 (配列 15 本とも。
+#   名前表         4096 → 768 (配列 15 本とも。
 #     v40 で配列初期値の控え 2 本が増えた)
-#   登録順         4096 → 2048
-#   再配置表      16384 → 5120 (v38 で増量: iwac の
-#     再配置の実測合計が 4,339 になり 4096 を超えた)
-#   入力バッファ 約384KB → 180KB (v42 で増量:
-#     ELF 形式の最大オブジェクト 173,544 バイト
-#     (03-gen.eo) が入る大きさ)
-#   コード置き場  256KB → 184KB (入力側・出力側とも。
-#     iwac のコード合計の実測 184,092 に合わせた)
+#   登録順         4096 → 1792
+#   再配置表      16384 → 6656 (v45 で増量: iwac の
+#     再配置の実測合計が 6,105 になり 6144 を超えた)
+#   入力バッファ 約384KB → 約250KB (最大オブジェクト
+#     253,560 バイト (03-gen.eo、v45) が入る大きさ)
+#   コード置き場  256KB → 約228KB (iwac のコード
+#     合計の実測 231,080 に合わせた)
 #   文字列置き場  128KB → 16KB
-#   名前プール     64KB → 16KB
-#   配列初期値    256KB → 4KB (v40。断片プロファイルの
+#   名前プール     64KB → 8KB (実測 5,884)
+#   配列初期値    256KB → 1KB (v40。断片プロファイルの
 #     仕事は iwac 自身のリンクで、初期値は現れない)
 # 狙いは静的データ 1MB 未満。最後に測り、以上なら
 # 失敗として止まる。
@@ -61,29 +60,29 @@ apply() {
 }
 
 # 名前表: まず登録順 (seq) を名指しで替えてから残りを一括
-apply nori.c 'seq_sym[4096]' 'seq_sym[2048]' 1
-apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2048' 1
-apply nori.c '[4096]' '[1024]' 15
-apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 1024' 1
+apply nori.c 'seq_sym[4096]' 'seq_sym[1792]' 1
+apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 1792' 1
+apply nori.c '[4096]' '[768]' 15
+apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 768' 1
 # 再配置表
-apply nori.c '[16384]' '[6144]' 7
-apply nori.c 'MAX_REL = 16384' 'MAX_REL = 6144' 1
+apply nori.c '[16384]' '[6656]' 7
+apply nori.c 'MAX_REL = 16384' 'MAX_REL = 6656' 1
 # 共有バッファ (in_buf と out_code の相乗り、v44) と読みのガード
-apply nori.c 'share_buf[393216]' 'share_buf[221184]' 1
-apply nori.c '393216 - in_len' '221184 - in_len' 1
-apply nori.c 'in_len >= 393216' 'in_len >= 221184' 1
+apply nori.c 'share_buf[393216]' 'share_buf[255872]' 1
+apply nori.c '393216 - in_len' '255872 - in_len' 1
+apply nori.c 'in_len >= 393216' 'in_len >= 255872' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[262144]' 'code_pool[221184]' 1
-apply nori.c 'code_used >= 262144' 'code_used >= 221184' 1
-apply nori.c '> 262144' '> 221184' 1
+apply nori.c 'code_pool[262144]' 'code_pool[233472]' 1
+apply nori.c 'code_used >= 262144' 'code_used >= 233472' 1
+apply nori.c '> 262144' '> 233472' 1
 # 配列の初期値の置き場 (v40)
-apply nori.c 'ainit_buf[262144]' 'ainit_buf[4096]' 1
-apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 4096' 1
+apply nori.c 'ainit_buf[262144]' 'ainit_buf[1024]' 1
+apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 1024' 1
 # 文字列置き場と名前プール
 apply nori.c 'str_pool[131072]' 'str_pool[16384]' 1
 apply nori.c 'str_used >= 131072' 'str_used >= 16384' 1
-apply nori.c 'name_pool[65536]' 'name_pool[16384]' 1
-apply nori.c 'name_used >= 65536' 'name_used >= 16384' 1
+apply nori.c 'name_pool[65536]' 'name_pool[8192]' 1
+apply nori.c 'name_used >= 65536' 'name_used >= 8192' 1
 
 # 標準の iwac (ホスト版) でオブジェクト一式を用意する
 cat ../src/0*.c > "$WORK/iwac_all.c"

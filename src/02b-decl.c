@@ -185,7 +185,12 @@ static int parse_stmt_list(int in_brace) {
                         head = stmt;
                     else
                         node_next[tail] = stmt;
+                    /* 宣言が文の鎖で返ることもある
+                     * (構造体の初期化子の展開、v45)。
+                     * 末尾まで進める */
                     tail = stmt;
+                    while (node_next[tail] >= 0)
+                        tail = node_next[tail];
                     continue;
                 }
                 if (in_brace) {
@@ -837,8 +842,8 @@ static int parse_init_values(void) {
             long v;
             if (!parse_init_const(&v))
                 return -1;
-            if (arr_init_used >= 65536) {
-                errmsg = "配列の初期化子が多すぎます (合計65536要素まで)";
+            if (arr_init_used >= 49152) {
+                errmsg = "配列の初期化子が多すぎます (合計49152要素まで)";
                 return -1;
             }
             arr_init_pool[arr_init_used] = v;
@@ -896,8 +901,8 @@ static int parse_array_init(char *name, int len, int rows, int cols,
         if (rows < 0 || rows > slen)
             count = slen + 1;
         for (int i = 0; i < count; i++) {
-            if (arr_init_used >= 65536) {
-                errmsg = "配列の初期化子が多すぎます (合計65536要素まで)";
+            if (arr_init_used >= 49152) {
+                errmsg = "配列の初期化子が多すぎます (合計49152要素まで)";
                 return -1;
             }
             if (i < slen)
@@ -992,8 +997,8 @@ static int parse_funcptr_array_init(char *name, int len,
     }
     for (;;) {
         skip_spaces();
-        if (arr_init_used >= 65536) {
-            errmsg = "配列の初期化子が多すぎます (合計65536要素まで)";
+        if (arr_init_used >= 49152) {
+            errmsg = "配列の初期化子が多すぎます (合計49152要素まで)";
             return -1;
         }
         if (is_ident_start(*cur)) {
@@ -1073,6 +1078,280 @@ static int parse_funcptr_array_init(char *name, int len,
     if (end > arr_init_end)
         arr_init_end = end;
     return new_node(NODE_DECL, a, 0, 0);
+}
+
+/* --- 構造体のローカル初期化子 (v45、設計は
+ * doc/struct-value.md) ---
+ *   struct P p = { 値, { 入れ子 }, ... };
+ * を、宣言の直後に実行される「メンバへの代入文の並び」
+ * に parse の時点で展開する。生成側に新しい仕組みは
+ * 要らない (代入文は v45 の丸ごと代入と要素への
+ * 書き込みで処理できる)。書かれなかったメンバは
+ * C の作法どおり 0 で埋める。入れ子の構造体や配列の
+ * メンバは { } で囲む形だけを受ける (波かっこの
+ * 省略は受けない)。基底 (base) は変数やメンバを表す
+ * ノードで、代入文の並びは node_next の鎖で繋ぎ、
+ * 末尾のノードを返す (失敗は -1) */
+static int parse_struct_init(int base, int tag, int tail);
+static int parse_member_init(int base, int mi, int tail);
+static int parse_array_member_init(int base, int mi, int tail);
+static int parse_string_member_init(int base, int mi, int tail);
+static int parse_elem_init(int base, int mi, int idx, int tail);
+static int init_zero_struct(int base, int tag, int tail);
+static int init_zero_member(int base, int mi, int tail);
+static int init_zero_elem(int base, int mi, int idx, int tail);
+
+/* 代入文を1つ鎖の末尾に足し、新しい末尾を返す */
+static int init_chain_store(int tail, int elem, int val) {
+    int st = new_node(NODE_ELEM_STORE, 0, elem, val);
+    if (st < 0)
+        return -1;
+    node_next[tail] = st;
+    return st;
+}
+
+static int parse_struct_init(int base, int tag, int tail) {
+    cur++;  /* '{' を消費 (呼び側で確認済み) */
+    int nmem = stag_mcount[tag];
+    int first = stag_mfirst[tag];
+    int i = 0;
+    skip_spaces();
+    if (*cur == '}') {
+        cur++;
+        /* 値が無い: 全メンバ 0 埋め */
+        for (int j = 0; j < nmem; j++) {
+            tail = init_zero_member(base, first + j, tail);
+            if (tail < 0)
+                return -1;
+        }
+        return tail;
+    }
+    for (;;) {
+        if (i >= nmem) {
+            errmsg = "初期化子がメンバの数より多いです";
+            return -1;
+        }
+        tail = parse_member_init(base, first + i, tail);
+        if (tail < 0)
+            return -1;
+        i++;
+        skip_spaces();
+        if (*cur == ',') {
+            cur++;
+            skip_spaces();
+            if (*cur == '}') {
+                cur++;
+                break;
+            }
+            continue;
+        }
+        if (*cur == '}') {
+            cur++;
+            break;
+        }
+        errmsg = "初期化子は , か } で区切ります";
+        return -1;
+    }
+    /* 書かれなかったメンバは 0 埋め */
+    for (int j = i; j < nmem; j++) {
+        tail = init_zero_member(base, first + j, tail);
+        if (tail < 0)
+            return -1;
+    }
+    return tail;
+}
+
+static int parse_member_init(int base, int mi, int tail) {
+    skip_spaces();
+    if (smem_count[mi] > 0) {
+        /* 配列メンバ: { } か、char の配列なら文字列 */
+        if (*cur == '{')
+            return parse_array_member_init(base, mi, tail);
+        if (*cur == '"' && smem_plevel[mi] == 0 &&
+            smem_struct[mi] == 0 && smem_etype[mi] == 1)
+            return parse_string_member_init(base, mi, tail);
+        errmsg = "配列メンバの初期化は { } か文字列で書きます";
+        return -1;
+    }
+    if (smem_struct[mi] > 0 && smem_plevel[mi] == 0 &&
+        *cur == '{') {
+        /* 構造体メンバ: 入れ子の初期化子 */
+        int mbase = new_node(NODE_MEMBER, mi, base, 0);
+        if (mbase < 0)
+            return -1;
+        return parse_struct_init(mbase, smem_struct[mi] - 1,
+                                 tail);
+    }
+    /* スカラ・ポインタ・関数ポインタのメンバ、または
+     * 構造体の値の式: 普通の式として読む */
+    int expr = parse_expr();
+    if (expr < 0)
+        return -1;
+    int elem = new_node(NODE_MEMBER, mi, base, 0);
+    if (elem < 0)
+        return -1;
+    return init_chain_store(tail, elem, expr);
+}
+
+static int parse_array_member_init(int base, int mi, int tail) {
+    cur++;  /* '{' を消費 */
+    int n = smem_count[mi];
+    int i = 0;
+    skip_spaces();
+    if (*cur == '}') {
+        cur++;
+        for (int j = 0; j < n; j++) {
+            tail = init_zero_elem(base, mi, j, tail);
+            if (tail < 0)
+                return -1;
+        }
+        return tail;
+    }
+    for (;;) {
+        if (i >= n) {
+            errmsg = "初期化子が要素の数より多いです";
+            return -1;
+        }
+        tail = parse_elem_init(base, mi, i, tail);
+        if (tail < 0)
+            return -1;
+        i++;
+        skip_spaces();
+        if (*cur == ',') {
+            cur++;
+            skip_spaces();
+            if (*cur == '}') {
+                cur++;
+                break;
+            }
+            continue;
+        }
+        if (*cur == '}') {
+            cur++;
+            break;
+        }
+        errmsg = "初期化子は , か } で区切ります";
+        return -1;
+    }
+    for (int j = i; j < n; j++) {
+        tail = init_zero_elem(base, mi, j, tail);
+        if (tail < 0)
+            return -1;
+    }
+    return tail;
+}
+
+static int parse_string_member_init(int base, int mi, int tail) {
+    int s = parse_string_node();
+    if (s < 0)
+        return -1;
+    int idx = node_val[s];
+    int len = str_len[idx];
+    int n = smem_count[mi];
+    /* 文字の並びを置き、残りは 0 (最初の一つが終端) */
+    if (len > n) {
+        errmsg = "文字列がメンバの配列より長いです";
+        return -1;
+    }
+    for (int j = 0; j < n; j++) {
+        int b = j < len ? (unsigned char)str_pool[str_off[idx] + j]
+                        : 0;
+        int num = new_node(NODE_NUM, b, 0, 0);
+        if (num < 0)
+            return -1;
+        int inum = new_node(NODE_NUM, j, 0, 0);
+        if (inum < 0)
+            return -1;
+        /* MELEM の基底はメンバそのものを表すノード
+         * (parse_postfix の形と同じ) */
+        int mnode = new_node(NODE_MEMBER, mi, base, 0);
+        if (mnode < 0)
+            return -1;
+        int elem = new_node(NODE_MELEM, mi, mnode, inum);
+        if (elem < 0)
+            return -1;
+        tail = init_chain_store(tail, elem, num);
+        if (tail < 0)
+            return -1;
+    }
+    return tail;
+}
+
+static int parse_elem_init(int base, int mi, int idx, int tail) {
+    skip_spaces();
+    int inum = new_node(NODE_NUM, idx, 0, 0);
+    if (inum < 0)
+        return -1;
+    int mnode = new_node(NODE_MEMBER, mi, base, 0);
+    if (mnode < 0)
+        return -1;
+    int ebase = new_node(NODE_MELEM, mi, mnode, inum);
+    if (ebase < 0)
+        return -1;
+    if (smem_struct[mi] > 0 && smem_plevel[mi] == 0 &&
+        *cur == '{')
+        /* 構造体の要素: 入れ子の初期化子 */
+        return parse_struct_init(ebase, smem_struct[mi] - 1,
+                                 tail);
+    int expr = parse_expr();
+    if (expr < 0)
+        return -1;
+    return init_chain_store(tail, ebase, expr);
+}
+
+static int init_zero_struct(int base, int tag, int tail) {
+    int nmem = stag_mcount[tag];
+    int first = stag_mfirst[tag];
+    for (int j = 0; j < nmem; j++) {
+        tail = init_zero_member(base, first + j, tail);
+        if (tail < 0)
+            return -1;
+    }
+    return tail;
+}
+
+static int init_zero_member(int base, int mi, int tail) {
+    if (smem_count[mi] > 0) {
+        for (int j = 0; j < smem_count[mi]; j++) {
+            tail = init_zero_elem(base, mi, j, tail);
+            if (tail < 0)
+                return -1;
+        }
+        return tail;
+    }
+    if (smem_struct[mi] > 0 && smem_plevel[mi] == 0) {
+        int mbase = new_node(NODE_MEMBER, mi, base, 0);
+        if (mbase < 0)
+            return -1;
+        return init_zero_struct(mbase, smem_struct[mi] - 1,
+                                tail);
+    }
+    int elem = new_node(NODE_MEMBER, mi, base, 0);
+    if (elem < 0)
+        return -1;
+    int zero = new_node(NODE_NUM, 0, 0, 0);
+    if (zero < 0)
+        return -1;
+    return init_chain_store(tail, elem, zero);
+}
+
+static int init_zero_elem(int base, int mi, int idx, int tail) {
+    int inum = new_node(NODE_NUM, idx, 0, 0);
+    if (inum < 0)
+        return -1;
+    int mnode = new_node(NODE_MEMBER, mi, base, 0);
+    if (mnode < 0)
+        return -1;
+    int ebase = new_node(NODE_MELEM, mi, mnode, inum);
+    if (ebase < 0)
+        return -1;
+    if (smem_struct[mi] > 0 && smem_plevel[mi] == 0)
+        return init_zero_struct(ebase, smem_struct[mi] - 1,
+                                tail);
+    int zero = new_node(NODE_NUM, 0, 0, 0);
+    if (zero < 0)
+        return -1;
+    return init_chain_store(tail, ebase, zero);
 }
 
 /* 宣言の文を読む (v21 で変数宣言を追加):
@@ -1274,18 +1553,54 @@ static int parse_decl_stmt(void) {
         return new_node(NODE_DECL, a, 0, 0);
     }
     if (*cur == '=') {
-        if (strct >= 0 && plevel == 0) {
-            errmsg = "構造体の初期化はまだできません";
+        cur++;
+        skip_spaces();
+        if (strct >= 0 && plevel == 0 && *cur == '{') {
+            /* 構造体の初期化子 (v45): ローカルだけ。
+             * メンバへの代入文の並びに展開する。変数を
+             * 先に名簿に載せるのは、展開がその変数を
+             * 基底として使うため (式の形の初期化と違い、
+             * 初期化子の中で自分の名前が見える) */
+            if (parse_cur_func < 0) {
+                errmsg = "ファイル範囲の構造体の初期化はまだできません";
+                return -1;
+            }
+            int nslots = (stag_size[strct] + 7) / 8;
+            int var = define_var_full(name_buf, name_len, bsize,
+                                      plevel, 1, etype, strct,
+                                      nslots);
+            if (var < 0)
+                return -1;
+            var_fsig[var] = (char)fsig;
+            int head = new_node(NODE_VDECL, var, 0, 0);
+            if (head < 0)
+                return -1;
+            int base = new_node(NODE_VAR, var, 0, 0);
+            if (base < 0)
+                return -1;
+            if (parse_struct_init(base, strct, head) < 0)
+                return -1;
+            if (!expect_char(';', "宣言の終わりには ; が必要です"))
+                return -1;
+            return head;
+        }
+        if (strct >= 0 && plevel == 0 && parse_cur_func < 0) {
+            /* ファイル範囲の構造体の初期化は、初期値を
+             * リンクで運ぶ口が無いため見送り (v45) */
+            errmsg = "ファイル範囲の構造体の初期化はまだできません";
             return -1;
         }
         /* 初期化つき宣言: 式を読んでから名簿に載せる
          * (代入文と同じ理由。初期化の式の中で自分は使えない) */
-        cur++;
         int expr = parse_expr();
         if (expr < 0)
             return -1;
+        /* 構造体の値は大きさの分のスロットを占める (v37) */
+        int nslots = 1;
+        if (strct >= 0 && plevel == 0)
+            nslots = (stag_size[strct] + 7) / 8;
         int var = define_var_full(name_buf, name_len, bsize, plevel, 1,
-                                  etype, strct, 1);
+                                  etype, strct, nslots);
         if (var < 0)
             return -1;
         var_fsig[var] = (char)fsig;

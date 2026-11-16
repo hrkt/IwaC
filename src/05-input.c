@@ -5,12 +5,12 @@
  * (開けなければエラー)。それ以外でも、同名のファイルが
  * 開けるならその中身を、開けないなら引数そのものを
  * プログラムとして読む (従来の使い方もそのまま残す)。
- * 読み込んだソースは src_buf に置く。上限は約448KB。
+ * 読み込んだソースは src_buf に置く。上限は約464KB。
  * v41: 行継続 (バックスラッシュ+改行) を入力層で消す。
  * 設計は doc/splice.md
  * ================================================================ */
 
-static char src_buf[458752];
+static char src_buf[475136];
 
 /* 行継続 (v41): src_buf の中のバックスラッシュ+改行を
  * 消す (C の翻訳フェーズ2)。前へ詰めながら書き換える。
@@ -58,12 +58,12 @@ static int append_file(char *path, int *used_io) {
         return 0;
     int used = *used_io;
     for (;;) {
-        if (used >= 458751) {
+        if (used >= 475135) {
             close(fd);
-            errmsg = "ファイルが大きすぎます (約448KBまで)";
+            errmsg = "ファイルが大きすぎます (約464KBまで)";
             return -1;
         }
-        long n = read(fd, src_buf + used, 458751 - used);
+        long n = read(fd, src_buf + used, 475135 - used);
         if (n < 0) {
             close(fd);
             /* ディレクトリなど、開けても読めないものは
@@ -101,8 +101,8 @@ static int load_files(char **paths, int count) {
     load_failed_name = 0;
     for (int i = 0; i < count; i++) {
         if (used > 0) {
-            if (used >= 458751) {
-                errmsg = "ファイルが大きすぎます (約448KBまで)";
+            if (used >= 475135) {
+                errmsg = "ファイルが大きすぎます (約464KBまで)";
                 return -1;
             }
             src_buf[used++] = '\n';
@@ -127,8 +127,8 @@ static int load_files(char **paths, int count) {
 int load_text(char *text) {
     int used = 0;
     while (text[used] != '\0') {
-        if (used >= 458751) {
-            errmsg = "プログラムが大きすぎます (約448KBまで)";
+        if (used >= 475135) {
+            errmsg = "プログラムが大きすぎます (約464KBまで)";
             return -1;
         }
         src_buf[used] = text[used];

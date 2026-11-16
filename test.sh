@@ -906,9 +906,7 @@ check_tail "$TMP/v37c.bin" "927" "v37: -> ・構造体の配列・リンクリ�
 check_tail "$TMP/v37d.bin" "a1c11f15" "v37: パディングで隣が壊れない・typedef struct・ローカル"
 "$IWAC" 'struct Point { int32 x; int32 y; }; struct Point p; int main() { p.x = 1; p.x++; ++p.y; putc(48 + p.x + p.y); struct Point *q = &p; putc(48 + (q->x == 2)); return 0; }' > "$TMP/v37e.bin"
 check_tail "$TMP/v37e.bin" "31" "v37: メンバの ++ と & ・->"
-check_error 'struct P { int32 x; }; int f(struct P p) { return 0; } int main() { return 0; }' "v37: 構造体の値渡し"
-check_error 'struct P { int32 x; }; struct P f() { struct P a; return a; } int main() { return 0; }' "v37: 構造体の値返し"
-check_error 'struct P { int32 x; }; struct P a; struct P b; int main() { a = b; return 0; }' "v37: 構造体の代入"
+# (v37 の値渡し・値返し・丸ごと代入のエラー確認は、v45 で解禁したため v45 の節に移した)
 check_error 'struct P { int32 x; }; struct P a; int main() { a.zzz = 1; return 0; }' "v37: 無いメンバ"
 check_error 'struct P { int32 x; }; struct P a; int main() { struct P *q = &a; q.x = 1; return 0; }' "v37: ポインタへの ."
 check_error 'struct P { int32 x; }; int main() { struct P a = 1; return 0; }' "v37: 構造体の初期化"
@@ -1232,6 +1230,152 @@ echo "ok: v44: 関数ポインタ (初期化子つき) のリンクが一括と�
 cmp -s "$TMP/v44iwac.eo" "$TMP/v44asari.eo" || fail "v44: Asari のオブジェクトが iwac と違う"
 echo "ok: v44: Asari のオブジェクトが iwac と一致 (関数ポインタ)"
 
+
+# --- v45: 構造体の値セマンティクス (doc/struct-value.md) ---
+# 振る舞いはベア QEMU の出力で確かめる
+cat > "$TMP/v45a.c" <<'V45A'
+struct P { int x; int y; };
+struct In { int a; };
+struct Out { struct In in; int b; };
+struct P arr[2];
+int main() {
+    struct P a; struct P b; struct Out o1; struct Out o2;
+    struct P *pp;
+    a.x = 1; a.y = 2; b = a; b.x = 9;
+    o1.in.a = 5; o1.b = 6; o2 = o1; o2.in.a = 7;
+    arr[0] = a; arr[1].x = 3; arr[1].y = 4; a = arr[1];
+    o2.in = o1.in;
+    pp = &a; *pp = b;
+    putc(a.x == 9 && b.y == 2 && o1.in.a == 5 &&
+         o2.in.a == 5 && o2.b == 6 && arr[0].y == 2 ? 'Y' : 'N');
+    return 0;
+}
+V45A
+"$IWAC" "$TMP/v45a.c" > "$TMP/v45a.bin"
+check_tail "$TMP/v45a.bin" 'Y' "v45: 丸ごと代入 (変数・要素・メンバ・ポインタ越し)"
+cat > "$TMP/v45b.c" <<'V45B'
+struct P { int x; int y; };
+struct P make(int x, int y) { struct P r; r.x = x; r.y = y; return r; }
+int sum(struct P p) { return p.x + p.y; }
+struct P swap(struct P p) { struct P r; r.x = p.y; r.y = p.x; return r; }
+int main() {
+    struct P a; struct P b;
+    a = make(3, 4);
+    b = swap(a);
+    putc(a.x == 3 && a.y == 4 && sum(a) == 7 &&
+         b.x == 4 && b.y == 3 && sum(swap(a)) == 7 ? 'Y' : 'N');
+    return 0;
+}
+V45B
+"$IWAC" "$TMP/v45b.c" > "$TMP/v45b.bin"
+check_tail "$TMP/v45b.bin" 'Y' "v45: 値渡しと値返し (B 方式、呼び出し結果の引数)"
+cat > "$TMP/v45c.c" <<'V45C'
+struct Big { int a; int b; int c; };
+int mix(int s1, struct Big b, int s2) { return s1 + b.a + b.b + b.c + s2; }
+int mut(struct Big b) { b.a = 9; return 0; }
+struct Big idb(struct Big b) { return b; }
+struct Big chain(struct Big b) { return idb(b); }
+int rec(struct Big b, int n) { if (n == 0) return b.a; return rec(b, n - 1) + 1; }
+int main() {
+    struct Big b; struct Big c;
+    b.a = 1; b.b = 2; b.c = 3;
+    c.a = 4; c.b = 5; c.c = 6;
+    mut(b);
+    int ok = mix(1, b, 1) == 8 && b.a == 1;
+    b = chain(c);
+    putc(ok && b.b == 5 && rec(b, 3) == 7 ? 'Y' : 'N');
+    return 0;
+}
+V45C
+"$IWAC" "$TMP/v45c.c" > "$TMP/v45c.bin"
+check_tail "$TMP/v45c.bin" 'Y' "v45: スカラとの混在・複写の独立・return の受け渡し・再帰"
+cat > "$TMP/v45d.c" <<'V45D'
+struct P { int x; int y; };
+typedef struct P (*mk_t)(int, int);
+typedef int (*sum_t)(struct P);
+typedef struct P (*xf_t)(struct P);
+struct P make(int x, int y) { struct P r; r.x = x; r.y = y; return r; }
+int sum(struct P p) { return p.x + p.y; }
+struct P swap(struct P p) { struct P r; r.x = p.y; r.y = p.x; return r; }
+struct P dbl(struct P p) { struct P r; r.x = p.x * 2; r.y = p.y * 2; return r; }
+xf_t ops[2] = { swap, dbl };
+int main() {
+    struct P a; struct P b; mk_t mk; sum_t sm;
+    mk = make; sm = sum;
+    a = mk(3, 4);
+    b = ops[1](a);
+    putc(a.x == 3 && sm(a) == 7 && b.x == 6 && b.y == 8 &&
+         sm(ops[0](a)) == 7 ? 'Y' : 'N');
+    return 0;
+}
+V45D
+"$IWAC" "$TMP/v45d.c" > "$TMP/v45d.bin"
+check_tail "$TMP/v45d.bin" 'Y' "v45: 関数ポインタ越しの値渡し・値返し (ICALL の B 方式)"
+cat > "$TMP/v45e.c" <<'V45E'
+struct P { int x; int y; };
+struct In { int a; int b; };
+struct Out { struct In in; int tail; int arr[3]; char name[6]; };
+struct Bag { struct P pts[2]; int n; };
+typedef int (*op_t)(int);
+int inc(int n) { return n + 1; }
+struct WF { op_t op; int v; };
+int main() {
+    struct P p = { 3, 4 };
+    struct P q = { 5 };
+    struct Out o = { { 1, 2 }, 9, { 7, 8 }, "ab" };
+    struct Bag b = { { { 1, 2 }, { 3, 4 } }, 2 };
+    struct WF w = { inc, 4 };
+    struct P r = p;
+    int ok = p.x == 3 && p.y == 4 && q.x == 5 && q.y == 0;
+    ok = ok && o.in.a == 1 && o.in.b == 2 && o.tail == 9;
+    ok = ok && o.arr[0] == 7 && o.arr[1] == 8 && o.arr[2] == 0;
+    ok = ok && o.name[0] == 'a' && o.name[1] == 'b' && o.name[2] == 0;
+    ok = ok && b.pts[1].x == 3 && b.pts[1].y == 4 && b.n == 2;
+    ok = ok && w.op(w.v) == 5 && r.y == 4;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V45E
+"$IWAC" "$TMP/v45e.c" > "$TMP/v45e.bin"
+check_tail "$TMP/v45e.bin" 'Y' "v45: ローカル初期化子 (入れ子・配列・文字列・0埋め・関数ポインタ)"
+check_error 'struct P { int x; }; struct Q { int x; }; int main() { struct P a; struct Q b; a = b; return 0; }' "v45: タグの違う代入"
+check_error 'struct P { int x; }; int main() { struct P a; int n; n = a; return 0; }' "v45: 構造体をスカラへ代入"
+check_error 'struct P { int x; }; int main() { struct P a; a = 5; return 0; }' "v45: スカラを構造体へ代入"
+check_error 'struct P { int x; }; struct Q { int x; }; int sum(struct P p) { return p.x; } int main() { struct Q q; return sum(q); }' "v45: タグの違う引数"
+check_error 'struct P { int x; }; int sum(struct P p) { return p.x; } int main() { return sum(5); }' "v45: スカラを構造体の引数に"
+check_error 'struct P { int x; }; struct Q { int x; }; struct P f() { struct Q q; return q; } int main() { struct P a; a = f(); return 0; }' "v45: タグの違う return"
+check_error 'struct P { int x; }; struct P f() { return 5; } int main() { struct P a; a = f(); return 0; }' "v45: 構造体の関数のスカラ return"
+check_error 'struct P { int x; }; struct P g = { 1 }; int main() { return g.x; }' "v45: ファイル範囲の構造体の初期化子"
+check_error 'struct P { int x; int y; }; int main() { struct P p = { 1, 2, 3 }; return 0; }' "v45: 初期化子が多すぎる"
+check_error 'struct P { int x; }; struct P mk(int x) { struct P r; r.x = x; return r; } int digit(int n) { return n; } int main() { return digit(mk(1)); }' "v45: 式の位置での構造体の戻り値"
+# オブジェクト経路: 値渡し・値返しと初期化子でも、リンク結果が
+# 一括ビルドと一致し、Asari のオブジェクトが iwac と一致すること
+cat > "$TMP/v45obj.c" <<'V45OBJ'
+struct P { int x; int y; };
+struct P make(int x, int y) { struct P r = { x, y }; return r; }
+int sum(struct P p) { return p.x + p.y; }
+int main() {
+    struct P a;
+    a = make(3, 4);
+    return sum(a);
+}
+V45OBJ
+cat > "$TMP/v45rt.c" <<'V45RT'
+int flushed;
+void kosaba_flush() { flushed = 1; }
+V45RT
+printf 'void kosaba_flush();\n' > "$TMP/v45pre.c"
+"$IWAC" --kosaba "$TMP/v45pre.c" "$TMP/v45obj.c" "$TMP/v45rt.c" > "$TMP/v45direct.elf" || fail "v45: 一括ビルドに失敗"
+"$IWAC" --kosaba --elf "$TMP/v45pre.c" "$TMP/v45obj.c" > "$TMP/v45obj.eo" || fail "v45: オブジェクト出力に失敗"
+"$IWAC" --kosaba --elf "$TMP/v45pre.c" "$TMP/v45rt.c" > "$TMP/v45rt.eo" || fail "v45: rt のオブジェクト出力に失敗"
+"$TMP/nori" "$TMP/v45obj.eo" "$TMP/v45rt.eo" > "$TMP/v45link.elf" || fail "v45: nori でのリンクに失敗"
+cmp -s "$TMP/v45direct.elf" "$TMP/v45link.elf" || fail "v45: リンク結果が一括ビルドと違う"
+echo "ok: v45: 構造体の値セマンティクス (初期化子つき) のリンクが一括と一致"
+"$IWAC" --kosaba --asari "$TMP/v45pre.c" "$TMP/v45obj.c" "$TMP/v45rt.c" > "$TMP/v45.ias" || fail "v45: Asari 形式の出力に失敗"
+"$TMP/asari" "$TMP/v45.ias" > "$TMP/v45asari.eo" || fail "v45: Asari が失敗"
+"$IWAC" --kosaba --elf "$TMP/v45pre.c" "$TMP/v45obj.c" "$TMP/v45rt.c" > "$TMP/v45iwac.eo" || fail "v45: オブジェクト出力 (一括) に失敗"
+cmp -s "$TMP/v45iwac.eo" "$TMP/v45asari.eo" || fail "v45: Asari のオブジェクトが iwac と違う"
+echo "ok: v45: Asari のオブジェクトが iwac と一致 (構造体の値セマンティクス)"
 
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る

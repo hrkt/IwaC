@@ -161,13 +161,13 @@ static int NODE_STORE = 13; /* メモリ書き込み文。
                              * (変数 = ポインタ、数 = 絶対アドレス)、
                              * node_rhs = 書く値の式 */
 
-static char node_kind[24576];  /* 種類は 60 まで (v44 で char 化して容量を節約) */
-static int node_val[24576];
-static int node_lhs[24576];
-static int node_rhs[24576];
-static int node_next[24576]; /* 文の並び用: 次の文ノード (-1 で終わり)。
+static char node_kind[25600];  /* 種類は 60 まで (v44 で char 化して容量を節約) */
+static int node_val[25600];
+static int node_lhs[25600];
+static int node_rhs[25600];
+static int node_next[25600]; /* 文の並び用: 次の文ノード (-1 で終わり)。
                             * 式のノードでは使わない */
-static int node_etype[24576]; /* 式の型タグ (生成時に付ける、v35) */
+static int node_etype[25600]; /* 式の型タグ (生成時に付ける、v35) */
 static int nnode;  /* 作ったノードの数 */
 
 /* --- 変数の名簿 (記号表) ---
@@ -216,7 +216,7 @@ static int has_var_inits;  /* 初期値つきグローバルがあるか */
 static int nvar;       /* 登録された変数の数 (全スコープ合計) */
 static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
 static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
-static int func_nlocals[192];  /* 関数ごとのフレーム枠数。
+static int func_nlocals[224];  /* 関数ごとのフレーム枠数。
                              * 本体は関数の名簿の節で説明する */
 
 /* typedef の名簿 (v36): 型への別名。
@@ -374,27 +374,27 @@ static int prog_main;
  *   func_body[i]      : 本体の文の並びの先頭ノード
  *   func_entry[i]     : 命令列の中での入口の命令番号
  *                       (第2層が生成のたびに決める)
- * 関数は最大128個まで */
-static char func_names[192][32];
-static int func_name_len[192];
-static int func_nparams[192];
-static int func_param_var[192][8];
-static int func_ret_etype[192]; /* 戻り値の型タグ (v35) */
-static char func_ret_struct[192]; /* 戻り値の構造体番号 + 1 (v37、
+ * 関数は最大224個まで */
+static char func_names[224][32];
+static int func_name_len[224];
+static int func_nparams[224];
+static int func_param_var[224][8];
+static int func_ret_etype[224]; /* 戻り値の型タグ (v35) */
+static char func_ret_struct[224]; /* 戻り値の構造体番号 + 1 (v37、
                              * 0 = なし。構造体を返す関数はポインタ
                              * でだけ返せるので、0 でなければ
                              * 「その構造体へのポインタを返す」) */
-static int func_body[192];
-static int func_entry[192];
+static int func_body[224];
+static int func_entry[224];
 /* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
  *   func_has_body[i]: 本体まで読めたら 1
  *   func_called[i]  : 呼び出しが現れたら 1。最後まで
  *                     本体が無い関数が呼ばれていたら、
  *                     生成の入口でエラーにする */
-static int func_has_body[192];
-static int func_called[192];
-static int func_sig[192];     /* その関数の署名番号 (v44) */
-/* func_nlocals[192] : フレームの枠数 (引数を含む、v21)。
+static int func_has_body[224];
+static int func_called[224];
+static int func_sig[224];     /* その関数の署名番号 (v44) */
+/* func_nlocals[224] : フレームの枠数 (引数を含む、v21)。
  * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
 
@@ -528,7 +528,7 @@ static int arr_used;  /* グローバル配列領域の使用済みバイト数 
  *                    (配列領域の中の位置。0 = 無し) */
 static int arr_init_off[192];
 static int arr_init_cnt[192];
-static long arr_init_pool[65536];
+static long arr_init_pool[49152];
 static int arr_init_used;
 static int arr_init_end;
 /* 配列初期化子の中の関数参照 (v44): 関数ポインタの
@@ -550,7 +550,7 @@ static int fref_at(int pool_idx) {
 /* func_arr_bytes[f]: 関数 f のフレームに入るローカル
  * 配列の合計バイト数 (v26)。フレーム長の計算 (第2層の
  * func_frame_size) が使う */
-static int func_arr_bytes[192];
+static int func_arr_bytes[224];
 
 /* 名前の一致だけを見る小物 (変数の var_name_eq と同じ) */
 static int arr_name_eq(int i, char *name, int len) {
@@ -750,7 +750,7 @@ static unsigned int str_addr[512];  /* 第2層が確定させる住所 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
-    if (nnode >= 24576) {
+    if (nnode >= 25600) {
         errmsg = "プログラムが大きすぎます (ノード数上限)";
         return -1;
     }
@@ -2306,8 +2306,8 @@ static int parse_funcdef(void) {
     int f = find_func(name_buf, name_len);
     int is_new = 0;
     if (f < 0) {
-        if (nfunc >= 192) {
-            errmsg = "関数は128個までです";
+        if (nfunc >= 224) {
+            errmsg = "関数は224個までです";
             return 0;
         }
         f = nfunc++;
@@ -2326,11 +2326,8 @@ static int parse_funcdef(void) {
     int ret_pl = parse_type_plevel;   /* 署名用に控える (v44) */
     int ret_st = parse_type_struct;
     int ret_fs = parse_type_fsig;
-    func_ret_struct[f] = parse_type_struct + 1;  /* 戻り値の構造体 (v37) */
-    if (parse_type_struct >= 0 && parse_type_plevel == 0) {
-        errmsg = "構造体は値で返せません (ポインタで返してください)";
-        return 0;
-    }
+    func_ret_struct[f] = parse_type_struct + 1;  /* 戻り値の構造体 (v37、
+                                                  * v45 で値返しを解禁) */
     if (!expect_char('(', "関数名の後には ( が必要です"))
         return 0;
     /* 引数はまず「型と名前」を集めるだけにする。変数
@@ -2385,10 +2382,7 @@ static int parse_funcdef(void) {
             ppl[np] = parse_type_plevel;
             pst[np] = parse_type_struct;
             pfs[np] = parse_type_fsig;
-            if (pst[np] >= 0 && ppl[np] == 0) {
-                errmsg = "構造体は値で渡せません (ポインタで渡してください)";
-                return 0;
-            }
+            /* 構造体の引数は値渡し (v45 で解禁) */
             plens[np] = 0;
             skip_spaces();
             if (*cur == '(') {
@@ -2468,8 +2462,11 @@ static int parse_funcdef(void) {
             errmsg = "引数の名前が必要です";
             return 0;
         }
+        /* 構造体の引数は複数スロットを占める (v45) */
+        int pnslots = (pst[k] >= 0 && ppl[k] == 0)
+            ? (stag_size[pst[k]] + 7) / 8 : 1;
         int var = define_var_full(pnames[k], plens[k], pbs[k],
-                                  ppl[k], 1, pet[k], pst[k], 1);
+                                  ppl[k], 1, pet[k], pst[k], pnslots);
         if (var < 0)
             return 0;
         var_fsig[var] = (char)pfs[k];

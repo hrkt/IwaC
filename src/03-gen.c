@@ -87,24 +87,24 @@ static int OP_REMU = 37; /* 符号なし剰余 (v35、M 拡張) */
 static int OP_SRL = 38;  /* 論理右シフト (v35) */
 static int OP_SRAI = 39; /* 算術右シフト即値 (v35) */
 
-/* 命令表の上限は 57344 (v39 で 40960 → 49152、
- * v44 で → 57344 と増量)。
+/* 命令表の上限は 59392 (v39 で 40960 → 49152、
+ * v44 で → 57344、v45 で → 59392 と増量)。
  * v38 の時点で一括セルフコンパイルが約44K命令に
  * 達して上限を超え、asm_push が無言で表の外へ
  * 書いて隣の表を壊していた (点検は asm_push と
  * gen_program にある)。op / rd / rs1 / rs2 は
  * 小さい値しか入らないので char にして、増量の
  * 対価 (imm と patch_next の増分) を払った */
-static char asm_op[57344];
-static char asm_rd[57344];
-static char asm_rs1[57344];
-static char asm_rs2[57344];
-static int asm_imm[57344];
+static char asm_op[59392];
+static char asm_rd[59392];
+static char asm_rs1[59392];
+static char asm_rs2[59392];
+static int asm_imm[59392];
 static int nasm;  /* 並べた命令の数 */
 
 /* 命令を1つ、命令列の末尾に積む */
 static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
-    if (nasm >= 57344) {
+    if (nasm >= 59392) {
         /* 上限あふれ: 表の外へは書かない (v39)。
          * 生成は最後まで回るが、gen_program が
          * nasm を見て失敗にする */
@@ -135,7 +135,7 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
  * 指す。届く分岐は従来どおり beq 1命令のままなので、
  * 今まで正しく作れていたプログラムの出力は変わらない */
 static int branch_ord;         /* 条件分岐の通し番号 */
-static char branch_long[57344]; /* 伸ばす分岐の印 */
+static char branch_long[59392]; /* 伸ばす分岐の印 */
 
 /* 「t1 が 0 なら飛ぶ」条件分岐を置く。戻り値は、飛び先
  * (命令番号) を asm_imm に書き込むべき命令の番号:
@@ -275,9 +275,9 @@ static int RLOC_STR = 1;
 static int RLOC_VAR = 2;
 static int RLOC_ARR = 3;
 static int RLOC_FUNC = 4;  /* 関数 (添字 = 関数番号、v44) */
-static int obj_reloc_site[8192];
-static int obj_reloc_kind[8192];
-static int obj_reloc_idx[8192];
+static int obj_reloc_site[6144];
+static int obj_reloc_kind[6144];
+static int obj_reloc_idx[6144];
 static int obj_nreloc;
 static int obj_abs_site[256];
 static int obj_abs_val[256];
@@ -343,7 +343,7 @@ static void gen_load_addr_sym(int reg, int kind, int idx) {
             obj_nabs++;
         } else
             obj_nabs = -1;  /* あふれの印 (gen_program が止める) */
-    } else if (obj_nreloc < 8192) {
+    } else if (obj_nreloc < 6144) {
         obj_reloc_site[obj_nreloc] = nasm;
         obj_reloc_kind[obj_nreloc] = kind;
         obj_reloc_idx[obj_nreloc] = idx;
@@ -684,6 +684,10 @@ static int gen_call_args(int arg);
 /* 要素の住所を作る道具 (v23)。gen_expr と相互に使う */
 static int gen_elem_addr(int node);
 
+/* B 方式の呼び出しの道具 (v45)。gen_expr と相互に使う */
+static int gen_push_args_b(int arg, int sig, int ai);
+static int gen_b_call(int node, int mode);
+
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
  * 失敗したら 0 を返す (理由は errmsg)。
  *
@@ -875,6 +879,96 @@ static int check_fsig(int want, int expr) {
     return 1;
 }
 
+/* 式の値に結び付く構造体のタグ (v45): 値そのものが
+ * 構造体のとき、そのタグ番号 + 1 を返す。関係なければ
+ * 0。代入や引数の受け渡しの照合に使う */
+static int value_struct(int node) {
+    int k = node_kind[node];
+    if (k == NODE_VAR) {
+        if (var_plevel[node_val[node]] == 0)
+            return var_struct[node_val[node]];
+        return 0;
+    }
+    if (k == NODE_INDEX || k == NODE_INDEX2) {
+        if (arr_plevel[node_val[node]] == 0)
+            return arr_struct[node_val[node]];
+        return 0;
+    }
+    if (k == NODE_MEMBER || k == NODE_MELEM) {
+        if (smem_plevel[node_val[node]] == 0)
+            return smem_struct[node_val[node]];
+        return 0;
+    }
+    if (k == NODE_PINDEX) {
+        if (var_plevel[node_val[node]] == 1)
+            return var_struct[node_val[node]];
+        return 0;
+    }
+    if (k == NODE_DEREF) {
+        int b = node_lhs[node];
+        if (node_kind[b] == NODE_VAR &&
+            var_plevel[node_val[b]] == 1)
+            return var_struct[node_val[b]];
+        if ((node_kind[b] == NODE_MEMBER ||
+             node_kind[b] == NODE_MELEM) &&
+            smem_plevel[node_val[b]] == 1)
+            return smem_struct[node_val[b]];
+        return 0;
+    }
+    if (k == NODE_CALL)
+        return sig_ret_struct[func_sig[node_val[node]]];
+    if (k == NODE_ICALL)
+        return sig_ret_struct[node_val[node]];
+    return 0;
+}
+
+/* 構造体の受け渡しの照合 (v45): 受け側のタグ (want、
+ * +1 符号化) が分かっていて、渡す側のタグも分かって
+ * いるのに食い違うときだけ止める (check_fsig と同じ
+ * 方針) */
+static int check_struct(int want, int expr) {
+    if (want == 0)
+        return 1;
+    int got = value_struct(expr);
+    if (got != 0 && got != want) {
+        errmsg = "構造体の型 (タグ) が合いません";
+        return 0;
+    }
+    return 1;
+}
+
+/* 構造体のタグ (+1 符号化) が占めるスロット数 (v45) */
+static int struct_slots(int tag) {
+    return (stag_size[tag - 1] + 7) / 8;
+}
+
+/* 呼び出しが B 方式かどうか (v45): 構造体の引数か
+ * 構造体の戻り値が1つでもあれば B 方式。署名だけから
+ * 決まるので、定義側と呼び出し側で必ず一致する */
+static int call_b_mode(int sig) {
+    if (sig_ret_struct[sig] > 0)
+        return 1;
+    for (int i = 0; i < sig_nparams[sig]; i++)
+        if (sig_pstruct[sig][i] > 0 && sig_pplevel[sig][i] == 0)
+            return 1;
+    return 0;
+}
+
+/* 引数 i が引数領域に占めるスロット数 (v45) */
+static int arg_slots(int sig, int i) {
+    if (sig_pstruct[sig][i] > 0 && sig_pplevel[sig][i] == 0)
+        return struct_slots(sig_pstruct[sig][i]);
+    return 1;
+}
+
+/* 引数領域の全スロット数 (sret のスロットを含む、v45) */
+static int call_total_slots(int sig) {
+    int n = sig_ret_struct[sig] > 0 ? 1 : 0;
+    for (int i = 0; i < sig_nparams[sig]; i++)
+        n += arg_slots(sig, i);
+    return n;
+}
+
 static int gen_expr(int node) {
     if (node_kind[node] == NODE_VAR &&
         var_struct[node_val[node]] > 0 &&
@@ -998,6 +1092,18 @@ static int gen_expr(int node) {
         return 1;
     }
     if (node_kind[node] == NODE_CALL) {
+        if (call_b_mode(func_sig[node_val[node]])) {
+            /* B 方式 (v45): 構造体が絡む呼び出し。
+             * 構造体の戻り値は式の値にはならないので、
+             * ここではスカラを返すものだけを扱う
+             * (構造体の戻り値は代入・引数・return の
+             * 位置で gen_b_call が直接受ける) */
+            if (sig_ret_struct[func_sig[node_val[node]]] > 0) {
+                errmsg = "構造体の戻り値は代入・引数・return の位置で使ってください";
+                return 0;
+            }
+            return gen_b_call(node, 2);
+        }
         /* 関数呼び出し (v22 で式になった):
          *   引数を右から評価してスタックに積む
          *   積んだものを a0〜a3 へ順に移し、スタックを戻す
@@ -1036,6 +1142,14 @@ static int gen_expr(int node) {
         return 1;
     }
     if (node_kind[node] == NODE_ICALL) {
+        if (call_b_mode(node_val[node])) {
+            /* B 方式 (v45): 直接呼び出しと同じ扱い */
+            if (sig_ret_struct[node_val[node]] > 0) {
+                errmsg = "構造体の戻り値は代入・引数・return の位置で使ってください";
+                return 0;
+            }
+            return gen_b_call(node, 2);
+        }
         /* 関数ポインタ経由の呼び出し (v44):
          *   引数を右から評価してスタックに積む
          *   呼び先の式を評価して t1 に住所を得る
@@ -1365,12 +1479,24 @@ static int gen_call_args(int arg) {
  * t1 の添字に掛ける: 大きさ 2/4/8 は 2 の冪なので
  * 左シフト、1 なら何もしない */
 static void emit_scale(int esize) {
-    if (esize == 2)
-        asm_push(OP_SLLI, REG_T1, REG_T1, 0, 1);
-    else if (esize == 4)
-        asm_push(OP_SLLI, REG_T1, REG_T1, 0, 2);
-    else if (esize == 8)
-        asm_push(OP_SLLI, REG_T1, REG_T1, 0, 3);
+    /* 添字 (t1) を要素の大きさ倍にする。2の冪なら
+     * シフト、それ以外は定数との乗算 (v45 で一般化:
+     * 以前は 2 / 4 / 8 しか扱っておらず、16バイトの
+     * 構造体の配列などで添字が倍にならなかった) */
+    if (esize <= 1)
+        return;
+    int shift = 0;
+    int e = esize;
+    while ((e & 1) == 0) {
+        e >>= 1;
+        shift++;
+    }
+    if (e == 1) {
+        asm_push(OP_SLLI, REG_T1, REG_T1, 0, shift);
+    } else {
+        gen_load_const(REG_A0, esize);
+        asm_push(OP_MUL, REG_T1, REG_T1, REG_A0, 0);
+    }
 }
 
 /* 構造体のメンバ1つの大きさ (バイト、v37) */
@@ -1499,6 +1625,217 @@ static int gen_elem_addr(int node) {
     }
 }
 
+/* 左辺値の住所を t2 に作る (v45): 構造体の複写の
+ * 送り先・送り元に使う。変数は gen_var_addr、メンバと
+ * 要素は gen_elem_addr、ポインタ越し (DEREF) は相手の
+ * 式の値そのものが住所 */
+static int gen_lvalue_addr(int node) {
+    int k = node_kind[node];
+    if (k == NODE_VAR) {
+        gen_var_addr(REG_T2, node_val[node]);
+        return 1;
+    }
+    if (k == NODE_MEMBER || k == NODE_MELEM ||
+        k == NODE_INDEX || k == NODE_INDEX2 ||
+        k == NODE_PINDEX)
+        return gen_elem_addr(node);
+    if (k == NODE_DEREF) {
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        return 1;
+    }
+    errmsg = "構造体の値の住所が作れません";
+    return 0;
+}
+
+/* スロットの複写 (v45): 送り元 (t2) から送り先 (a0)
+ * へ n スロットを順に写す。カウンタのためのレジスタ
+ * 契約を増やさないよう、ループにせず展開する */
+static void gen_copy_slots(int n) {
+    for (int j = 0; j < n; j++) {
+        asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
+        asm_push(OP_SD, 0, REG_A0, REG_T1, 0);
+        if (j + 1 < n) {
+            asm_push(OP_ADDI, REG_T2, REG_T2, 0, 8);
+            asm_push(OP_ADDI, REG_A0, REG_A0, 0, 8);
+        }
+    }
+}
+
+/* 構造体の丸ごと代入の右辺の生成 (v45): 送り先の住所
+ * が t2 にある状態で呼ばれる。右辺の構造体の値を
+ * 送り先へ複写する。右辺が構造体を返す呼び出しの
+ * ときは B 方式 (段2) で扱う */
+static int gen_struct_copy_rhs(int rhs, int tag) {
+    int got = value_struct(rhs);
+    if (got == 0) {
+        errmsg = "構造体には構造体の値だけが代入できます";
+        return 0;
+    }
+    if (got != tag) {
+        errmsg = "構造体の型 (タグ) が合いません";
+        return 0;
+    }
+    if (node_kind[rhs] == NODE_CALL ||
+        node_kind[rhs] == NODE_ICALL) {
+        /* 構造体を返す呼び出し (v45): 送り先の住所を
+         * sret として渡し、直接そこへ書かせる */
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+        return gen_b_call(rhs, 0);
+    }
+    /* 送り先の住所 (t2) を退避してから送り元の住所を作る */
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+    asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+    if (!gen_lvalue_addr(rhs))
+        return 0;
+    asm_push(OP_LD, REG_A0, REG_SP, 0, 0);
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+    gen_copy_slots(struct_slots(tag));
+    return 1;
+}
+
+/* 構造体の値渡しの引数を積む (v45): 住所を作り、
+ * スロットを逆順に積む (積み終わるとスロット0が
+ * 一番下、つまり受け側の fp から見て先頭に来る) */
+static int gen_push_struct_arg(int node) {
+    if (!gen_lvalue_addr(node))
+        return 0;
+    int n = struct_slots(value_struct(node));
+    /* 住所 (t2) を a0 へ移し、末尾のスロットから積む */
+    asm_push(OP_ADDI, REG_A0, REG_T2, 0, 0);
+    if (n > 1) {
+        gen_load_const(REG_T2, (n - 1) * 8);
+        asm_push(OP_ADD, REG_A0, REG_A0, REG_T2, 0);
+    }
+    for (int j = 0; j < n; j++) {
+        asm_push(OP_LD, REG_T1, REG_A0, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+        if (j + 1 < n)
+            asm_push(OP_ADDI, REG_A0, REG_A0, 0, -8);
+    }
+    return 1;
+}
+
+/* B 方式の引数の並びを積む (v45): gen_call_args と
+ * 同じく右の引数から積む。構造体の引数はスロット
+ * ごとに、スカラは値そのものを積む */
+static int gen_push_args_b(int arg, int sig, int ai) {
+    if (arg < 0)
+        return 1;
+    if (!gen_push_args_b(node_next[arg], sig, ai + 1))
+        return 0;
+    if (sig_pstruct[sig][ai] > 0 && sig_pplevel[sig][ai] == 0) {
+        /* 構造体の値渡し */
+        if (!check_struct(sig_pstruct[sig][ai], arg))
+            return 0;
+        if (value_struct(arg) == 0) {
+            errmsg = "構造体の引数には構造体の値を渡します";
+            return 0;
+        }
+        if (node_kind[arg] == NODE_CALL ||
+            node_kind[arg] == NODE_ICALL) {
+            /* 戻り値を引数の置き場へ直接受け取る:
+             * 置き場を先に空けておき、そこを sret に
+             * して呼ぶ。ただし戻り値は置き場に詰まって
+             * (8バイト間隔) 書かれるので、引数領域の
+             * 並び (16バイト間隔) に合わせて後ろから
+             * 広げ直す */
+            int n = struct_slots(sig_pstruct[sig][ai]);
+            asm_push(OP_ADDI, REG_SP, REG_SP, 0, -n * 16);
+            if (!gen_b_call(arg, 1))
+                return 0;
+            asm_push(OP_ADDI, REG_A0, REG_SP, 0, 0);
+            for (int j = n - 1; j >= 1; j--) {
+                asm_push(OP_LD, REG_T1, REG_A0, 0, j * 8);
+                asm_push(OP_SD, 0, REG_A0, REG_T1, j * 16);
+            }
+            return 1;
+        }
+        return gen_push_struct_arg(arg);
+    }
+    if (value_struct(arg) > 0) {
+        errmsg = "構造体の値は構造体の引数にだけ渡せます";
+        return 0;
+    }
+    if (!check_fsig(sig_pfsig[sig][ai], arg))
+        return 0;
+    if (!gen_expr(arg))
+        return 0;
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+    asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+    return 1;
+}
+
+/* B 方式の呼び出しの生成 (v45): 構造体の引数か
+ * 構造体の戻り値が絡む呼び出し。引数は全スロットを
+ * スタックに積み (16バイト間隔)、受け側は fp 相対で
+ * 自分の枠へ写す。呼び側は積んだ分を戻すだけで、
+ * レジスタ渡しはしない。構造体の戻り値は隠し引数
+ * sret (戻り値の置き場の住所) を引数領域の先頭
+ * スロットで渡す。
+ * mode: 0 = sret の値が既に1スロット積んである
+ *       1 = sp が戻り値の置き場の先頭 (その値が sret)
+ *       2 = 戻り値はスカラで sret は無い
+ * 戻るとき sp は入口と同じに戻る。戻り値がスカラなら
+ * t1 に入る (A 方式と同じ)。構造体なら値は置き場に
+ * あり、a0 = sret のまま */
+static int gen_b_call(int node, int mode) {
+    int is_call = node_kind[node] == NODE_CALL;
+    int sig = is_call ? func_sig[node_val[node]] : node_val[node];
+    int args = is_call ? node_lhs[node] : node_rhs[node];
+    int has_sret = sig_ret_struct[sig] > 0;
+    if (has_sret && mode == 2) {
+        errmsg = "内部エラー: 構造体の戻り値に置き場がありません";
+        return 0;
+    }
+    if (!has_sret && mode != 2) {
+        errmsg = "内部エラー: sret の無い呼び出しに置き場があります";
+        return 0;
+    }
+    if (mode == 1) {
+        /* 置き場の住所 (今の sp) を sret の控えとして積む */
+        asm_push(OP_ADDI, REG_T1, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+        mode = 0;
+    }
+    if (!gen_push_args_b(args, sig, 0))
+        return 0;
+    if (has_sret) {
+        /* 控えの sret を引数領域の先頭スロットへ写す:
+         * 控えは引数の並びの上にある。間接呼び出しの
+         * 呼び先の評価より先に積む (評価は引数領域の
+         * 下でだけスタックを使うので、領域は壊れない) */
+        int abytes = (call_total_slots(sig) - 1) * 16;
+        asm_push(OP_LD, REG_T1, REG_SP, 0, abytes);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+    }
+    if (is_call) {
+        asm_push(OP_JAL, REG_RA, 0, 0, -(node_val[node] + 1));
+    } else {
+        /* 間接呼び出し: 呼び先の式を引数の後に評価する
+         * (A 方式と同じ順序) */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_JALR, REG_RA, REG_T1, 0, 0);
+    }
+    /* 引数領域と控えを戻す (sp は入口と同じになる) */
+    int rel = call_total_slots(sig) * 16;
+    if (mode == 0)
+        rel += 16;
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, rel);
+    if (!has_sret) {
+        /* スカラの戻り値: a0 → t1 + 正規形 (A 方式と同じ) */
+        asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
+        emit_canon(sig_ret_etype[sig]);
+    }
+    return 1;
+}
+
 /* 文の AST から命令列を作る。失敗したら 0。
  *
  * while の作り方 (命令列の並びがループの形そのもの):
@@ -1526,12 +1863,14 @@ static int ctrl_depth;          /* 制御構造 (ループと switch) の
                                  * 入れ子の深さ。break が最も内側の
                                  * どちらを抜けるかを決める (v43) */
 static char ctrl_is_switch[65]; /* 深さごとの種別: 1 なら switch */
-static int patch_next[57344];
+static int patch_next[59392];
 
 /* 関数の return の飛び先 (出口は関数の生成の最後まで
  * 分からない) も同じ道具で積む */
 static int return_patch_head;
 static int gen_in_func;  /* 関数の生成中なら 1 */
+static int gen_cur_func;  /* 生成中の関数の番号 (v45)。
+                           * return の照合と sret のために使う */
 
 /* 仮の jal を置き、番号をリストの先頭に繋ぐ */
 static void emit_patch_jump(int *head) {
@@ -1581,6 +1920,23 @@ static int gen_stmt(int node) {
         int addr_node = (kind == NODE_INDEX_STORE) ? node
                                                    : node_lhs[node];
         int val_node = node_rhs[node];
+        /* 構造体の要素への丸ごと代入 (v45): 要素が
+         * 構造体なら、右辺の構造体の値を複写する */
+        {
+            int dst_tag = (kind == NODE_INDEX_STORE)
+                ? (arr_plevel[node_val[node]] == 0
+                       ? arr_struct[node_val[node]] : 0)
+                : value_struct(node_lhs[node]);
+            if (dst_tag > 0) {
+                if (!gen_elem_addr(addr_node))
+                    return 0;
+                return gen_struct_copy_rhs(val_node, dst_tag);
+            }
+            if (value_struct(val_node) > 0) {
+                errmsg = "構造体の値は構造体にだけ代入できます";
+                return 0;
+            }
+        }
         /* 要素が関数ポインタなら署名を照合する (v44) */
         {
             int want = (kind == NODE_INDEX_STORE)
@@ -1611,6 +1967,18 @@ static int gen_stmt(int node) {
         return 1;
     }
     if (kind == NODE_ASSIGN) {
+        /* 構造体の丸ごと代入 (v45): 代入先が構造体の
+         * 変数なら、右辺の構造体の値を複写する */
+        if (var_struct[node_val[node]] > 0 &&
+            var_plevel[node_val[node]] == 0) {
+            gen_var_addr(REG_T2, node_val[node]);
+            return gen_struct_copy_rhs(node_lhs[node],
+                                       var_struct[node_val[node]]);
+        }
+        if (value_struct(node_lhs[node]) > 0) {
+            errmsg = "構造体の値は構造体にだけ代入できます";
+            return 0;
+        }
         /* 代入先が関数ポインタなら署名を照合する (v44) */
         if (!check_fsig(var_fsig[node_val[node]], node_lhs[node]))
             return 0;
@@ -1646,6 +2014,19 @@ static int gen_stmt(int node) {
          * いた。セルフコンパイルの append_file で発覚)。
          * 絶対アドレス (デバイスの窓口) は従来どおり
          * 1バイト */
+        /* ポインタ越しの構造体の丸ごと代入 (v45):
+         * 指す先が構造体なら、右辺の構造体の値を複写する */
+        if (node_kind[node_lhs[node]] == NODE_VAR &&
+            var_plevel[node_val[node_lhs[node]]] == 1 &&
+            var_struct[node_val[node_lhs[node]]] > 0) {
+            int tag = var_struct[node_val[node_lhs[node]]];
+            gen_load_var(REG_T2, node_val[node_lhs[node]]);
+            return gen_struct_copy_rhs(node_rhs[node], tag);
+        }
+        if (value_struct(node_rhs[node]) > 0) {
+            errmsg = "構造体の値は構造体にだけ代入できます";
+            return 0;
+        }
         if (!gen_expr(node_rhs[node]))
             return 0;
         int addr = node_lhs[node];
@@ -1656,6 +2037,20 @@ static int gen_stmt(int node) {
         asm_push(mem_store_op(deref_etype(addr)),
                  0, REG_T2, REG_T1, 0);
         return 1;
+    }
+    if (kind == NODE_CALL || kind == NODE_ICALL) {
+        int bsig = kind == NODE_CALL ? func_sig[node_val[node]]
+                                     : node_val[node];
+        if (call_b_mode(bsig) && sig_ret_struct[bsig] > 0) {
+            /* 構造体を返す呼び出しを文として (v45):
+             * 戻り値は一時置き場に受けて捨てる */
+            int n = struct_slots(sig_ret_struct[bsig]);
+            asm_push(OP_ADDI, REG_SP, REG_SP, 0, -n * 16);
+            if (!gen_b_call(node, 1))
+                return 0;
+            asm_push(OP_ADDI, REG_SP, REG_SP, 0, n * 16);
+            return 1;
+        }
     }
     if (kind == NODE_CALL || kind == NODE_SYSCALL3 ||
         kind == NODE_ICALL) {
@@ -1749,8 +2144,12 @@ static int gen_stmt(int node) {
          * continue の飛び先は L_step (更新を飛ばすと
          * 終わらないループになるため) */
         if (node_val[node] >= 0) {
-            if (!gen_stmt(node_val[node]))
-                return 0;
+            /* 初期化は文の鎖のこともある (構造体の
+             * 初期化子の展開、v45) */
+            for (int s = node_val[node]; s != -1; s = node_next[s]) {
+                if (!gen_stmt(s))
+                    return 0;
+            }
         }
         int l_cond = nasm;
         if (!gen_expr(node_lhs[node]))
@@ -1820,6 +2219,53 @@ static int gen_stmt(int node) {
          * 戻り値つきは v22 */
         if (!gen_in_func) {
             errmsg = "return は関数の中でだけ使えます";
+            return 0;
+        }
+        if (gen_cur_func >= 0 &&
+            func_ret_struct[gen_cur_func] > 0) {
+            /* 構造体の値返し (v45): sret (fp の真上、
+             * 引数領域の先頭スロット) の指す先へ値を
+             * 複写し、sret を a0 に入れて戻る */
+            int tag = func_ret_struct[gen_cur_func];
+            if (node_lhs[node] < 0) {
+                errmsg = "構造体を返す関数には return の値が要ります";
+                return 0;
+            }
+            int expr = node_lhs[node];
+            if (value_struct(expr) == 0) {
+                errmsg = "構造体を返す関数からは構造体を返します";
+                return 0;
+            }
+            if (value_struct(expr) != tag) {
+                errmsg = "構造体の型 (タグ) が合いません";
+                return 0;
+            }
+            if (node_kind[expr] == NODE_CALL ||
+                node_kind[expr] == NODE_ICALL) {
+                /* 自分の sret をそのまま相手へ渡す
+                 * (複写が1回省ける) */
+                asm_push(OP_LD, REG_T2, REG_FP, 0, 0);
+                asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+                asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+                if (!gen_b_call(expr, 0))
+                    return 0;
+            } else {
+                if (!gen_lvalue_addr(expr))
+                    return 0;
+                asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+                asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+                asm_push(OP_LD, REG_A0, REG_FP, 0, 0);
+                asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+                asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+                gen_copy_slots(struct_slots(tag));
+                asm_push(OP_LD, REG_A0, REG_FP, 0, 0);
+            }
+            emit_patch_jump(&return_patch_head);
+            return 1;
+        }
+        if (node_lhs[node] >= 0 &&
+            value_struct(node_lhs[node]) > 0) {
+            errmsg = "構造体の値は構造体を返す関数からだけ返せます";
             return 0;
         }
         if (node_lhs[node] >= 0) {
@@ -1950,6 +2396,29 @@ static unsigned int stack_top_addr;
  * ra を退避するのが肝心で、これがあるから関数の中で
  * さらに別の関数を呼んでも (ra が上書きされても)
  * 自分の戻り先を失わない。失敗したら 0 */
+/* fp 相対の住所をレジスタに作る (v45): ずれが即値に
+ * 収まらないときは定数を経由する */
+static void emit_fp_addr(int reg, int off) {
+    if (off >= -2048 && off < 2048) {
+        asm_push(OP_ADDI, reg, REG_FP, 0, off);
+    } else {
+        gen_load_const(reg, off);
+        asm_push(OP_ADD, reg, REG_FP, reg, 0);
+    }
+}
+
+/* 引数領域 (fp 相対、16バイト間隔) から枠 (fp 相対、
+ * 8バイト間隔) へ1スロット写す (v45) */
+static void emit_copy_fp(int dst_off, int src_off) {
+    if (src_off >= -2048 && src_off < 2048) {
+        asm_push(OP_LD, REG_T1, REG_FP, 0, src_off);
+    } else {
+        emit_fp_addr(REG_T2, src_off);
+        asm_push(OP_LD, REG_T1, REG_T2, 0, 0);
+    }
+    asm_push(OP_SD, 0, REG_FP, REG_T1, dst_off);
+}
+
 static int gen_func(int f) {
     /* オブジェクト出力 (v31) では、宣言だけの関数に
      * 中身を作らない (一括では空の体ができるが、
@@ -1971,18 +2440,46 @@ static int gen_func(int f) {
     asm_push(OP_SD, 0, REG_SP, REG_RA, frame - 8);
     asm_push(OP_SD, 0, REG_SP, REG_FP, frame - 16);
     asm_push(OP_ADDI, REG_FP, REG_SP, 0, frame);
-    /* 引数を受け取る: a0〜a3 を引数の枠へ順に書く (v22) */
-    for (int k = 0; k < func_nparams[f]; k++)
-        asm_push(OP_SD, 0, REG_FP, REG_A0 + k,
-                 var_frame_off(func_param_var[f][k]));
+    if (call_b_mode(func_sig[f])) {
+        /* B 方式の引数の受け取り (v45): 引数は呼び側が
+         * スタックに積んであり、fp の真上 (引数領域) に
+         * 16バイト間隔で並ぶ。自分の枠へ写す。構造体の
+         * 戻り値があるとき、先頭のスロットは sret
+         * (戻り値の置き場の住所) で、ここでは触らない
+         * (return のときに fp 相対で読む) */
+        int sig = func_sig[f];
+        int slot = sig_ret_struct[sig] > 0 ? 1 : 0;
+        for (int k = 0; k < func_nparams[f]; k++) {
+            int var = func_param_var[f][k];
+            if (sig_pstruct[sig][k] > 0 &&
+                sig_pplevel[sig][k] == 0) {
+                /* 構造体: 引数領域 (16バイト間隔) から
+                 * 枠 (8バイト間隔) へスロットごとに写す */
+                int ns = struct_slots(sig_pstruct[sig][k]);
+                for (int j = 0; j < ns; j++)
+                    emit_copy_fp(var_frame_off(var) + j * 8,
+                                 (slot + j) * 16);
+            } else {
+                emit_copy_fp(var_frame_off(var), slot * 16);
+            }
+            slot += arg_slots(sig, k);
+        }
+    } else {
+        /* 引数を受け取る: a0〜a3 を引数の枠へ順に書く (v22) */
+        for (int k = 0; k < func_nparams[f]; k++)
+            asm_push(OP_SD, 0, REG_FP, REG_A0 + k,
+                     var_frame_off(func_param_var[f][k]));
+    }
     return_patch_head = -1;
     gen_in_func = 1;
+    gen_cur_func = f;
     type_list(func_body[f]);
     for (int s = func_body[f]; s != -1; s = node_next[s]) {
         if (!gen_stmt(s))
             return 0;
     }
     gen_in_func = 0;
+    gen_cur_func = -1;
     /* 早期 return の飛び先はここ (後始末の頭) */
     apply_patches(return_patch_head, nasm);
     /* 後始末: ra と fp を戻し (fp の読みは古い fp で
@@ -2074,8 +2571,16 @@ static int list_needs_stack(int head);  /* 相互に使うので先行宣言 */
 
 static int stmt_needs_stack(int node) {
     int k = node_kind[node];
-    if (k == NODE_ASSIGN || k == NODE_PUTC)
+    if (k == NODE_ASSIGN || k == NODE_PUTC) {
+        /* 構造体の丸ごと代入は住所の退避にスタックを使う
+         * (v45) */
+        if (k == NODE_ASSIGN &&
+            ((var_struct[node_val[node]] > 0 &&
+              var_plevel[node_val[node]] == 0) ||
+             value_struct(node_lhs[node]) > 0))
+            return 1;
         return expr_needs_stack(node_lhs[node]);
+    }
     if (k == NODE_WHILE)
         return expr_needs_stack(node_lhs[node]) ||
                list_needs_stack(node_rhs[node]);
@@ -2103,9 +2608,10 @@ static int stmt_needs_stack(int node) {
         return 0;
     }
     if (k == NODE_FOR)
-        /* 初期化・更新は文、本体は文の並び、条件は式 */
+        /* 初期化・更新は文、本体は文の並び、条件は式。
+         * 初期化は文の鎖のこともある (v45) */
         return (node_val[node] >= 0 &&
-                stmt_needs_stack(node_val[node])) ||
+                list_needs_stack(node_val[node])) ||
                expr_needs_stack(node_lhs[node]) ||
                list_needs_stack(node_rhs[node]);
     if (k == NODE_FORSTEP)
@@ -2123,18 +2629,32 @@ static int stmt_needs_stack(int node) {
         }
         return need;
     }
-    if (k == NODE_STORE)
+    if (k == NODE_STORE) {
+        /* ポインタ越しの構造体の複写も退避を使う (v45) */
+        if ((node_kind[node_lhs[node]] == NODE_VAR &&
+             var_plevel[node_val[node_lhs[node]]] == 1 &&
+             var_struct[node_val[node_lhs[node]]] > 0) ||
+            value_struct(node_rhs[node]) > 0)
+            return 1;
         return expr_needs_stack(node_rhs[node]);
+    }
     if (k == NODE_INDEX_STORE)
-        /* 値が葉でない書き込みは、住所の退避にスタックを使う */
-        return expr_needs_stack(node_lhs[node]) ||
+        /* 値が葉でない書き込みは、住所の退避にスタックを使う。
+         * 構造体の要素への複写も同じ (v45) */
+        return (arr_plevel[node_val[node]] == 0 &&
+                arr_struct[node_val[node]] > 0) ||
+               value_struct(node_rhs[node]) > 0 ||
+               expr_needs_stack(node_lhs[node]) ||
                !is_leaf(node_rhs[node]) ||
                expr_needs_stack(node_rhs[node]);
     if (k == NODE_ELEM_STORE)
         /* lhs は要素を表す式ノード (式として数える)。
          * 値が葉でない書き込みは住所の退避にスタックを
-         * 使う。2次元なら住所作り自体も退避する (v23) */
-        return expr_needs_stack(node_lhs[node]) ||
+         * 使う。2次元なら住所作り自体も退避する (v23)。
+         * 構造体のメンバへの複写も退避を使う (v45) */
+        return value_struct(node_lhs[node]) > 0 ||
+               value_struct(node_rhs[node]) > 0 ||
+               expr_needs_stack(node_lhs[node]) ||
                !is_leaf(node_rhs[node]) ||
                expr_needs_stack(node_rhs[node]);
     return 0;
@@ -2383,7 +2903,7 @@ static int gen_program(void) {
      * 伸ばす。伸ばすと別の分岐が届かなくなることがある
      * ので、印が増えなくなるまで1回目の生成を繰り返す
      * (emit_beq_t1z の説明参照) */
-    for (int i = 0; i < 57344; i++)
+    for (int i = 0; i < 59392; i++)
         branch_long[i] = 0;
     for (;;) {
         if (!gen_all())
@@ -2391,7 +2911,7 @@ static int gen_program(void) {
         if (!relax_scan())
             break;
     }
-    if (nasm >= 57344) {
+    if (nasm >= 59392) {
         /* asm_push が上限で止めた分 (v39) */
         errmsg = "命令が多すぎます";
         return 0;
