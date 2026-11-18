@@ -17,7 +17,7 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v47（enum と union）を branch `v47` で追加
+## 現在地: v47（enum と union）を main に追加
 
 enum と union を足した（設計は
 doc/enum-union.md）。enum の列挙子は parse の
