@@ -6,28 +6,28 @@
 # と対で、KosabaOS の 1MB 級データ領域でも
 # Misoni のチェーン全体が回るようにする。
 #
-# 実測のピーク (2026-11-19、v46、iwac 自身のリンク):
-#   最大のオブジェクト 280,488 バイト (03-gen.eo)
-#   コード合計 262,660 / 文字列合計 17,106
-#   再配置 6,898 / 名前 568 (登録順の控え 2,277)
-#   名前プール 6,480 バイト / オブジェクト1つの
-#   シンボル表は最大 2,655 件 (03-gen.eo)
+# 実測のピーク (2026-11-19、v47、iwac 自身のリンク):
+#   最大のオブジェクト 281,008 バイト (03-gen.eo)
+#   コード合計 268,824 / 文字列合計 18,153
+#   再配置 7,074 / 名前 582 (登録順の控え 2,317)
+#   名前プール 6,649 バイト / オブジェクト1つの
+#   シンボル表は最大 2,668 件 (03-gen.eo)
 #   配列初期値の穴埋め (afix) は 0 件
 #
 # 容量プロファイル (標準 → 断片):
-#   名前表         4096 → 672 (配列 15 本とも)
-#   登録順         4096 → 2560
-#   再配置表      16384 → 7168
-#   シンボル表の鏡 8192 → 3072 (esym、v46 で新設)
+#   名前表         4096 → 640 (配列 15 本とも)
+#   登録順         4096 → 2432
+#   再配置表      16384 → 7296
+#   シンボル表の鏡 8192 → 2816 (esym、v46 で新設)
 #   入力バッファ 約384KB → 276KB (最大オブジェクト
-#     280,488 バイトが入る大きさ)
-#   コード置き場  288KB → 258KB (コード合計の
-#     実測 262,660 に合わせた)
-#   文字列置き場  128KB → 18KB
-#   名前プール     64KB → 7KB (実測 6,480)
+#     281,008 バイトが入る大きさ)
+#   コード置き場  288KB → 264KB (コード合計の
+#     実測 268,824 に合わせた)
+#   文字列置き場  128KB → 19KB
+#   名前プール     64KB → 7KB (実測 6,649)
 #   配列初期値    256KB → 1KB (v40。断片プロファイルの
 #     仕事は iwac 自身のリンクで、初期値は現れない)
-#   afix の控え   1024 → 256 (実測 0 件)
+#   afix の控え   1024 → 128 (実測 0 件)
 # 狙いは静的データ 1MB 未満。最後に測り、以上なら
 # 失敗として止まる。
 #
@@ -63,35 +63,35 @@ apply() {
 }
 
 # 名前表: まず登録順 (seq) を名指しで替えてから残りを一括
-apply nori.c 'seq_sym[4096]' 'seq_sym[2560]' 1
-apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2560' 1
-apply nori.c '[4096]' '[672]' 15
-apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 672' 1
+apply nori.c 'seq_sym[4096]' 'seq_sym[2432]' 1
+apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2432' 1
+apply nori.c '[4096]' '[640]' 15
+apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 640' 1
 # 再配置表
-apply nori.c '[16384]' '[7168]' 5
-apply nori.c 'MAX_REL = 16384' 'MAX_REL = 7168' 1
+apply nori.c '[16384]' '[7296]' 5
+apply nori.c 'MAX_REL = 16384' 'MAX_REL = 7296' 1
 # オブジェクト1つのシンボル表の鏡 (esym、v46 で穴の表と分離)
-apply nori.c 'esym_tag[8192]' 'esym_tag[3072]' 1
-apply nori.c 'esym_sym[8192]' 'esym_sym[3072]' 1
-apply nori.c 'nsym_e > 8192' 'nsym_e > 3072' 1
+apply nori.c 'esym_tag[8192]' 'esym_tag[2816]' 1
+apply nori.c 'esym_sym[8192]' 'esym_sym[2816]' 1
+apply nori.c 'nsym_e > 8192' 'nsym_e > 2816' 1
 # 共有バッファ (in_buf と out_code の相乗り、v44) と読みのガード
 apply nori.c 'share_buf[393216]' 'share_buf[282624]' 1
 apply nori.c '393216 - in_len' '282624 - in_len' 1
 apply nori.c 'in_len >= 393216' 'in_len >= 282624' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[294912]' 'code_pool[264192]' 1
-apply nori.c 'code_used >= 294912' 'code_used >= 264192' 1
-apply nori.c '> 294912' '> 264192' 1
+apply nori.c 'code_pool[294912]' 'code_pool[270336]' 1
+apply nori.c 'code_used >= 294912' 'code_used >= 270336' 1
+apply nori.c '> 294912' '> 270336' 1
 # 配列の初期値の置き場 (v40) と、その穴埋めの控え (afix)
 apply nori.c 'ainit_buf[262144]' 'ainit_buf[1024]' 1
 apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 1024' 1
-apply nori.c 'afix_arr[1024]' 'afix_arr[256]' 1
-apply nori.c 'afix_off[1024]' 'afix_off[256]' 1
-apply nori.c 'afix_func[1024]' 'afix_func[256]' 1
-apply nori.c 'nafix >= 1024' 'nafix >= 256' 1
+apply nori.c 'afix_arr[1024]' 'afix_arr[128]' 1
+apply nori.c 'afix_off[1024]' 'afix_off[128]' 1
+apply nori.c 'afix_func[1024]' 'afix_func[128]' 1
+apply nori.c 'nafix >= 1024' 'nafix >= 128' 1
 # 文字列置き場と名前プール
-apply nori.c 'str_pool[131072]' 'str_pool[18432]' 1
-apply nori.c 'str_used >= 131072' 'str_used >= 18432' 1
+apply nori.c 'str_pool[131072]' 'str_pool[19456]' 1
+apply nori.c 'str_used >= 131072' 'str_used >= 19456' 1
 apply nori.c 'name_pool[65536]' 'name_pool[7168]' 1
 apply nori.c 'name_used >= 65536' 'name_used >= 7168' 1
 

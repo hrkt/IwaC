@@ -1638,6 +1638,175 @@ echo "ok: v46: double を含むリンクが一括と一致"
 cmp -s "$TMP/v46iwac.eo" "$TMP/v46asari.eo" || fail "v46: Asari のオブジェクトが iwac と違う"
 echo "ok: v46: Asari のオブジェクトが iwac と一致 (浮動小数点)"
 
+# --- v47: enum と union (doc/enum-union.md) ---
+cat > "$TMP/v47a.c" <<'V47A'
+enum Color { RED, GREEN, BLUE };
+enum { BUFSZ = 16 };
+enum Val { A = 5, B, C = 20, D, NEG = -3, BIG = 1 << 10, FROMB = B + 2 };
+int g = BLUE;
+int table[3] = { RED, GREEN, BLUE };
+char buf[BUFSZ];
+int main() {
+    int ok = 1;
+    if (RED != 0 || GREEN != 1 || BLUE != 2) ok = 0;
+    if (A != 5 || B != 6 || C != 20 || D != 21) ok = 0;
+    if (NEG != -3 || NEG + 3 != 0) ok = 0;
+    if (BIG != 1024 || FROMB != 8) ok = 0;
+    if (g != 2 || table[0] != 0 || table[1] != 1 || table[2] != 2) ok = 0;
+    buf[BUFSZ - 1] = 'Z';
+    if (buf[15] != 'Z') ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V47A
+"$IWAC" "$TMP/v47a.c" > "$TMP/v47a.bin"
+check_tail "$TMP/v47a.bin" 'Y' "v47: enum の値・自動増加・定数式・初期化子・大きさ"
+cat > "$TMP/v47b.c" <<'V47B'
+enum Color { RED, GREEN, BLUE };
+typedef enum Color Color;
+enum Color pick(int i) { if (i == 0) return RED; return BLUE; }
+int main() {
+    int ok = 1;
+    Color c = pick(1);
+    if (c != BLUE) ok = 0;
+    switch (c) { case RED: ok = 0; break; case BLUE: break; default: ok = 0; }
+    if (sizeof(enum Color) != 8) ok = 0;
+    int cnt = 0;
+    for (Color k = RED; k <= BLUE; k++) cnt++;
+    if (cnt != 3) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V47B
+"$IWAC" "$TMP/v47b.c" > "$TMP/v47b.bin"
+check_tail "$TMP/v47b.bin" 'Y' "v47: enum の型・関数・switch・sizeof・typedef"
+cat > "$TMP/v47c.c" <<'V47C'
+enum Neg { NG = -3 };
+int main() {
+    int ok = 1;
+    switch (NG) { case -3: break; default: ok = 0; }
+    int x = NG;
+    if (x != -3) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V47C
+"$IWAC" "$TMP/v47c.c" > "$TMP/v47c.bin"
+check_tail "$TMP/v47c.bin" 'Y' "v47: 負の列挙子 (case ラベルと初期化)"
+cat > "$TMP/v47d.c" <<'V47D'
+union U { int i; char c[8]; double d; };
+union W { char c[12]; int i; };
+union U pass(union U u) { return u; }
+int main() {
+    int ok = 1;
+    if (sizeof(union U) != 8) ok = 0;
+    if (sizeof(union W) != 16) ok = 0;
+    union U u;
+    u.i = 65;
+    if (u.c[0] != 'A' || u.i != 65) ok = 0;
+    u.d = 1.5;
+    if (u.d != 1.5) ok = 0;
+    union U u2 = { 42 };
+    if (u2.i != 42) ok = 0;
+    union U u3;
+    u3 = pass(u2);
+    if (u3.i != 42) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V47D
+"$IWAC" "$TMP/v47d.c" > "$TMP/v47d.bin"
+check_tail "$TMP/v47d.bin" 'Y' "v47: union の大きさ・読み替え・初期化子・値渡し"
+cat > "$TMP/v47e.c" <<'V47E'
+union U { int i; char c[8]; };
+struct S { int tag; union U val; };
+union V { struct S s; long l; };
+typedef union U Num;
+enum Color { RED, GREEN, BLUE };
+enum Color palette[2] = { RED, BLUE };
+struct Item { enum Color col; Num num; };
+int main() {
+    int ok = 1;
+    struct S s;
+    s.tag = 7;
+    s.val.i = 99;
+    if (s.tag != 7 || s.val.i != 99 || s.val.c[0] != 'c') ok = 0;
+    union V v;
+    v.l = 1234;
+    if (v.l != 1234) ok = 0;
+    v.s.tag = 5;
+    if (v.s.tag != 5) ok = 0;
+    union U arr[3];
+    arr[1].i = 77;
+    if (arr[1].i != 77 || arr[1].c[0] != 'M') ok = 0;
+    struct Item it;
+    it.col = BLUE;
+    it.num.i = 66;
+    if (it.col != 2 || it.num.c[0] != 'B') ok = 0;
+    if (palette[0] != RED || palette[1] != BLUE) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V47E
+"$IWAC" "$TMP/v47e.c" > "$TMP/v47e.bin"
+check_tail "$TMP/v47e.bin" 'Y' "v47: union と構造体の入れ子・配列・typedef"
+cat > "$TMP/v47f.c" <<'V47F'
+enum E { A, B };
+enum E { A, B };
+union U { int i; };
+union U { int i; };
+int main() {
+    int ok = 1;
+    if (A != 0 || B != 1) ok = 0;
+    union U u;
+    u.i = 3;
+    if (u.i != 3) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V47F
+"$IWAC" "$TMP/v47f.c" > "$TMP/v47f.bin"
+check_tail "$TMP/v47f.bin" 'Y' "v47: 同じ構成の再定義は受け付ける"
+check_error 'enum E { A }; int main() { return B; }' "v47: 未定義の列挙子"
+check_error 'enum E { A = 1 << 31 }; int main() { return 0; }' "v47: 列挙子の値が大きすぎる"
+check_error 'enum E { A = 1 }; enum F { A = 2 }; int main() { return 0; }' "v47: 列挙子の同名・別値"
+check_error 'int main() { enum E { A }; return 0; }' "v47: enum の定義が関数の中"
+check_error 'enum E { A, B }; enum E { A, C }; int main() { return 0; }' "v47: enum の再定義が違う構成"
+check_error 'enum E { A }; int main() { A = 3; return 0; }' "v47: 列挙子への代入"
+check_error 'enum E { A }; int main() { int A; return 0; }' "v47: 列挙子と同名の変数"
+check_error 'union U { int i; }; int main() { struct U x; return x.i; }' "v47: union のタグを struct で使う"
+check_error 'struct S { int i; }; int main() { union S x; return x.i; }' "v47: struct のタグを union で使う"
+check_error 'union U { int i; char c; }; int main() { union U u = { 1, 2 }; return 0; }' "v47: union の初期化子が2つ"
+check_error 'struct P { int i; }; enum P { A }; int main() { return 0; }' "v47: enum と構造体のタグの衝突"
+check_error 'int main() { union U { int i; }; return 0; }' "v47: union の定義が関数の中"
+# オブジェクト経路: enum / union を含むプログラムでも、リンク結果が
+# 一括ビルドと一致し、Asari のオブジェクトが iwac と一致すること
+cat > "$TMP/v47obj.c" <<'V47OBJ'
+enum Color { RED, GREEN, BLUE };
+union U { int i; char c[8]; };
+struct Item { enum Color col; union U val; };
+struct Item mk(int i) { struct Item it; it.col = BLUE; it.val.i = i; return it; }
+int main() {
+    struct Item it = mk(65);
+    return it.val.c[0] + it.col;
+}
+V47OBJ
+cat > "$TMP/v47rt.c" <<'V47RT'
+void kosaba_flush(void) { }
+V47RT
+printf 'void kosaba_flush();\n' > "$TMP/v47pre.c"
+"$IWAC" --kosaba "$TMP/v47pre.c" "$TMP/v47obj.c" "$TMP/v47rt.c" > "$TMP/v47direct.elf" || fail "v47: 一括ビルドに失敗"
+"$IWAC" --kosaba --elf "$TMP/v47pre.c" "$TMP/v47obj.c" > "$TMP/v47obj.eo" || fail "v47: オブジェクト出力に失敗"
+"$IWAC" --kosaba --elf "$TMP/v47pre.c" "$TMP/v47rt.c" > "$TMP/v47rt.eo" || fail "v47: rt のオブジェクト出力に失敗"
+"$TMP/nori" "$TMP/v47obj.eo" "$TMP/v47rt.eo" > "$TMP/v47link.elf" || fail "v47: nori でのリンクに失敗"
+cmp -s "$TMP/v47direct.elf" "$TMP/v47link.elf" || fail "v47: リンク結果が一括ビルドと違う"
+echo "ok: v47: enum / union を含むリンクが一括と一致"
+"$IWAC" --kosaba --asari "$TMP/v47pre.c" "$TMP/v47obj.c" "$TMP/v47rt.c" > "$TMP/v47.ias" || fail "v47: Asari 形式の出力に失敗"
+"$TMP/asari" "$TMP/v47.ias" > "$TMP/v47asari.eo" || fail "v47: Asari が失敗"
+"$IWAC" --kosaba --elf "$TMP/v47pre.c" "$TMP/v47obj.c" "$TMP/v47rt.c" > "$TMP/v47iwac.eo" || fail "v47: オブジェクト出力 (一括) に失敗"
+cmp -s "$TMP/v47iwac.eo" "$TMP/v47asari.eo" || fail "v47: Asari のオブジェクトが iwac と違う"
+echo "ok: v47: Asari のオブジェクトが iwac と一致 (enum / union)"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに

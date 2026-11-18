@@ -288,6 +288,11 @@ static int find_typedef(char *name, int len) {
  * 先に宣言だけ置く) */
 static int find_array(char *name, int len);
 
+/* enum の名簿も下の方にある (v47、同じ理由で先に
+ * 宣言だけ置く) */
+static int find_enum_tag(char *name, int len);
+static int find_enum_const(char *name, int len);
+
 /* 名前を名簿に登録し、番号を返す。失敗したら -1。
  * is_decl が 1 (宣言から) のときは「今のスコープの変数」
  * として作る: 同じスコープに同名があればそれを返し、
@@ -299,6 +304,16 @@ static int define_var_full(char *name, int len, int bsize,
                            int strct, int nslots) {
     if (find_array(name, len) >= 0) {
         errmsg = "その名前は配列に使われています";
+        return -1;
+    }
+    if (find_var(name, len) < 0 &&
+        find_enum_const(name, len) >= 0) {
+        /* 列挙子と同名の変数は作れない (v47)。代入文が
+         * 暗黙に変数を作る言語なので、ここで止めないと
+         * 「列挙子への代入」が通ってしまう。同名の変数が
+         * 既に見えている場合は、そちらが優先 (定義側の
+         * 衝突は点検しない割り切りの範囲) */
+        errmsg = "その名前は列挙子に使われています";
         return -1;
     }
     if (is_decl) {
@@ -597,6 +612,7 @@ static int stag_align[32];
 static int stag_mfirst[32];
 static int stag_mcount[32];
 static int stag_complete[32];  /* 定義が閉じたか (定義中は 0) */
+static char stag_union[32];    /* union のタグなら 1 (v47) */
 static int nstag;
 static char smem_names[160][32];
 static int smem_name_len[160];
@@ -608,6 +624,22 @@ static int smem_count[160];
 static char smem_fsig[160];   /* メンバが関数ポインタなら
                              * 署名番号 + 1 (v44、0 = なし) */
 static int nsmem;
+
+/* --- enum の名簿 (v47、設計は doc/enum-union.md) ---
+ * タグ表: 名前と、列挙子の表の中の範囲 (再定義の
+ * 比較用)。列挙子の表: 全タグの列挙子を並べた1枚の
+ * 表で、名前と値 (符号つき32ビットに限る) を持つ。
+ * 式の中の列挙子は parse_primary_node が数のノードに
+ * 化かすので、生成は enum を知らない */
+static char etag_names[32][32];
+static int etag_name_len[32];
+static int etag_efirst[32];
+static int etag_ecount[32];
+static int netag;
+static char econ_names[256][32];
+static int econ_name_len[256];
+static int econ_val[256];
+static int necon;
 
 /* タグ名から構造体を探す。あれば番号、無ければ -1 */
 static int find_struct_tag(char *name, int len) {
@@ -631,6 +663,36 @@ static int find_member(int tg, char *name, int len) {
             continue;
         int j = 0;
         while (j < len && smem_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
+
+/* タグ名から enum を探す。あれば番号、無ければ -1
+ * (v47) */
+static int find_enum_tag(char *name, int len) {
+    for (int i = 0; i < netag; i++) {
+        if (etag_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && etag_names[i][j] == name[j])
+            j++;
+        if (j == len)
+            return i;
+    }
+    return -1;
+}
+
+/* 名前から列挙子を探す。あれば番号、無ければ -1
+ * (v47) */
+static int find_enum_const(char *name, int len) {
+    for (int i = 0; i < necon; i++) {
+        if (econ_name_len[i] != len)
+            continue;
+        int j = 0;
+        while (j < len && econ_names[i][j] == name[j])
             j++;
         if (j == len)
             return i;
@@ -869,6 +931,23 @@ static int parse_number_value(void) {
     while (*cur == 'u' || *cur == 'U' || *cur == 'l' || *cur == 'L')
         cur++;
     return (int)value;
+}
+
+/* 配列の大きさを読む (v47): 数字か、列挙子の名前。
+ * 列挙子でなければカーソルを戻して数字として読む。
+ * 失敗したら -1 (理由は errmsg) */
+static int parse_const_value(void) {
+    skip_spaces();
+    if (is_ident_start(*cur)) {
+        char *save = cur;
+        if (parse_ident()) {
+            int ec = find_enum_const(ident_buf, ident_len);
+            if (ec >= 0)
+                return econ_val[ec];
+        }
+        cur = save;
+    }
+    return parse_number_value();
 }
 
 /* 16進数の1文字が表す値。16進数でなければ -1 */
@@ -1362,6 +1441,20 @@ static int parse_primary_node(void) {
         }
         int var = find_var(ident_buf, ident_len);
         if (var < 0) {
+            /* 列挙子なら数のノードに化ける (v47)。
+             * 負の値は NODE_NEG で包む: NODE_NUM の
+             * ままでは eval_const が符号なし32ビット
+             * として扱い、case ラベルや初期化子で
+             * 式の値と食い違うため (-1 のリテラルが
+             * 解析される形に揃える) */
+            int ec = find_enum_const(ident_buf, ident_len);
+            if (ec >= 0) {
+                int v = econ_val[ec];
+                if (v >= 0)
+                    return new_node(NODE_NUM, v, 0, 0);
+                return new_node(NODE_NEG, 0,
+                                new_node(NODE_NUM, -v, 0, 0), 0);
+            }
             errmsg = "代入されていない変数が使われました";
             return -1;
         }
@@ -2129,6 +2222,7 @@ static int expect_char(char c, char *msg) {
 static int parse_stmt(void);
 static int parse_typedef(void);  /* typedef (本体は宣言の節、v36) */
 static int parse_struct_def(void);  /* 構造体の定義 (同上、v37) */
+static int parse_enum_def(void);  /* enum の定義 (同上、v47) */
 static int parse_decl_stmt(void);   /* 宣言文 (同上、v37) */
 static int parse_stmt_list(int in_brace);
 static int parse_body(void);  /* 制御文の本体 (v25) */
@@ -2210,15 +2304,20 @@ static int parse_type(void) {
         if (!parse_ident())
             return 0;
     }
-    if (ident_is("struct")) {
-        /* struct タグ (v37): タグ表を引く。型タグと
-         * 大きさは構造体のものを入れ、ポインタ段数は
-         * 後ろの * で数える */
+    if (ident_is("struct") || ident_is("union")) {
+        /* struct / union タグ (v37、union は v47):
+         * タグ表を引く。型タグと大きさは構造体の
+         * ものを入れ、ポインタ段数は後ろの * で
+         * 数える。キーワードとタグの種別 (struct か
+         * union か) が食い違えば型ではない */
+        int want_union = ident_is("union");
         skip_spaces();
         if (!parse_ident())
             return 0;
         int tg = find_struct_tag(ident_buf, ident_len);
         if (tg < 0)
+            return 0;
+        if (want_union != (stag_union[tg] != 0))
             return 0;
         skip_spaces();
         int stars = 0;
@@ -2230,6 +2329,29 @@ static int parse_type(void) {
         parse_type_struct = tg;
         parse_type_etype = 8;
         parse_type_bsize = stag_size[tg];
+        parse_type_plevel = stars;
+        return 1;
+    }
+    if (ident_is("enum")) {
+        /* enum タグ (v47): 中身は int と同じ。タグ表に
+         * あることだけ確かめ、型タグ 8・大きさ 8 で
+         * 返す。ポインタ段数は後ろの * で数える */
+        skip_spaces();
+        if (!parse_ident())
+            return 0;
+        int tg = find_enum_tag(ident_buf, ident_len);
+        if (tg < 0)
+            return 0;
+        skip_spaces();
+        int stars = 0;
+        while (*cur == '*') {  /* ポインタの印を数える */
+            stars++;
+            cur++;
+            skip_spaces();
+        }
+        parse_type_struct = -1;
+        parse_type_etype = 8;
+        parse_type_bsize = 8;
         parse_type_plevel = stars;
         return 1;
     }
@@ -2345,7 +2467,7 @@ static int parse_fptr_decl(int ret_et, int ret_pl, int ret_st,
         /* (*名前[N]) の形: 関数ポインタの配列 */
         cur++;
         skip_spaces();
-        int size = parse_number_value();
+        int size = parse_const_value();
         if (size < 1 || size > 1048576) {
             errmsg = "配列の大きさは 1 から 1048576 までです";
             return 0;
@@ -2769,7 +2891,8 @@ static int parse_stmt(void) {
         char *tsave = cur;
         if (parse_ident() &&
             (is_type_word() || ident_is("const") || ident_is("static") ||
-             is_typedef_name() || ident_is("struct"))) {
+             is_typedef_name() || ident_is("struct") ||
+             ident_is("union") || ident_is("enum"))) {
             cur = tsave;
             return parse_decl_stmt();
         }

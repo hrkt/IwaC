@@ -79,6 +79,13 @@ apply 02-parse.c '[1280]' '[576]' 11
 apply 02-parse.c '[1024]' '[512]' 3
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 512' 1
 apply 02-parse.c 'fp_nbits >= 1024' 'fp_nbits >= 512' 1
+# enum の列挙子の表 (v47): iwac 自身のソースは enum を
+# 使わないので、断片側は小さくする (タグ表は小さいので
+# そのまま)
+apply 02-parse.c 'econ_names[256]' 'econ_names[32]' 1
+apply 02-parse.c 'econ_name_len[256]' 'econ_name_len[32]' 1
+apply 02-parse.c 'econ_val[256]' 'econ_val[32]' 1
+apply 02b-decl.c 'necon >= 256' 'necon >= 32' 1
 apply 02-parse.c 'nvar >= 1280' 'nvar >= 576' 1
 # 配列初期値プール (v40): 表と 02b 側のガードを一緒に
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[4096]' 1

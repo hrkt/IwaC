@@ -114,10 +114,11 @@ static int parse_stmt_list(int in_brace) {
                     return -2;
                 continue;
             }
-            if (ident_is("struct")) {
-                /* struct タグ { なら定義 (v37)。それ以外
-                 * (struct タグ 名前 ; の宣言など) は下の
-                 * is_type の判定に委ねる */
+            if (ident_is("struct") || ident_is("union")) {
+                /* struct / union タグ { なら定義 (v37、
+                 * union は v47)。それ以外 (struct タグ
+                 * 名前 ; の宣言など) は下の is_type の
+                 * 判定に委ねる */
                 skip_spaces();
                 int is_def = 0;
                 if (parse_ident()) {
@@ -128,7 +129,7 @@ static int parse_stmt_list(int in_brace) {
                 cur = save;
                 if (is_def) {
                     if (in_brace) {
-                        errmsg = "構造体の定義は関数の外でだけ書けます";
+                        errmsg = "構造体と union の定義は関数の外でだけ書けます";
                         return -2;
                     }
                     if (parse_struct_def() < 0)
@@ -140,13 +141,43 @@ static int parse_stmt_list(int in_brace) {
                 if (!parse_ident())
                     return -2;
             }
+            if (ident_is("enum")) {
+                /* enum [タグ] { なら定義 (v47)。それ以外
+                 * (enum タグ 名前 ; の宣言など) は下の
+                 * is_type の判定に委ねる。タグ無しの
+                 * enum { ... } も定義 */
+                skip_spaces();
+                int is_def = 0;
+                if (*cur == '{') {
+                    is_def = 1;
+                } else if (parse_ident()) {
+                    skip_spaces();
+                    if (*cur == '{')
+                        is_def = 1;
+                }
+                cur = save;
+                if (is_def) {
+                    if (in_brace) {
+                        errmsg = "enum の定義は関数の外でだけ書けます";
+                        return -2;
+                    }
+                    if (parse_enum_def() < 0)
+                        return -2;
+                    continue;
+                }
+                /* 先読みで ident_buf が化けたので、最初の
+                 * 単語 (enum) を読み直して戻す */
+                if (!parse_ident())
+                    return -2;
+            }
             int is_keyword = ident_is("while") || ident_is("putc") ||
                              ident_is("if") || ident_is("for") ||
                              ident_is("break") || ident_is("continue") ||
                              ident_is("return") || ident_is("switch") ||
                              ident_is("case") || ident_is("default");
             int is_type = is_type_word() || ident_is("const") || ident_is("static") ||
-                          is_typedef_name() || ident_is("struct");
+                          is_typedef_name() || ident_is("struct") ||
+                          ident_is("union") || ident_is("enum");
             if (is_type) {
                 /* 型で始まるのは、関数定義か宣言の文。
                  * 名前の後ろが '[' (配列) か '=' (初期化) か
@@ -549,21 +580,25 @@ static int parse_typedef(void) {
     return 0;
 }
 
-/* 構造体の定義を読む (v37): struct タグ { メンバ... } ;
+/* 構造体と union の定義を読む (v37、union は v47):
+ * struct / union タグ { メンバ... } ;
  * ファイルの範囲でだけ呼ばれる (振り分けは
  * parse_stmt_list)。タグはメンバを読む前に登録する
  * (自分のタグへのポインタメンバのため)。レイアウトは
  * C 互換: メンバはアラインメントで切り上げ、末尾も
  * 構造体のアラインメントで切り上げる (doc/struct.md)。
- * 同じタグの再定義は、構成が完全に同じなら受ける
- * (分割コンパイルで共有ファイルが重なるため)。
- * 成功したら 0、失敗は -1 */
+ * union は全メンバがオフセット 0 で、大きさは最大の
+ * メンバ (doc/enum-union.md)。同じタグの再定義は、
+ * 構成が完全に同じなら受ける (分割コンパイルで
+ * 共有ファイルが重なるため)。成功したら 0、失敗は -1 */
 static int parse_struct_def(void) {
-    if (!parse_ident())  /* "struct" 自体を読み直す */
+    if (!parse_ident())  /* "struct" / "union" 自体を
+                          * 読み直す */
         return -1;
+    int is_union = ident_is("union");
     skip_spaces();
     if (!parse_ident()) {
-        errmsg = "struct にはタグ名が必要です";
+        errmsg = "struct / union にはタグ名が必要です";
         return -1;
     }
     char tag_buf[32];
@@ -572,7 +607,7 @@ static int parse_struct_def(void) {
         tag_buf[i] = ident_buf[i];
     skip_spaces();
     if (*cur != '{') {
-        errmsg = "構造体の定義は struct 名前 { ... }; の形です";
+        errmsg = "構造体の定義は struct / union 名前 { ... }; の形です";
         return -1;
     }
     cur++;
@@ -585,6 +620,11 @@ static int parse_struct_def(void) {
         }
         tg = existing;  /* メンバは仮置きに読んで比べる */
     } else {
+        if (find_enum_tag(tag_buf, tag_len) >= 0) {
+            /* タグの名前空間は enum と共有 (v47) */
+            errmsg = "そのタグ名は enum で使われています";
+            return -1;
+        }
         if (nstag >= 32) {
             errmsg = "構造体は32個までです";
             return -1;
@@ -599,6 +639,7 @@ static int parse_struct_def(void) {
         stag_size[tg] = 0;
         stag_align[tg] = 1;
         stag_complete[tg] = 0;
+        stag_union[tg] = (char)is_union;
     }
     int mstart = nsmem;
     int offset = 0;
@@ -636,7 +677,7 @@ static int parse_struct_def(void) {
         if (*cur == '[') {
             cur++;
             skip_spaces();
-            marr = parse_number_value();
+            marr = parse_const_value();
             if (marr < 1) {
                 errmsg = "メンバの配列の大きさが不正です";
                 return -1;
@@ -665,10 +706,20 @@ static int parse_struct_def(void) {
             if (eal > 8)
                 eal = 8;
         }
-        if (offset % eal)
-            offset += eal - (offset % eal);
-        int moff = offset;
-        offset += marr > 0 ? esz * marr : esz;
+        int msz = marr > 0 ? esz * marr : esz;
+        int moff;
+        if (is_union) {
+            /* union は全メンバがオフセット 0 で、
+             * 大きさは最大のメンバ (v47) */
+            moff = 0;
+            if (msz > offset)
+                offset = msz;
+        } else {
+            if (offset % eal)
+                offset += eal - (offset % eal);
+            moff = offset;
+            offset += msz;
+        }
         if (eal > maxalign)
             maxalign = eal;
         for (int i = mstart; i < nsmem; i++) {
@@ -713,7 +764,8 @@ static int parse_struct_def(void) {
          * 同じなら仮置きしたメンバを捨てる */
         int same = (mcount == stag_mcount[tg] &&
                     total == stag_size[tg] &&
-                    maxalign == stag_align[tg]);
+                    maxalign == stag_align[tg] &&
+                    is_union == (stag_union[tg] != 0));
         if (same) {
             for (int k = 0; k < mcount; k++) {
                 int a = stag_mfirst[tg] + k;
@@ -747,6 +799,161 @@ static int parse_struct_def(void) {
     stag_align[tg] = maxalign;
     stag_mcount[tg] = mcount;
     stag_complete[tg] = 1;
+    return 0;
+}
+
+/* enum の定義を読む (v47、設計は doc/enum-union.md):
+ * enum [タグ] { 名前 [= 定数式], ... } ;
+ * ファイルの範囲でだけ呼ばれる (振り分けは
+ * parse_stmt_list)。列挙子は読んだ順に表へ登録する
+ * (値の式が前の列挙子を参照できるように)。値の
+ * 省略は「前の値 + 1」(最初は 0)。値は符号つき
+ * 32ビットの範囲に限る (-2147483648 は、負の列挙子を
+ * NODE_NEG で包む都合で扱えない)。タグの再定義は、
+ * 列挙子の並びが完全に同じなら受ける (構造体と
+ * 同じ作法): 既にあるタグなら登録せず並びだけ
+ * 比べる。列挙子単体は、同名・別値の登録だけが
+ * エラーで、同名・同値は並べて登録する (タグの
+ * 並びを連続に保つため)。成功したら 0、失敗は -1 */
+static int parse_enum_def(void) {
+    if (!parse_ident())  /* "enum" 自体を読み直す */
+        return -1;
+    skip_spaces();
+    char tag_buf[32];
+    int tag_len = 0;
+    int tg = -1;
+    if (is_ident_start(*cur)) {
+        if (!parse_ident())
+            return -1;
+        tag_len = ident_len;
+        for (int i = 0; i < tag_len; i++)
+            tag_buf[i] = ident_buf[i];
+        tg = find_enum_tag(tag_buf, tag_len);
+        if (tg < 0 && find_struct_tag(tag_buf, tag_len) >= 0) {
+            /* タグの名前空間は struct / union と共有 */
+            errmsg = "そのタグ名は構造体で使われています";
+            return -1;
+        }
+        skip_spaces();
+    }
+    if (*cur != '{') {
+        errmsg = "enum の定義は enum [名前] { ... }; の形です";
+        return -1;
+    }
+    cur++;
+    int estart = necon;   /* この定義の列挙子の開始位置 */
+    int ecount = 0;
+    long next_val = 0;
+    for (;;) {
+        skip_spaces();
+        if (*cur == '}') {
+            cur++;
+            break;
+        }
+        if (*cur == '\0') {
+            errmsg = "enum の定義が閉じていません";
+            return -1;
+        }
+        if (!parse_ident()) {
+            errmsg = "列挙子には名前が必要です";
+            return -1;
+        }
+        char ename[32];
+        int elen = ident_len;
+        for (int i = 0; i < elen; i++)
+            ename[i] = ident_buf[i];
+        long val = next_val;
+        skip_spaces();
+        if (*cur == '=') {
+            cur++;
+            int e = parse_expr();
+            if (e < 0)
+                return -1;
+            if (eval_const(e, &val) != 1) {
+                errmsg = "列挙子の値は定数式で書きます";
+                return -1;
+            }
+        }
+        if (val > 2147483647L || val < -2147483647L) {
+            errmsg = "列挙子の値が大きすぎます";
+            return -1;
+        }
+        next_val = val + 1;
+        if (tg >= 0) {
+            /* 再定義: 登録せず、既存の並びと比べる */
+            if (ecount >= etag_ecount[tg]) {
+                errmsg = "enum が違う構成で再定義されています";
+                return -1;
+            }
+            int ei = etag_efirst[tg] + ecount;
+            if (econ_name_len[ei] != elen ||
+                econ_val[ei] != (int)val) {
+                errmsg = "enum が違う構成で再定義されています";
+                return -1;
+            }
+            int j = 0;
+            while (j < elen && econ_names[ei][j] == ename[j])
+                j++;
+            if (j != elen) {
+                errmsg = "enum が違う構成で再定義されています";
+                return -1;
+            }
+        } else {
+            int prev = find_enum_const(ename, elen);
+            if (prev >= 0 && econ_val[prev] != (int)val) {
+                errmsg = "列挙子が違う値で再定義されています";
+                return -1;
+            }
+            if (necon >= 256) {
+                errmsg = "列挙子は256個までです";
+                return -1;
+            }
+            int ei = necon++;
+            for (int i = 0; i < elen; i++)
+                econ_names[ei][i] = ename[i];
+            econ_names[ei][elen] = '\0';
+            econ_name_len[ei] = elen;
+            econ_val[ei] = (int)val;
+        }
+        ecount++;
+        skip_spaces();
+        if (*cur == ',') {
+            cur++;
+            continue;
+        }
+        if (*cur == '}') {
+            cur++;
+            break;
+        }
+        errmsg = "列挙子は , か } で区切ります";
+        return -1;
+    }
+    if (!expect_char(';', "enum の定義の終わりには ; が必要です"))
+        return -1;
+    if (ecount == 0) {
+        errmsg = "列挙子の無い enum は作れません";
+        return -1;
+    }
+    if (tg >= 0) {
+        if (ecount != etag_ecount[tg]) {
+            errmsg = "enum が違う構成で再定義されています";
+            return -1;
+        }
+        return 0;
+    }
+    if (tag_len > 0) {
+        if (netag >= 32) {
+            errmsg = "enum は32個までです";
+            return -1;
+        }
+        tg = netag++;
+        for (int i = 0; i < tag_len; i++)
+            etag_names[tg][i] = tag_buf[i];
+        etag_names[tg][tag_len] = '\0';
+        etag_name_len[tg] = tag_len;
+        etag_efirst[tg] = estart;
+        etag_ecount[tg] = ecount;
+    }
     return 0;
 }
 
@@ -830,6 +1037,16 @@ static int parse_init_const(long *out) {
         if (dv < 0)
             return 0;
         v = dv;
+    } else if (is_ident_start(*cur)) {
+        /* 列挙子も要素にできる (v47) */
+        if (!parse_ident())
+            return 0;
+        int ec = find_enum_const(ident_buf, ident_len);
+        if (ec < 0) {
+            errmsg = "配列の初期化子は数値の定数だけです";
+            return 0;
+        }
+        v = econ_val[ec];
     } else {
         errmsg = "配列の初期化子は数値の定数だけです";
         return 0;
@@ -1151,6 +1368,11 @@ static int parse_struct_init(int base, int tag, int tail) {
             errmsg = "初期化子がメンバの数より多いです";
             return -1;
         }
+        if (stag_union[tag] && i >= 1) {
+            /* union の初期化子は先頭のメンバだけ (v47) */
+            errmsg = "union の初期化子は先頭のメンバだけです";
+            return -1;
+        }
         tail = parse_member_init(base, first + i, tail);
         if (tail < 0)
             return -1;
@@ -1172,11 +1394,14 @@ static int parse_struct_init(int base, int tag, int tail) {
         errmsg = "初期化子は , か } で区切ります";
         return -1;
     }
-    /* 書かれなかったメンバは 0 埋め */
-    for (int j = i; j < nmem; j++) {
-        tail = init_zero_member(base, first + j, tail);
-        if (tail < 0)
-            return -1;
+    /* 書かれなかったメンバは 0 埋め。union は同じ場所を
+     * 後から 0 で消してしまうので、埋めない (v47) */
+    if (!stag_union[tag]) {
+        for (int j = i; j < nmem; j++) {
+            tail = init_zero_member(base, first + j, tail);
+            if (tail < 0)
+                return -1;
+        }
     }
     return tail;
 }
@@ -1501,7 +1726,7 @@ static int parse_decl_stmt(void) {
         skip_spaces();
         int size = -1;   /* -1 = 省略 (初期化子から決める) */
         if (*cur != ']') {
-            size = parse_number_value();
+            size = parse_const_value();
             if (size < 0)
                 return -1;
             if (size < 1 || size > 1048576) {
@@ -1517,7 +1742,7 @@ static int parse_decl_stmt(void) {
             /* 2次元目: 列の数 */
             cur++;
             skip_spaces();
-            cols = parse_number_value();
+            cols = parse_const_value();
             if (cols < 0)
                 return -1;
             if (cols < 1 || cols > 1048576) {
