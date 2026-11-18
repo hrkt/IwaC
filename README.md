@@ -17,7 +17,7 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v46（浮動小数点 double）を branch `v46` で追加
+## 現在地: v46（浮動小数点 double）を main に追加
 
 型の語彙に double を足した（段1、設計は
 doc/float.md）。値の置き場は整数の t1 / t2 と
