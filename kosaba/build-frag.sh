@@ -15,8 +15,9 @@
 #     (展開後もほぼ同量)
 #
 # 容量プロファイル (標準 → 断片):
-#   ノード表        25600 → 8192
-#   命令表          59392 → 24576 (パッチ表と分岐緩和の印も)
+#   ノード表        12288 → 8192
+#   命令表          標準と同じ 24576 (段3で TU 基準化され、
+#                   断片 TU の実測最大 20,244 に収まるため下げない)
 #   再配置表         6144 → 2048
 #   変数表           1280 → 512
 #   文字列プール    16384 → 8192 バイト (個数 512 は不変)
@@ -67,8 +68,8 @@ apply() {
 
 # 02-parse.c: ノード表・変数表・文字列プール
 apply 02-parse.c 'str_pool[16384]' 'str_pool[8192]' 1
-apply 02-parse.c '[25600]' '[8192]' 6
-apply 02-parse.c 'nnode >= 25600' 'nnode >= 8192' 1
+apply 02-parse.c '[12288]' '[8192]' 6
+apply 02-parse.c 'nnode >= 12288' 'nnode >= 8192' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 8191' 1
 apply 02-parse.c '[1280]' '[512]' 11
 apply 02-parse.c '[1024]' '[512]' 2
@@ -78,8 +79,6 @@ apply 02-parse.c 'nvar >= 1280' 'nvar >= 512' 1
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[4096]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 4096' 3
 # 03-gen.c: 命令表 (5つ+パッチ表+緩和の印) と再配置表
-apply 03-gen.c '[59392]' '[24576]' 7
-apply 03-gen.c 'i < 59392' 'i < 24576' 1
 apply 03-gen.c '[6144]' '[2048]' 3
 apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2048' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)、表示 (2か所)

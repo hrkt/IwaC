@@ -87,24 +87,27 @@ static int OP_REMU = 37; /* 符号なし剰余 (v35、M 拡張) */
 static int OP_SRL = 38;  /* 論理右シフト (v35) */
 static int OP_SRAI = 39; /* 算術右シフト即値 (v35) */
 
-/* 命令表の上限は 59392 (v39 で 40960 → 49152、
- * v44 で → 57344、v45 で → 59392 と増量)。
+/* 命令表の上限は 24576 (v39 で 40960 → 49152、
+ * v44 で → 57344、v45 で → 59392 と増量し、
+ * 2026-11-18 の段3 (doc/split-selfhost.md) で
+ * TU 基準化して 24576 へ下げた。断片 TU の
+ * 実測最大は 03-gen の 20,244)。
  * v38 の時点で一括セルフコンパイルが約44K命令に
  * 達して上限を超え、asm_push が無言で表の外へ
  * 書いて隣の表を壊していた (点検は asm_push と
  * gen_program にある)。op / rd / rs1 / rs2 は
  * 小さい値しか入らないので char にして、増量の
  * 対価 (imm と patch_next の増分) を払った */
-static char asm_op[59392];
-static char asm_rd[59392];
-static char asm_rs1[59392];
-static char asm_rs2[59392];
-static int asm_imm[59392];
+static char asm_op[24576];
+static char asm_rd[24576];
+static char asm_rs1[24576];
+static char asm_rs2[24576];
+static int asm_imm[24576];
 static int nasm;  /* 並べた命令の数 */
 
 /* 命令を1つ、命令列の末尾に積む */
 static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
-    if (nasm >= 59392) {
+    if (nasm >= 24576) {
         /* 上限あふれ: 表の外へは書かない (v39)。
          * 生成は最後まで回るが、gen_program が
          * nasm を見て失敗にする */
@@ -135,7 +138,7 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
  * 指す。届く分岐は従来どおり beq 1命令のままなので、
  * 今まで正しく作れていたプログラムの出力は変わらない */
 static int branch_ord;         /* 条件分岐の通し番号 */
-static char branch_long[59392]; /* 伸ばす分岐の印 */
+static char branch_long[24576]; /* 伸ばす分岐の印 */
 
 /* 「t1 が 0 なら飛ぶ」条件分岐を置く。戻り値は、飛び先
  * (命令番号) を asm_imm に書き込むべき命令の番号:
@@ -1863,7 +1866,7 @@ static int ctrl_depth;          /* 制御構造 (ループと switch) の
                                  * 入れ子の深さ。break が最も内側の
                                  * どちらを抜けるかを決める (v43) */
 static char ctrl_is_switch[65]; /* 深さごとの種別: 1 なら switch */
-static int patch_next[59392];
+static int patch_next[24576];
 
 /* 関数の return の飛び先 (出口は関数の生成の最後まで
  * 分からない) も同じ道具で積む */
@@ -2903,7 +2906,7 @@ static int gen_program(void) {
      * 伸ばす。伸ばすと別の分岐が届かなくなることがある
      * ので、印が増えなくなるまで1回目の生成を繰り返す
      * (emit_beq_t1z の説明参照) */
-    for (int i = 0; i < 59392; i++)
+    for (int i = 0; i < 24576; i++)
         branch_long[i] = 0;
     for (;;) {
         if (!gen_all())
@@ -2911,7 +2914,7 @@ static int gen_program(void) {
         if (!relax_scan())
             break;
     }
-    if (nasm >= 59392) {
+    if (nasm >= 24576) {
         /* asm_push が上限で止めた分 (v39) */
         errmsg = "命令が多すぎます";
         return 0;

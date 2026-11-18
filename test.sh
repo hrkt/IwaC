@@ -730,20 +730,18 @@ check_tail "$TMP/v27branch.bin" AB "v27: 4KB を超える本体を持つ while /
 check_tail "$TMP/v27const.bin" ABCD "v27: 大きな定数 (0xFFFFFFFF / 0x80200000 / INT_MAX 境界)"
 "$IWAC" 'long id(long v) { return v; } int main(void) { putc(id(2066) == 2066 ? 65 : 88); int x; int *p = &x; *p = 2066; putc(x == 2066 ? 66 : 88); putc(*p == 2066 ? 67 : 88); long y; long *q = &y; *q = 70000; putc(y == 70000 ? 68 : 88); char c; char *r = &c; *r = 69; putc(c); return 0; }' > "$TMP/v27deref.bin"
 check_tail "$TMP/v27deref.bin" ABCDE "v27: 関数をまたぐ大きな値と *p の幅 (int* / long* は8バイト、char* は1バイト)"
-# iwac が自分自身 (+ ランタイム) をコンパイルできること。
-# OS 上での固定点 (iwac2 == iwac3) の確認は統合検証として
-# 別途実施 (doc/selfhost.md)
-# (2026-11-18、doc/split-selfhost.md 段2) 固定点の定義は
-# 分割ビルドへ移った。この一括ビルドは、移行期の追加の
-# 物差し (分割との一致確認) と容量レポートの入力として
-# 残す。正の iwac2 は v33 の節で作る分割ビルドの方
-"$IWAC" --kosaba src/0*.c kosaba/kosaba_rt.c > "$TMP/v27self.elf" || fail "v27: セルフコンパイルに失敗"
-size=$(wc -c < "$TMP/v27self.elf")
-# v28 で ELF は BSS 方式になり、iwac2.elf は約3.0MB から
-# 約127KB に縮んだ。小さすぎても (壊れて空に近い) 駄目
-[ "$size" -gt 100000 ] || fail "v28: セルフコンパイルの出力が小さすぎる ($size バイト)"
-[ "$size" -lt 1000000 ] || fail "v28: セルフコンパイルの出力が大きすぎる ($size バイト。BSS 化されていない?)"
-echo "ok: v27: セルフコンパイル (ホスト側) で $size バイトの iwac2.elf ができた"
+# 一括コンパイルの代表: nori 本体 (+ libdashi +
+# ランタイム) を一括で訳せること。セルフホストの
+# 固定点 (iwac2 == iwac3) の確認は分割ビルドで、
+# 統合検証として別途実施 (doc/selfhost.md)
+# (2026-11-18、doc/split-selfhost.md 段2・段3) 固定点の
+# 定義は分割ビルド (v33 の節) へ移り、上限は TU 基準に
+# なった。iwac 自身の一括コンパイルは上限を超えるため、
+# ここでは一括の代表として nori 本体を訳す
+"$IWAC" --kosaba nori/nori.c libdashi/libdashi.c kosaba/kosaba_rt.c > "$TMP/v27one.elf" || fail "v27: 一括コンパイル (nori) に失敗"
+size=$(wc -c < "$TMP/v27one.elf")
+[ "$size" -gt 10000 ] || fail "v27: 一括コンパイルの出力が小さすぎる ($size バイト)"
+echo "ok: v27: 一括コンパイル (nori 本体) で $size バイトの ELF ができた"
 
 # --- v28: ELF の BSS 化 (配列のゼロをファイルに含めない) ---
 # 大きなゼロ配列 + 初期値つきグローバル: ファイルは小さく、
@@ -824,16 +822,20 @@ fi
 echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
 # 分割セルフホスト: 断片ごとにオブジェクト化し、nori で
 # つないだものが正の iwac2 (2026-11-18 に定義を移行、
-# doc/split-selfhost.md 段2)。一括 (v27 の節) との
-# バイト一致は移行期の追加の物差しとして残す
+# doc/split-selfhost.md 段2)。一括とのバイト一致は
+# 移行期の物差しとして段2まで残したが、段3の上限の
+# TU 基準化で一括セルフコンパイルが上限超えになった
+# ため引退した
 if [ -x "$TMP/nori" ]; then
     for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
         "$IWAC" --kosaba --elf "src/decls.c" "src/$f.c" > "$TMP/v33-$f.eo" || fail "v33: 断片 $f のオブジェクト化に失敗"
     done
     "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v33-rt.eo" || fail "v33: rt のオブジェクト化に失敗"
     "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
-    cmp -s "$TMP/v27self.elf" "$TMP/v33split.elf" || fail "v33: 分割と一括で iwac2 が違う"
-    echo "ok: v33: 分割セルフホスト (断片→nori) が一括とバイト一致"
+    size=$(wc -c < "$TMP/v33split.elf")
+    [ "$size" -gt 100000 ] || fail "v33: 分割セルフホストの出力が小さすぎる ($size バイト)"
+    [ "$size" -lt 1000000 ] || fail "v33: 分割セルフホストの出力が大きすぎる ($size バイト)"
+    echo "ok: v33: 分割セルフホスト (断片→nori) で $size バイトの iwac2 ができた"
     cp "$TMP/v33split.elf" "$TMP/iwac2.elf"
 else
     echo "skip: v33: 分割セルフホスト (nori が無いため)"
@@ -980,7 +982,9 @@ echo "ok: v38: iwac → Asari → nori のチェーンが直接出力と一致"
 # 物差しは「ELF 経由のリンク結果が一括とバイト一致」
 # すること (doc/elf-object.md)。v39 当時は .iwo 経由
 # との比較だったが、v42 の .iwo 引退で一括との比較に
-# 替えた (rt と組のリンクは v33 と同じ形)
+# 替えた (rt と組のリンクは v33 と同じ形)。全断片の
+# 組だけは、段3で一括が上限超えになったため、v33 の
+# 分割ビルド (iwac2) と比べる
 elf_check() {
     # $1 = ラベル、残り = ソース。rt と組でリンクして
     # 一括と比べる。先頭に kosaba_flush の宣言だけの
@@ -1005,9 +1009,8 @@ for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main;
 done
 "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v39-rt.eo" || fail "v39: rt の ELF 出力に失敗"
 "$TMP/nori" $V39_OBJS_EO "$TMP/v39-rt.eo" > "$TMP/v39full-b.elf" || fail "v39: 全断片の ELF リンクに失敗"
-"$IWAC" --kosaba src/0*.c kosaba/kosaba_rt.c > "$TMP/v39full-d.elf" || fail "v39: 全断片の一括に失敗"
-cmp -s "$TMP/v39full-d.elf" "$TMP/v39full-b.elf" || fail "v39: 全断片のリンク結果が一括と違う"
-echo "ok: v39: ELF オブジェクト (hello・全断片) のリンクが一括と一致"
+cmp -s "$TMP/iwac2.elf" "$TMP/v39full-b.elf" || fail "v39: 全断片のリンク結果が v33 の iwac2 と違う"
+echo "ok: v39: ELF オブジェクト (hello・全断片) のリンクが一致"
 elf_check nori nori/nori.c libdashi/libdashi.c
 elf_check asari自身 asari/asari.c libdashi/libdashi.c
 elf_check 構造体 "$TMP/v37sa.c" "$TMP/v37sb.c"

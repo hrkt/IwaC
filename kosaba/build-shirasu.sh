@@ -13,8 +13,8 @@
 # 標準と同じ kosaba_crt.S / kosaba_lib.c / kosaba.ld で組む。
 #
 # 容量プロファイル (標準 → 小容量):
-#   ノード表        25600 → 2048
-#   命令表          59392 → 4096 (パッチ表と分岐緩和の印も同じ数)
+#   ノード表        12288 → 2048
+#   命令表          24576 → 4096 (パッチ表と分岐緩和の印も同じ数)
 #   変数表          1280  → 256
 #   文字列プール    16384 → 4096 バイト (個数 512 は不変)
 #   ソース上限      約464KB → 約32KB
@@ -78,8 +78,8 @@ apply() {
 # 02-parse.c: ノード表と変数表と文字列プール。
 # str_pool は [16384] が他と重なるので先に名指しで替える
 apply 02-parse.c 'str_pool[16384]' 'str_pool[4096]' 1
-apply 02-parse.c '[25600]' '[2048]' 6
-apply 02-parse.c 'nnode >= 25600' 'nnode >= 2048' 1
+apply 02-parse.c '[12288]' '[2048]' 6
+apply 02-parse.c 'nnode >= 12288' 'nnode >= 2048' 1
 apply 02-parse.c 'str_used >= 16383' 'str_used >= 4095' 1
 apply 02-parse.c '[1280]' '[256]' 11
 apply 02-parse.c '[1024]' '[256]' 2
@@ -88,10 +88,10 @@ apply 02-parse.c 'nvar >= 1280' 'nvar >= 256' 1
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[1024]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
 # 03-gen.c: 命令表 (5つ) とパッチ表
-apply 03-gen.c '[59392]' '[4096]' 7
+apply 03-gen.c '[24576]' '[4096]' 7
 # branch_long を消すループの上限も命令表に合わせる (v27 で追加
 # されたループ。これを忘れると小さい配列をはみ出して書く)
-apply 03-gen.c 'i < 59392' 'i < 4096' 1
+apply 03-gen.c 'i < 24576' 'i < 4096' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)。
 # エラー表示の数字も合わせる (2か所)
 apply 05-input.c 'src_buf[475136]' 'src_buf[32768]' 1

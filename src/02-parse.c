@@ -161,13 +161,13 @@ static int NODE_STORE = 13; /* メモリ書き込み文。
                              * (変数 = ポインタ、数 = 絶対アドレス)、
                              * node_rhs = 書く値の式 */
 
-static char node_kind[25600];  /* 種類は 60 まで (v44 で char 化して容量を節約) */
-static int node_val[25600];
-static int node_lhs[25600];
-static int node_rhs[25600];
-static int node_next[25600]; /* 文の並び用: 次の文ノード (-1 で終わり)。
+static char node_kind[12288];  /* 種類は 60 まで (v44 で char 化して容量を節約) */
+static int node_val[12288];
+static int node_lhs[12288];
+static int node_rhs[12288];
+static int node_next[12288]; /* 文の並び用: 次の文ノード (-1 で終わり)。
                             * 式のノードでは使わない */
-static int node_etype[25600]; /* 式の型タグ (生成時に付ける、v35) */
+static int node_etype[12288]; /* 式の型タグ (生成時に付ける、v35) */
 static int nnode;  /* 作ったノードの数 */
 
 /* --- 変数の名簿 (記号表) ---
@@ -750,7 +750,7 @@ static unsigned int str_addr[512];  /* 第2層が確定させる住所 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
-    if (nnode >= 25600) {
+    if (nnode >= 12288) {
         errmsg = "プログラムが大きすぎます (ノード数上限)";
         return -1;
     }
