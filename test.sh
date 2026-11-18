@@ -796,6 +796,22 @@ else
     echo "skip: v32: nori の確認 (cc が無いため)"
 fi
 
+# --- 分割セルフホスト計画 段1: nori の大きさ整合チェック ---
+# 同じ名前の変数がオブジェクト間で違う大きさを持っていたら
+# リンクで止まること (配列には既にある検査の変数版。
+# doc/split-selfhost.md 段1)
+if [ -x "$TMP/nori" ]; then
+    printf 'struct S { int a; int b; }; struct S g; int main() { g.a = 3; return g.a; }\n' > "$TMP/st1a.c"
+    printf 'struct S { int a; }; struct S g; int geta() { return g.a; }\n' > "$TMP/st1b.c"
+    printf 'struct S { int a; int b; }; struct S g; int geta() { return g.a; }\n' > "$TMP/st1c.c"
+    "$IWAC" --kosaba --elf "$TMP/st1a.c" > "$TMP/st1a.eo" || fail "段1: オブジェクト化 (a) に失敗"
+    "$IWAC" --kosaba --elf "$TMP/st1b.c" > "$TMP/st1b.eo" || fail "段1: オブジェクト化 (b) に失敗"
+    "$IWAC" --kosaba --elf "$TMP/st1c.c" > "$TMP/st1c.eo" || fail "段1: オブジェクト化 (c) に失敗"
+    "$TMP/nori" "$TMP/st1a.eo" "$TMP/st1b.eo" >/dev/null 2>&1 && fail "段1: 変数の大きさの食い違いが通ってしまった"
+    "$TMP/nori" "$TMP/st1a.eo" "$TMP/st1c.eo" > "$TMP/st1.elf" || fail "段1: 大きさが合うのにリンクできない"
+    echo "ok: 段1: nori が変数の大きさの食い違いで止まる"
+fi
+
 # --- v33: 再宣言の合併と、分割セルフホスト ---
 # ファイル範囲の再宣言 (変数・配列・関数のプロトタイプ) が
 # C の仮定義と同じく合併すること、初期値の二重は止まること

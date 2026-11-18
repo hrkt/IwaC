@@ -80,7 +80,7 @@ static int sym_kind[4096];
 static int sym_obj[4096];      /* 定義 (関数・配列) の出所 */
 static int sym_off[4096];      /* 関数: 本体の位置、
                                 * 変数: 枠番号、配列: 領域のずれ */
-static int sym_size[4096];     /* 関数・配列の大きさ */
+static int sym_size[4096];     /* 関数・変数・配列の大きさ */
 static int sym_firm[4096];     /* 変数: 本定義 (var) か */
 static int sym_hasinit[4096];  /* 変数: 初期値があるか */
 static int sym_init_kind[4096];/* 1 = 数、2 = 文字列、3 = 名前 */
@@ -460,22 +460,32 @@ static int read_object_elf(int obj) {
                 sym_size[s] = (int)size;
             }
         } else if (type == 1 && shndx == 0xfff2) {
-            /* 変数の仮定義 (SHN_COMMON) */
+            /* 変数の仮定義 (SHN_COMMON)。大きさの食い違いは
+             * 止める (配列と同じ扱い。宣言側と定義側で表の
+             * 次元がずれたまま通すと、置き場所がずれて
+             * メモリを壊す。doc/split-selfhost.md 段1) */
             if (!set_kind(s, 2))
                 return 0;
             if (sym_obj[s] < 0) {
                 sym_obj[s] = obj;
                 sym_off[s] = var_slots;
                 var_slots += (int)(size / 8);
+                sym_size[s] = (int)size;
+            } else if (sym_size[s] != (int)size) {
+                return fail("変数の大きさが食い違います");
             }
         } else if (type == 1 && shndx == data_i) {
-            /* 初期値のある変数 (本定義) */
+            /* 初期値のある変数 (本定義)。仮定義との間でも
+             * 大きさが食い違えば止める (同上) */
             if (!set_kind(s, 2))
                 return 0;
             if (sym_obj[s] < 0) {
                 sym_obj[s] = obj;
                 sym_off[s] = var_slots;
                 var_slots += (int)(size / 8);
+                sym_size[s] = (int)size;
+            } else if (sym_size[s] != (int)size) {
+                return fail("変数の大きさが食い違います");
             }
             if (sym_firm[s])
                 return fail("変数の本定義が二つあります");
