@@ -11,6 +11,64 @@ static int str_eq(char *a, char *b) {
     return a[i] == b[i];
 }
 
+/* --stats: コンパイルが成功したら、各表の使用量を
+ * fd 2 へ出す (容量の点検用)。出力 (fd 1) には
+ * 一切触らないので、生成物は変わらない */
+static int stats_mode;
+
+/* 非負の整数を10進で fd に書く */
+static void print_dec(int fd, int n) {
+    char buf[16];
+    int i = 0;
+    if (n == 0) {
+        print_str(fd, "0");
+        return;
+    }
+    while (n > 0) {
+        buf[i] = (char)('0' + n % 10);
+        i++;
+        n = n / 10;
+    }
+    while (i > 0) {
+        char c[2];
+        i--;
+        c[0] = buf[i];
+        c[1] = '\0';
+        print_str(fd, c);
+    }
+}
+
+/* 使用量を1行ずつ出す。test.sh の容量レポートが
+ * 「stats <名前> <数>」の形で拾う */
+static void stats_line(char *name, int n) {
+    print_str(2, "stats ");
+    print_str(2, name);
+    print_str(2, " ");
+    print_dec(2, n);
+    print_str(2, "\n");
+}
+
+static void print_stats(int src_len) {
+    stats_line("src", src_len);
+    stats_line("exp", exp_len);
+    stats_line("nodes", nnode);
+    stats_line("vars", nvar);
+    stats_line("funcs", nfunc);
+    stats_line("arrays", narr);
+    stats_line("sigs", nsig);
+    stats_line("arrinit", arr_init_used);
+    print_str(2, "stats strings ");
+    print_dec(2, nstr);
+    print_str(2, " ");
+    print_dec(2, str_used);
+    print_str(2, "\n");
+    stats_line("typedefs", ntdef);
+    stats_line("structs", nstag);
+    stats_line("insts", nasm);
+    stats_line("relocs", obj_nreloc);
+    stats_line("dfaddr", dfaddr_n);
+}
+
 int main(int argc, char **argv) {
     /* 出力ターゲットの選択 (v14): 先頭に --kosaba があれば
      * KosabaOS のユーザープログラム用 (ELF) に切り替える */
@@ -49,12 +107,18 @@ int main(int argc, char **argv) {
         kosaba_out_name = argv[argi + 1];
         argi += 2;
     }
+    /* --stats: 成功時に各表の使用量を fd 2 へ出す */
+    stats_mode = 0;
+    if (argc >= argi + 1 && str_eq(argv[argi], "--stats")) {
+        stats_mode = 1;
+        argi++;
+    }
     if (obj_mode && !target_kosaba) {
         print_str(2, "iwac: --asari / --elf は --kosaba と一緒に使います\n");
         return 1;
     }
     if (argc < argi + 1) {
-        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --asari <ファイル.c>   (Asari 形式 (命令列のテキスト) を出す\n       iwac --kosaba --elf <ファイル.c>   (ELF オブジェクトを出す (複数ファイルは連結して1つに)\n       iwac --kosaba --out <名前> <ファイル.c>   (OS 上の出力名を指定))\n");
+        print_str(2, "usage: iwac <ファイル.c>   (例: iwac hello.c > hello.bin)\n       iwac <ファイル1.c> <ファイル2.c> ...   (複数ファイルはつないで読む)\n       iwac '<プログラム>'   (従来の形: 引数そのものをコンパイル)\n       iwac --kosaba <ファイル.c>   (KosabaOS 用の ELF を出す)\n       iwac --kosaba --asari <ファイル.c>   (Asari 形式 (命令列のテキスト) を出す\n       iwac --kosaba --elf <ファイル.c>   (ELF オブジェクトを出す (複数ファイルは連結して1つに)\n       iwac --kosaba --out <名前> <ファイル.c>   (OS 上の出力名を指定)\n       iwac --stats <ファイル.c>   (成功時に各表の使用量を標準エラーへ出す))\n");
         return 1;
     }
     if (target_kosaba)
@@ -109,6 +173,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* 入力の長さ (--stats 用。src は常に src_buf を指す) */
+    int src_len = 0;
+    while (src_buf[src_len] != '\0')
+        src_len++;
+
     /* 前処理: #define を展開してから parse に渡す (v13) */
     if (!expand_defines(src)) {
         print_str(2, "iwac: ");
@@ -133,5 +202,7 @@ int main(int argc, char **argv) {
     }
 
     write_binary();
+    if (stats_mode)
+        print_stats(src_len);
     return 0;
 }

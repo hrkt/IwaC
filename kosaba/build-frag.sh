@@ -67,10 +67,10 @@ apply() {
 }
 
 # 02-parse.c: ノード表・変数表・文字列プール
-apply 02-parse.c 'str_pool[16384]' 'str_pool[8192]' 1
+apply 02-parse.c 'str_pool[24576]' 'str_pool[8192]' 1
 apply 02-parse.c '[12288]' '[8192]' 6
 apply 02-parse.c 'nnode >= 12288' 'nnode >= 8192' 1
-apply 02-parse.c 'str_used >= 16383' 'str_used >= 8191' 1
+apply 02-parse.c 'str_used >= 24575' 'str_used >= 8191' 1
 apply 02-parse.c '[1280]' '[512]' 11
 apply 02-parse.c '[1024]' '[512]' 2
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 512' 1

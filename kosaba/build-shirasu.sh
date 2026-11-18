@@ -16,7 +16,7 @@
 #   ノード表        12288 → 2048
 #   命令表          24576 → 4096 (パッチ表と分岐緩和の印も同じ数)
 #   変数表          1280  → 256
-#   文字列プール    16384 → 4096 バイト (個数 512 は不変)
+#   文字列プール    24576 → 4096 バイト (個数 768 は不変)
 #   ソース上限      約464KB → 約32KB
 #   展開バッファ    約464KB → 約32KB
 #   配列初期値プール 49152 → 1024 要素 (v40)
@@ -76,11 +76,11 @@ apply() {
 }
 
 # 02-parse.c: ノード表と変数表と文字列プール。
-# str_pool は [16384] が他と重なるので先に名指しで替える
-apply 02-parse.c 'str_pool[16384]' 'str_pool[4096]' 1
+# str_pool は [24576] が他と重なるので先に名指しで替える
+apply 02-parse.c 'str_pool[24576]' 'str_pool[4096]' 1
 apply 02-parse.c '[12288]' '[2048]' 6
 apply 02-parse.c 'nnode >= 12288' 'nnode >= 2048' 1
-apply 02-parse.c 'str_used >= 16383' 'str_used >= 4095' 1
+apply 02-parse.c 'str_used >= 24575' 'str_used >= 4095' 1
 apply 02-parse.c '[1280]' '[256]' 11
 apply 02-parse.c '[1024]' '[256]' 2
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 256' 1

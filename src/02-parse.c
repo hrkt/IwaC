@@ -741,12 +741,12 @@ static int find_func(char *name, int len) {
  * 実行時の住所 (str_addr) は第2層が決める (コードの後ろに
  * このプールをそのまま置くので、住所 = 読み込み先頭 +
  * コードのバイト数 + str_off[i]) */
-static char str_pool[16384];
-static int str_off[512];
-static int str_len[512];
+static char str_pool[24576];
+static int str_off[768];
+static int str_len[768];
 static int nstr;       /* 文字列の数 */
 static int str_used;   /* str_pool の使用済みバイト数 */
-static unsigned int str_addr[512];  /* 第2層が確定させる住所 */
+static unsigned int str_addr[768];  /* 第2層が確定させる住所 */
 
 /* ノードを1つ作って、その番号を返す。失敗したら -1 */
 static int new_node(int kind, int val, int lhs, int rhs) {
@@ -930,7 +930,7 @@ static int parse_number_node(void) {
  * 閉じの '"' が無い、知らないエスケープ、長すぎる文字列は
  * エラー。成功したらノード番号、失敗したら -1 を返す */
 static int parse_string_node(void) {
-    if (nstr >= 512) {
+    if (nstr >= 768) {
         errmsg = "文字列が多すぎます";
         return -1;
     }
@@ -965,7 +965,7 @@ static int parse_string_node(void) {
                 return -1;
             }
         }
-        if (str_used >= 16383) {
+        if (str_used >= 24575) {
             errmsg = "文字列が長すぎます";
             return -1;
         }

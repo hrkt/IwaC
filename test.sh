@@ -1403,6 +1403,49 @@ echo "ok: v45: 構造体の値セマンティクス (初期化子つき) のリ�
 cmp -s "$TMP/v45iwac.eo" "$TMP/v45asari.eo" || fail "v45: Asari のオブジェクトが iwac と違う"
 echo "ok: v45: Asari のオブジェクトが iwac と一致 (構造体の値セマンティクス)"
 
+# --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
+# 合否ではなく点検のための表示。一括の代表 (nori 本体) と
+# 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに
+# 大きい方を採る (関数や再配置は断片側が縛る)。
+# (段3で上限が TU 基準になり、iwac 自身の一括は上限
+# 超えになったため、一括側は nori 本体で代表する)
+"$IWAC" --kosaba --stats nori/nori.c libdashi/libdashi.c kosaba/kosaba_rt.c > /dev/null 2> "$TMP/cap-all.txt"
+for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+    "$IWAC" --kosaba --elf --stats src/decls.c "src/$f.c" > /dev/null 2> "$TMP/cap-$f.txt"
+done
+capmax() {
+    awk -v k="$1" '$1 == "stats" && $2 == k { if ($3 > m) m = $3 } END { print m + 0 }' "$TMP"/cap-*.txt "$TMP/cap-all.txt"
+}
+capmax2() {
+    awk -v k="$1" '$1 == "stats" && $2 == k { if ($4 > m) m = $4 } END { print m + 0 }' "$TMP"/cap-*.txt "$TMP/cap-all.txt"
+}
+capof() {
+    grep -o "$1" "$2" | head -1 | grep -o '[0-9]\+'
+}
+capline() {
+    if [ -n "$3" ]; then
+        echo "capacity: $1 $2 / $3 (余り $(( $3 - $2 )))"
+    else
+        echo "capacity: $1 $2 / ?"
+    fi
+}
+echo "--- 容量レポート (使用量 / 上限 / 余り) ---"
+capline src "$(capmax src)" "$(capof 'src_buf\[[0-9]*\]' src/05-input.c)"
+capline exp "$(capmax exp)" "$(capof 'exp_buf\[[0-9]*\]' src/06-preproc.c)"
+capline nodes "$(capmax nodes)" "$(capof 'node_kind\[[0-9]*\]' src/02-parse.c)"
+capline vars "$(capmax vars)" "$(capof 'var_etype\[[0-9]*\]' src/02-parse.c)"
+capline funcs "$(capmax funcs)" "$(capof 'func_names\[[0-9]*\]' src/02-parse.c)"
+capline arrays "$(capmax arrays)" "$(capof 'arr_etype\[[0-9]*\]' src/02-parse.c)"
+capline sigs "$(capmax sigs)" "$(capof 'sig_ret_etype\[[0-9]*\]' src/02-parse.c)"
+capline arrinit "$(capmax arrinit)" "$(capof 'arr_init_pool\[[0-9]\+\]' src/02-parse.c)"
+capline strings "$(capmax strings)" "$(capof 'str_off\[[0-9]*\]' src/02-parse.c)"
+capline strbytes "$(capmax2 strings)" "$(capof 'str_pool\[[0-9]*\]' src/02-parse.c)"
+capline typedefs "$(capmax typedefs)" "$(capof 'ntdef >= [0-9]*' src/02b-decl.c)"
+capline structs "$(capmax structs)" "$(capof 'nstag >= [0-9]*' src/02b-decl.c)"
+capline insts "$(capmax insts)" "$(capof 'asm_op\[[0-9]*\]' src/03-gen.c)"
+capline relocs "$(capmax relocs)" "$(capof 'obj_reloc_site\[[0-9]*\]' src/03-gen.c)"
+capline dfaddr "$(capmax dfaddr)" "$(capof 'dfaddr_site\[[0-9]*\]' src/03-gen.c)"
+
 # --- libdashi: 共通関数の束 ---
 # ホストで小さなテストプログラムと一緒に組み、出力を見る
 cat > "$TMP/ds_test.c" <<'DASHITEST'
