@@ -76,11 +76,11 @@ apply() {
 }
 
 # 02-parse.c: ノード表と変数表と文字列プール。
-# str_pool は [16384] が他と重なるので先に名指しで替える
-apply 02-parse.c 'str_pool[16384]' 'str_pool[4096]' 1
+# str_pool は [24576] が他と重なるので先に名指しで替える
+apply 02-parse.c 'str_pool[24576]' 'str_pool[4096]' 1
 apply 02-parse.c '[25600]' '[2048]' 6
 apply 02-parse.c 'nnode >= 25600' 'nnode >= 2048' 1
-apply 02-parse.c 'str_used >= 16383' 'str_used >= 4095' 1
+apply 02-parse.c 'str_used >= 24575' 'str_used >= 4095' 1
 apply 02-parse.c '[1280]' '[256]' 11
 apply 02-parse.c '[1024]' '[256]' 2
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 256' 1

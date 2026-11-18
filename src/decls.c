@@ -217,12 +217,12 @@ int find_struct_tag(char *name, int len);
 int find_member(int tg, char *name, int len);
 int define_array_s(char *name, int len, int rows, int cols, int esize, int etype, int strct, int plevel);
 int find_func(char *name, int len);
-char str_pool[16384];
-int str_off[512];
-int str_len[512];
+char str_pool[24576];
+int str_off[768];
+int str_len[768];
 int nstr;
 int str_used;
-unsigned int str_addr[512];
+unsigned int str_addr[768];
 int new_node(int kind, int val, int lhs, int rhs);
 char *cur;
 int is_digit(char c);
@@ -522,6 +522,9 @@ void exp_ch(char c);
 void exp_str(char *s, int len);
 int expand_defines(char *src);
 int str_eq(char *a, char *b);
+void print_dec(int fd, int n);
+void stats_line(char *name, int n);
+void print_stats(int src_len);
 
 /* 入口と、kosaba_rt.c の関数。並びの約束 (一括での
  * 登録順) を合わせるため、最後にまとめて置く。
