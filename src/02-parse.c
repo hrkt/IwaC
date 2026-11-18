@@ -144,6 +144,9 @@ static int NODE_ICALL = 59;  /* 関数ポインタ経由の呼び出し
                              * node_rhs = 引数の並び */
 static int NODE_FADDR = 60;  /* 関数の住所 (v44)。
                              * node_val = 関数番号 */
+static int NODE_NUMFP = 61;  /* 浮動小数点リテラル (v46)。
+                             * node_val = ビットパターンの
+                             * 置き場 (fp_bits) の番号 */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -216,7 +219,7 @@ static int has_var_inits;  /* 初期値つきグローバルがあるか */
 static int nvar;       /* 登録された変数の数 (全スコープ合計) */
 static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
 static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
-static int func_nlocals[224];  /* 関数ごとのフレーム枠数。
+static int func_nlocals[256];  /* 関数ごとのフレーム枠数。
                              * 本体は関数の名簿の節で説明する */
 
 /* typedef の名簿 (v36): 型への別名。
@@ -374,27 +377,28 @@ static int prog_main;
  *   func_body[i]      : 本体の文の並びの先頭ノード
  *   func_entry[i]     : 命令列の中での入口の命令番号
  *                       (第2層が生成のたびに決める)
- * 関数は最大224個まで */
-static char func_names[224][32];
-static int func_name_len[224];
-static int func_nparams[224];
-static int func_param_var[224][8];
-static int func_ret_etype[224]; /* 戻り値の型タグ (v35) */
-static char func_ret_struct[224]; /* 戻り値の構造体番号 + 1 (v37、
+ * 関数は最大256個まで (v46 で 224 → 256:
+ * 浮動小数点の補助関数が増えて 224 を超えた) */
+static char func_names[256][32];
+static int func_name_len[256];
+static int func_nparams[256];
+static int func_param_var[256][8];
+static int func_ret_etype[256]; /* 戻り値の型タグ (v35) */
+static char func_ret_struct[256]; /* 戻り値の構造体番号 + 1 (v37、
                              * 0 = なし。構造体を返す関数はポインタ
                              * でだけ返せるので、0 でなければ
                              * 「その構造体へのポインタを返す」) */
-static int func_body[224];
-static int func_entry[224];
+static int func_body[256];
+static int func_entry[256];
 /* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
  *   func_has_body[i]: 本体まで読めたら 1
  *   func_called[i]  : 呼び出しが現れたら 1。最後まで
  *                     本体が無い関数が呼ばれていたら、
  *                     生成の入口でエラーにする */
-static int func_has_body[224];
-static int func_called[224];
-static int func_sig[224];     /* その関数の署名番号 (v44) */
-/* func_nlocals[224] : フレームの枠数 (引数を含む、v21)。
+static int func_has_body[256];
+static int func_called[256];
+static int func_sig[256];     /* その関数の署名番号 (v44) */
+/* func_nlocals[256] : フレームの枠数 (引数を含む、v21)。
  * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
 
@@ -550,7 +554,7 @@ static int fref_at(int pool_idx) {
 /* func_arr_bytes[f]: 関数 f のフレームに入るローカル
  * 配列の合計バイト数 (v26)。フレーム長の計算 (第2層の
  * func_frame_size) が使う */
-static int func_arr_bytes[224];
+static int func_arr_bytes[256];
 
 /* 名前の一致だけを見る小物 (変数の var_name_eq と同じ) */
 static int arr_name_eq(int i, char *name, int len) {
@@ -878,6 +882,69 @@ static int hex_value(char c) {
     return -1;
 }
 
+/* ================================================================
+ * 浮動小数点リテラルの変換 (v46、設計は doc/float.md):
+ * 10進文字列 → IEEE 754 double のビットパターン。
+ *
+ * iwac 自身のソースでは浮動小数点が使えない (自己ホストの
+ * 約束) ので、変換は整数演算だけで書く。ホストの strtod に
+ * 頼ると、ホストで作った iwac と OS 上で作った iwac で
+ * 結果が食い違う可能性が残り、固定点が崩れる。ここで
+ * 正しく丸める (最近接偶数) 変換を自前で持つ。
+ *
+ * 作法: リテラルの値を M × 10^k (M は有意な数字の整数、
+ * k は指数) と置き、k の符号で整数の比 A / B に直す:
+ *   k >= 0 なら A = M × 10^k、B = 1
+ *   k <  0 なら A = M、B = 10^(-k)
+ * あとは A / B を2進の長除法 (復元法: 2倍して比べて
+ * 引く) で上位ビットから取り出し、最後に最近接偶数で
+ * 丸める。除算器そのものは要らず、多倍長整数 (128語 ×
+ * 32ビット = 4096ビット) の「小さい数との掛け算・
+ * シフト・比較・引き算」だけで足りる。
+ * ================================================================ */
+
+/* リテラルのビットパターンの置き場 (v46): 浮動小数点
+ * リテラルのノード (NODE_NUMFP) は node_val にここの
+ * 番号を持ち、生成がここからビットを取り出す。
+ * 1つの翻訳単位で 1024 個まで */
+static long fp_bits[1024];
+static int fp_nbits;
+
+/* 多倍長の作業場 (32ビットずつ 128 語、リトルエンディアン) */
+static long fp_bn_a[128];
+static long fp_bn_b[128];
+static long fp_bn_c[128];
+
+/* 浮動小数点リテラルの変換器 (v46) の本体は新断片
+ * src/02c-fpconv.c へ分けた (v37 で宣言まわりを
+ * 02b-decl.c へ分けたのと同じ容量対策: 02-parse の
+ * 翻訳単位が断片プロファイルの上限に触れたため)。
+ * ここには前方宣言だけを元の位置に残す。本体が
+ * 後ろの断片にあっても、名前の登録順 (一括コンパイル
+ * での初出順) が変わらないようにするためで、
+ * src/decls.c の並びとも一致する */
+static void bn_clear(long *w);
+static int bn_is_zero(long *w);
+static int bn_bitlen(long *w);
+static int bn_mul_small(long *w, long m);
+static void bn_add_small(long *w, long v);
+static int bn_shl(long *dst, long *src, int sh);
+static void bn_copy(long *dst, long *src);
+static int bn_cmp(long *a, long *b);
+static void bn_sub(long *a, long *b);
+static int fp_feed(int d);
+static int fp_parse_bits(char *s, int len, long *out);
+static long fp_bits_from_long(long v);
+
+/* 数字を1桁ずつ M (fp_bn_a) へ取り込むための控え。
+ * 末尾の 0 は、後ろに有意な数字が来たときだけ取り込む
+ * (「1 の後ろに 0 が2000個」のようなリテラルで M が
+ * 無駄に膨らまないように)。取り込んだ桁数は
+ * fp_folded、保留中の 0 の数は fp_pend に数える */
+static int fp_pend;
+static int fp_folded;
+
+
 /* 数字を読み、その NODE_NUM ノードを作って番号を返す。
  * 10進数は従来どおり 2047 まで (式の項用)。
  * 0x で始まる16進数は「アドレスを書くための数」として
@@ -885,6 +952,51 @@ static int hex_value(char c) {
  * 行う (addi では入らないので住所の材料と同じ作り方で
  * レジスタに作る) */
 static int parse_number_node(void) {
+    /* 浮動小数点リテラル (v46): 数字の並びに "." か
+     * 指数部 (e / E) が続けば double のリテラル。
+     * "." から始まる形は材料の段に来ない (数字から
+     * 始まるものだけがここへ来る) ので、メンバ
+     * アクセスの "." とは衝突しない。16進は下の
+     * 枝が先に拾う (0x の x で数字の走査が止まる) */
+    {
+        char *p = cur;
+        while (is_digit(*p))
+            p++;
+        int is_fp = 0;
+        if (*p == '.') {
+            is_fp = 1;
+            p++;
+            while (is_digit(*p))
+                p++;
+        }
+        if (*p == 'e' || *p == 'E') {
+            char *q = p + 1;
+            if (*q == '+' || *q == '-')
+                q++;
+            if (is_digit(*q)) {
+                is_fp = 1;
+                p = q;
+                while (is_digit(*p))
+                    p++;
+            }
+        }
+        if (is_fp) {
+            long bits;
+            if (!fp_parse_bits(cur, (int)(p - cur), &bits))
+                return -1;
+            cur = p;
+            /* 接尾辞 (f / F / l / L) は読み捨てる */
+            while (*cur == 'f' || *cur == 'F' || *cur == 'l' ||
+                   *cur == 'L')
+                cur++;
+            if (fp_nbits >= 1024) {
+                errmsg = "浮動小数点リテラルが多すぎます";
+                return -1;
+            }
+            fp_bits[fp_nbits] = bits;
+            return new_node(NODE_NUMFP, fp_nbits++, 0, 0);
+        }
+    }
     if (cur[0] == '0' && (cur[1] == 'x' || cur[1] == 'X')) {
         cur += 2;
         if (hex_value(*cur) < 0) {
@@ -1298,6 +1410,61 @@ static int member_is_scalar(int node) {
     return 1;
 }
 
+/* 式の値が浮動小数点 (double) になり得るか (v46)。
+ * 生成の型付け (type_node) と同じ規則で、葉と構造だけ
+ * から見積もる。キャストの判定に使う: 従来の型への
+ * キャストは読み捨てが約束だが、相手が double だと
+ * 値の置き場 (ft0) が違うので、捨てると意味が壊れる。
+ * 見積もりが付く相手は変換ノードにする */
+static int node_maybe_fp(int node) {
+    int k = node_kind[node];
+    if (k == NODE_NUMFP)
+        return 1;
+    if (k == NODE_VAR)
+        return var_plevel[node_val[node]] == 0 &&
+               (var_etype[node_val[node]] & 64) != 0;
+    if (k == NODE_INDEX || k == NODE_INDEX2)
+        return arr_plevel[node_val[node]] == 0 &&
+               (arr_etype[node_val[node]] & 64) != 0;
+    if (k == NODE_PINDEX)
+        return var_plevel[node_val[node]] == 1 &&
+               (var_etype[node_val[node]] & 64) != 0;
+    if (k == NODE_MEMBER || k == NODE_MELEM)
+        return smem_plevel[node_val[node]] == 0 &&
+               (smem_etype[node_val[node]] & 64) != 0;
+    if (k == NODE_DEREF) {
+        int o = node_lhs[node];
+        if (node_kind[o] == NODE_VAR)
+            return var_plevel[node_val[o]] == 1 &&
+                   (var_etype[node_val[o]] & 64) != 0;
+        if (node_kind[o] == NODE_MEMBER ||
+            node_kind[o] == NODE_MELEM)
+            return smem_plevel[node_val[o]] == 1 &&
+                   (smem_etype[node_val[o]] & 64) != 0;
+        return 0;
+    }
+    if (k == NODE_CALL)
+        return (func_ret_etype[node_val[node]] & 64) != 0;
+    if (k == NODE_ICALL)
+        return (sig_ret_etype[node_val[node]] & 64) != 0;
+    if (k == NODE_CAST)
+        return (node_val[node] & 64) != 0;
+    if (k == NODE_NEG || k == NODE_BITNOT ||
+        k == NODE_EPRE || k == NODE_EPOST)
+        return node_maybe_fp(node_lhs[node]);
+    if (k == NODE_ADD || k == NODE_SUB || k == NODE_MUL ||
+        k == NODE_DIV || k == NODE_MOD || k == NODE_AND ||
+        k == NODE_OR || k == NODE_XOR)
+        return node_maybe_fp(node_lhs[node]) ||
+               node_maybe_fp(node_rhs[node]);
+    if (k == NODE_SHL || k == NODE_SHR)
+        return node_maybe_fp(node_lhs[node]);
+    if (k == NODE_COND)
+        return node_maybe_fp(node_val[node]) ||
+               node_maybe_fp(node_rhs[node]);
+    return 0;
+}
+
 static int parse_postfix_expr(void) {
     int node = parse_primary_node();
     if (node < 0)
@@ -1532,8 +1699,12 @@ static int parse_unary_expr(void) {
                 /* 幅つきの型への変換は、正規形への
                  * 切り詰め/拡張が要るのでノードにする
                  * (v35)。ポインタへの変換と従来の型
-                 * への変換は今までどおり読み捨てる */
-                if ((et & 32) && pl == 0)
+                 * への変換は今までどおり読み捨てる。
+                 * 浮動小数点が絡む変換 (v46) は値の
+                 * 置き場が変わるので、従来の型への
+                 * 変換でもノードにする */
+                if (pl == 0 && ((et & 32) || (et & 64) ||
+                                node_maybe_fp(operand)))
                     return new_node(NODE_CAST, et, operand, 0);
                 return operand;
             }
@@ -1994,7 +2165,8 @@ static int is_type_word(void) {
            ident_is("signed") ||
            ident_is("int16") || ident_is("uint16") ||
            ident_is("int32") || ident_is("uint32") ||
-           ident_is("int64") || ident_is("uint64");
+           ident_is("int64") || ident_is("uint64") ||
+           ident_is("double");
 }
 
 /* 幅つきの型の言葉なら、その型タグを返す (v35)。
@@ -2084,6 +2256,9 @@ static int parse_type(void) {
     }
     int has_char = ident_is("char");
     int sized = sized_type_etype();  /* 幅つきの型 (v35) */
+    int dbl = ident_is("double") ? 8 + 64 : 0;  /* double
+                             * (v46)。型タグは大きさ 8 +
+                             * 浮動小数点の印 64 */
     /* 型の言葉が続く間は読み進める (unsigned long や
      * long long のような組み合わせを受けるため) */
     for (;;) {
@@ -2104,6 +2279,8 @@ static int parse_type(void) {
         int sk = sized_type_etype();
         if (sk)
             sized = sk;
+        if (ident_is("double"))
+            dbl = 8 + 64;
     }
     skip_spaces();
     int stars = 0;
@@ -2112,7 +2289,12 @@ static int parse_type(void) {
         cur++;
         skip_spaces();
     }
-    if (sized) {
+    if (dbl) {
+        /* double があれば、それが型そのもの (long
+         * double のような並びも double として受ける) */
+        parse_type_etype = dbl;
+        parse_type_bsize = 8;
+    } else if (sized) {
         /* 幅つきの型があれば、それが型そのもの */
         parse_type_etype = sized;
         parse_type_bsize = sized & 15;
@@ -2306,8 +2488,8 @@ static int parse_funcdef(void) {
     int f = find_func(name_buf, name_len);
     int is_new = 0;
     if (f < 0) {
-        if (nfunc >= 224) {
-            errmsg = "関数は224個までです";
+        if (nfunc >= 256) {
+            errmsg = "関数は256個までです";
             return 0;
         }
         f = nfunc++;

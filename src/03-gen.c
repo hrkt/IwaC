@@ -86,6 +86,47 @@ static int OP_DIVU = 36; /* 符号なし割り算 (v35、M 拡張) */
 static int OP_REMU = 37; /* 符号なし剰余 (v35、M 拡張) */
 static int OP_SRL = 38;  /* 論理右シフト (v35) */
 static int OP_SRAI = 39; /* 算術右シフト即値 (v35) */
+static int OP_FLD = 40;     /* fld (v46): メモリから double を
+                             * 浮動小数点レジスタへ読む。I 形式、
+                             * opcode 0x07、funct3 が 3 */
+static int OP_FSD = 41;     /* fsd (v46): S 形式、opcode 0x27、
+                             * funct3 が 3 */
+static int OP_FADD_D = 42;  /* fadd.d (v46): R 形式、opcode
+                             * 0x53、funct7 が 0x01 */
+static int OP_FSUB_D = 43;  /* fsub.d (v46): funct7 が 0x05 */
+static int OP_FMUL_D = 44;  /* fmul.d (v46): funct7 が 0x09 */
+static int OP_FDIV_D = 45;  /* fdiv.d (v46): funct7 が 0x0D */
+static int OP_FEQ_D = 46;   /* feq.d (v46): funct7 が 0x51、
+                             * funct3 が 2。結果は整数レジスタ */
+static int OP_FLT_D = 47;   /* flt.d (v46): funct7 が 0x51、
+                             * funct3 が 1 */
+static int OP_FLE_D = 48;   /* fle.d (v46): funct7 が 0x51、
+                             * funct3 が 0 */
+static int OP_FMV_D_X = 49; /* fmv.d.x (v46): 整数レジスタの
+                             * ビットを浮動小数点レジスタへ。
+                             * funct7 が 0x79 */
+static int OP_FMV_X_D = 50; /* fmv.x.d (v46): 逆向き。
+                             * funct7 が 0x71 */
+static int OP_FCVT_D_L = 51;  /* fcvt.d.l (v46): 整数 → double。
+                               * funct7 が 0x69、rs2 の欄が
+                               * 変換元の幅と符号 (l = 2) */
+static int OP_FCVT_D_LU = 52; /* fcvt.d.lu (v46): rs2 の欄が 3 */
+static int OP_FCVT_L_D = 53;  /* fcvt.l.d (v46): double → 整数
+                               * (切り捨て)。funct7 が 0x61、
+                               * rs2 の欄が 2、funct3 は丸め
+                               * (切り捨て = 1) */
+static int OP_FCVT_LU_D = 54; /* fcvt.lu.d (v46): rs2 の欄が 3 */
+static int OP_FNEG_D = 55;    /* fneg.d (v46): fsgnj.d
+                               * (funct7 が 0x11) の funct3 が
+                               * 1 の形 (符号の反転) */
+static int OP_FMV_D = 56;     /* fmv.d (v46): fsgnj.d の
+                               * funct3 が 0 の形 (レジスタ間の
+                               * 写し) */
+static int OP_CSRS = 57;      /* csrs (v46): CSR にビットを
+                               * 立てる (csrrs)。asm_imm が
+                               * CSR 番号。ベアメタルの入口で
+                               * sstatus の FS (FPU 有効) を
+                               * 立てるためだけに使う */
 
 /* 命令表の上限は 24576 (v39 で 40960 → 49152、
  * v44 で → 57344、v45 で → 59392 と増量し、
@@ -212,8 +253,8 @@ static unsigned int var_global_addr(int var) {
  * 使うので、葉としては扱えない (gen_expr で別に処理する) */
 static int is_leaf(int node) {
     int k = node_kind[node];
-    if (k == NODE_NUM || k == NODE_VAR || k == NODE_STR ||
-        k == NODE_ARRAY)
+    if (k == NODE_NUM || k == NODE_NUMFP || k == NODE_VAR ||
+        k == NODE_STR || k == NODE_ARRAY)
         return 1;
     if (k == NODE_DEREF) {
         int ok = node_kind[node_lhs[node]];
@@ -409,6 +450,11 @@ static void gen_load_u32(int reg, int v) {
     asm_push(OP_SRLI, reg, reg, 0, 32);
 }
 
+/* 64ビットのビットパターンをレジスタに作る関数の本体は
+ * 新断片 src/03b-genfp.c (v46 の浮動小数点生成を集めた
+ * 断片) にある。ここには前方宣言だけを元の位置に残す
+ * (名前の登録順を変えないため。02c-fpconv.c の節と同様) */
+static void emit_load_i64(int reg, long v);
 /* 要素ノード (INDEX / INDEX2 / PINDEX / INDEX_STORE) が
  * 指す要素の大きさ (v23)。配列なら宣言で決めた要素の
  * 大きさ、ポインタなら「指す先の大きさ」: ポインタの
@@ -524,6 +570,13 @@ static void emit_canon(int et) {
         asm_push(OP_SRAI, REG_T1, REG_T1, 0, sh);
 }
 
+/* 整数と double の変換 (fcvt) と、double の真偽化の
+ * 本体は src/03b-genfp.c にある (前方宣言だけを元の
+ * 位置に残す) */
+static void emit_cvt_d(int freg, int greg, int src_et);
+static void emit_cvt_l(int dst_et);
+static void emit_fp_bool(void);
+
 /* 配列の先頭アドレスをレジスタに作る (v26)。
  * グローバル配列は静的領域の住所 (gen_load_addr)。
  * ローカル配列はフレームの中、変数の枠の並びの上に
@@ -622,7 +675,12 @@ static int deref_is_funcptr(int node) {
 
 static void gen_load_leaf(int reg, int leaf) {
     int k = node_kind[leaf];
-    if (k == NODE_NUM) {
+    if (k == NODE_NUMFP) {
+        /* 浮動小数点リテラル (v46): ビットパターンを
+         * 整数として作る。浮動小数点レジスタへ移すのは
+         * 呼び出し側 (文脈が決める) */
+        emit_load_i64(reg, fp_bits[node_val[leaf]]);
+    } else if (k == NODE_NUM) {
         /* 分岐は node_val の符号つきの値で決める
          * (キャストで符号なしとして見てはいけない:
          * iwac ではキャストは読み捨てなので、GCC で
@@ -681,8 +739,19 @@ static void gen_load_leaf(int reg, int leaf) {
     }
 }
 
-/* 呼び出しの引数を積む道具 (v22)。gen_expr と相互に使う */
-static int gen_call_args(int arg);
+/* 呼び出しの引数を積む道具 (v22)。gen_expr と相互に使う。
+ * v46 で引数の型に合わせた変換が要るため、関数の番号
+ * (f、無ければ -1) と署名の番号 (sig、無ければ -1) も
+ * 渡すようになった */
+static int gen_call_args(int arg, int f, int sig);
+
+/* 式を、受け側の型タグに合わせた置き場 (整数は t1、
+ * double は ft0) へ生成する道具 (v46)。gen_expr と
+ * 相互に使う */
+static int gen_value_as(int node, int dst);
+
+/* 浮動小数点の二項演算の生成 (v46)。gen_expr と相互に使う */
+static int gen_fp_binop(int node);
 
 /* 要素の住所を作る道具 (v23)。gen_expr と相互に使う */
 static int gen_elem_addr(int node);
@@ -690,6 +759,13 @@ static int gen_elem_addr(int node);
 /* B 方式の呼び出しの道具 (v45)。gen_expr と相互に使う */
 static int gen_push_args_b(int arg, int sig, int ai);
 static int gen_b_call(int node, int mode);
+
+/* gen_call_args が今どの引数を処理しているか (左から
+ * 数えた番号)。呼び出し側が引数の数 - 1 を入れてから
+ * 呼ぶ。再帰が右の引数から戻るたびに減っていく。
+ * 引数の式の中の入れ子の呼び出しが上書きするので、
+ * 値を取るたびに控え直す (gen_call_args の中身参照) */
+static int call_args_idx;
 
 /* 式の AST から命令列を作る。結果は t1 に残る約束。
  * 失敗したら 0 を返す (理由は errmsg)。
@@ -743,6 +819,8 @@ static void type_node(int node) {
         type_node(node_lhs[node]);
         type_node(node_val[node]);
         type_node(node_rhs[node]);
+    } else if (k == NODE_NUMFP) {
+        /* 浮動小数点リテラル (v46): 子はない */
     } else if (k == NODE_CALL || k == NODE_SYSCALL3) {
         type_list(node_lhs[node]);
     } else if (k == NODE_ICALL) {
@@ -776,7 +854,9 @@ static void type_node(int node) {
             type_node(node_rhs[node]);
     }
     int et = 8;
-    if (k == NODE_VAR)
+    if (k == NODE_NUMFP)
+        et = 8 + 64;  /* 浮動小数点リテラルは double (v46) */
+    else if (k == NODE_VAR)
         et = var_value_etype(node_val[node]);
     else if (k == NODE_INDEX || k == NODE_INDEX2)
         et = arr_etype[node_val[node]];
@@ -799,11 +879,19 @@ static void type_node(int node) {
              k == NODE_OR || k == NODE_XOR) {
         int l = node_etype[node_lhs[node]];
         int r = node_etype[node_rhs[node]];
-        et = (l & 32) ? l : (r & 32) ? r : 8;
+        /* どちらかが double なら double に揃える (v46。
+         * 使えない演算の拒否は生成側の仕事) */
+        if ((l & 64) || (r & 64))
+            et = 8 + 64;
+        else
+            et = (l & 32) ? l : (r & 32) ? r : 8;
     }
     else if (k == NODE_SHL || k == NODE_SHR) {
         int l = node_etype[node_lhs[node]];
-        et = (l & 32) ? l : 8;
+        if (l & 64)
+            et = 8 + 64;  /* 生成側でエラーにする (v46) */
+        else
+            et = (l & 32) ? l : 8;
     }
     else if (k == NODE_NEG || k == NODE_BITNOT)
         et = node_etype[node_lhs[node]];
@@ -817,7 +905,11 @@ static void type_node(int node) {
     else if (k == NODE_COND) {
         int t = node_etype[node_val[node]];
         int e = node_etype[node_rhs[node]];
-        et = (t & 32) ? t : (e & 32) ? e : 8;
+        if ((t & 64) || (e & 64))
+            et = 8 + 64;  /* 枝のどちらかが double なら
+                           * double に揃える (v46) */
+        else
+            et = (t & 32) ? t : (e & 32) ? e : 8;
     }
     node_etype[node] = et;
 }
@@ -991,6 +1083,12 @@ static int gen_expr(int node) {
         /* 葉: t1 にその値 (変数なら今の値、文字列なら住所、
          * ポインタ読みなら指された先の1バイト) が入る */
         gen_load_leaf(REG_T1, node);
+        if (node_etype[node] & 64) {
+            /* double の葉 (v46): ビットとして t1 に
+             * 入っているので、浮動小数点の置き場 (ft0)
+             * へ移す */
+            asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
+        }
         return 1;
     }
     if (node_kind[node] == NODE_DEREF) {
@@ -1017,6 +1115,9 @@ static int gen_expr(int node) {
             return 0;
         asm_push(mem_load_op(elem_etype(node)),
                  REG_T1, REG_T2, 0, 0);
+        if (node_etype[node] & 64)
+            /* double の要素 (v46): ビットを ft0 へ */
+            asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
         return 1;
     }
     if (node_kind[node] == NODE_MEMBER ||
@@ -1036,6 +1137,9 @@ static int gen_expr(int node) {
         }
         asm_push(mem_load_op(elem_etype(node)),
                  REG_T1, REG_T2, 0, 0);
+        if (node_etype[node] & 64)
+            /* double のメンバ (v46): ビットを ft0 へ */
+            asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
         return 1;
     }
     if (node_kind[node] == NODE_ROWADDR) {
@@ -1083,7 +1187,8 @@ static int gen_expr(int node) {
             errmsg = "syscall3 は KosabaOS ターゲット専用です";
             return 0;
         }
-        if (!gen_call_args(node_lhs[node]))
+        call_args_idx = 3;  /* 引数は4つ固定 (v46) */
+        if (!gen_call_args(node_lhs[node], -1, -1))
             return 0;
         asm_push(OP_LD, REG_A7, REG_SP, 0, 0);
         asm_push(OP_LD, REG_A0, REG_SP, 0, 16);
@@ -1130,7 +1235,8 @@ static int gen_expr(int node) {
                 ai++;
             }
         }
-        if (!gen_call_args(node_lhs[node]))
+        call_args_idx = nargs - 1;
+        if (!gen_call_args(node_lhs[node], node_val[node], -1))
             return 0;
         if (nargs > 0) {
             for (int k = 0; k < nargs; k++)
@@ -1142,6 +1248,9 @@ static int gen_expr(int node) {
         asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
         /* 戻り値の型が幅つきなら正規形に直す (v35) */
         emit_canon(func_ret_etype[node_val[node]]);
+        if (func_ret_etype[node_val[node]] & 64)
+            /* double の戻り値 (v46): ビットを ft0 へ */
+            asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
         return 1;
     }
     if (node_kind[node] == NODE_ICALL) {
@@ -1173,7 +1282,8 @@ static int gen_expr(int node) {
                 ai++;
             }
         }
-        if (!gen_call_args(node_rhs[node]))
+        call_args_idx = nargs - 1;
+        if (!gen_call_args(node_rhs[node], -1, sig))
             return 0;
         if (!gen_expr(node_lhs[node]))
             return 0;
@@ -1186,6 +1296,9 @@ static int gen_expr(int node) {
         asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
         /* 戻り値の型が幅つきなら正規形に直す */
         emit_canon(sig_ret_etype[sig]);
+        if (sig_ret_etype[sig] & 64)
+            /* double の戻り値 (v46): ビットを ft0 へ */
+            asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
         return 1;
     }
     if (node_kind[node] == NODE_LAND) {
@@ -1200,9 +1313,13 @@ static int gen_expr(int node) {
          * 左の値は分岐で消費されるので、退避は要らない */
         if (!gen_expr(node_lhs[node]))
             return 0;
+        if (node_etype[node_lhs[node]] & 64)
+            emit_fp_bool();  /* double の条件 (v46) */
         int f_jump = emit_beq_t1z();
         if (!gen_expr(node_rhs[node]))
             return 0;
+        if (node_etype[node_rhs[node]] & 64)
+            emit_fp_bool();
         asm_push(OP_SLTU, REG_T1, REG_ZERO, REG_T1, 0);
         int e_jump = nasm;
         asm_push(OP_JAL, 0, 0, 0, 0);
@@ -1222,6 +1339,8 @@ static int gen_expr(int node) {
          * L_end: */
         if (!gen_expr(node_lhs[node]))
             return 0;
+        if (node_etype[node_lhs[node]] & 64)
+            emit_fp_bool();  /* double の条件 (v46) */
         int r_jump = emit_beq_t1z();
         asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, 1);
         int e_jump = nasm;
@@ -1229,6 +1348,8 @@ static int gen_expr(int node) {
         asm_imm[r_jump] = nasm;
         if (!gen_expr(node_rhs[node]))
             return 0;
+        if (node_etype[node_rhs[node]] & 64)
+            emit_fp_bool();
         asm_push(OP_SLTU, REG_T1, REG_ZERO, REG_T1, 0);
         asm_imm[e_jump] = nasm;
         return 1;
@@ -1238,19 +1359,42 @@ static int gen_expr(int node) {
          * 「1 未満か (符号なし)」=「0 か」になる */
         if (!gen_expr(node_lhs[node]))
             return 0;
+        if (node_etype[node_lhs[node]] & 64)
+            emit_fp_bool();  /* double の相手 (v46):
+                              * 0/1 に直してから反転する */
         asm_push(OP_SLTIU, REG_T1, REG_T1, 0, 1);
         return 1;
     }
     if (node_kind[node] == NODE_CAST) {
-        /* 幅つきの型への変換 (v35): 相手を計算して、
-         * 変換先の正規形に直す。変換先は node_val */
+        /* 型変換: 幅つきの型へは正規形に直す (v35)。
+         * 浮動小数点が絡む変換 (v46) は、値の置き場
+         * (t1 と ft0) を跨ぐので fcvt で値を変換する。
+         * 変換先は node_val、相手の型は型付けの結果 */
+        int dst = node_val[node];
+        int src = node_etype[node_lhs[node]];
         if (!gen_expr(node_lhs[node]))
             return 0;
-        emit_canon(node_val[node]);
+        if (dst & 64) {
+            if (!(src & 64))
+                /* 整数 → double */
+                emit_cvt_d(REG_FT0, REG_T1, src);
+            return 1;
+        }
+        if (src & 64) {
+            /* double → 整数 (切り捨て + 正規形) */
+            emit_cvt_l(dst);
+            emit_canon(dst);
+            return 1;
+        }
+        emit_canon(dst);
         return 1;
     }
     if (node_kind[node] == NODE_BITNOT) {
         /* ~x (v25): 全ビット反転は -1 との XOR */
+        if (node_etype[node_lhs[node]] & 64) {
+            errmsg = "浮動小数点に ~ は使えません";
+            return 0;
+        }
         if (!gen_expr(node_lhs[node]))
             return 0;
         asm_push(OP_XORI, REG_T1, REG_T1, 0, -1);
@@ -1269,21 +1413,36 @@ static int gen_expr(int node) {
          * 条件の値は分岐で消費されるので退避は不要 */
         if (!gen_expr(node_lhs[node]))
             return 0;
+        if (node_etype[node_lhs[node]] & 64)
+            emit_fp_bool();  /* double の条件 (v46) */
         int f_jump = emit_beq_t1z();
         if (!gen_expr(node_val[node]))
             return 0;
+        if ((node_etype[node] & 64) &&
+            !(node_etype[node_val[node]] & 64))
+            /* 枝の型が int で全体が double (v46):
+             * 枝の値を double に揃える */
+            emit_cvt_d(REG_FT0, REG_T1, node_etype[node_val[node]]);
         int e_jump = nasm;
         asm_push(OP_JAL, 0, 0, 0, 0);
         asm_imm[f_jump] = nasm;
         if (!gen_expr(node_rhs[node]))
             return 0;
+        if ((node_etype[node] & 64) &&
+            !(node_etype[node_rhs[node]] & 64))
+            emit_cvt_d(REG_FT0, REG_T1, node_etype[node_rhs[node]]);
         asm_imm[e_jump] = nasm;
         return 1;
     }
     if (node_kind[node] == NODE_NEG) {
-        /* -x: 0 から引く (sub t1, zero, t1) */
+        /* -x: 0 から引く (sub t1, zero, t1)。
+         * double なら fneg.d (符号の反転、v46) */
         if (!gen_expr(node_lhs[node]))
             return 0;
+        if (node_etype[node] & 64) {
+            asm_push(OP_FNEG_D, REG_FT0, REG_FT0, REG_FT0, 0);
+            return 1;
+        }
         asm_push(OP_SUB, REG_T1, REG_ZERO, REG_T1, 0);
         emit_canon(node_etype[node]);
         return 1;
@@ -1320,6 +1479,25 @@ static int gen_expr(int node) {
                    node_kind[node] == NODE_PREDEC);
         gen_var_addr(REG_T2, node_val[node]);
         int vet = var_value_etype(node_val[node]);
+        if (vet & 64) {
+            /* double の変数の増減 (v46): 1.0 を ft1 に
+             * 作り、fadd.d / fsub.d で増減する。結果の
+             * 置き場は ft0 (前置は新しい値、後置は古い
+             * 値)。1.0 のビットは定数として作る */
+            asm_push(OP_FLD, REG_FT0, REG_T2, 0, 0);
+            emit_load_i64(REG_A0, 0x3FF00000L << 32);
+            asm_push(OP_FMV_D_X, REG_FT1, REG_A0, 0, 0);
+            if (pre) {
+                asm_push(delta > 0 ? OP_FADD_D : OP_FSUB_D,
+                         REG_FT0, REG_FT0, REG_FT1, 0);
+                asm_push(OP_FSD, 0, REG_T2, REG_FT0, 0);
+            } else {
+                asm_push(delta > 0 ? OP_FADD_D : OP_FSUB_D,
+                         REG_FT1, REG_FT0, REG_FT1, 0);
+                asm_push(OP_FSD, 0, REG_T2, REG_FT1, 0);
+            }
+            return 1;
+        }
         asm_push((vet & 32) ? mem_load_op(vet) : OP_LD,
                  REG_T1, REG_T2, 0, 0);
         if (pre) {
@@ -1344,6 +1522,24 @@ static int gen_expr(int node) {
         if (!gen_elem_addr(operand))
             return 0;
         int eet = elem_etype(operand);
+        if (eet & 64) {
+            /* double の要素の増減 (v46): 変数の版と
+             * 同じ形で、住所は gen_elem_addr が t2 に
+             * 置いたものを使う */
+            asm_push(OP_FLD, REG_FT0, REG_T2, 0, 0);
+            emit_load_i64(REG_A0, 0x3FF00000L << 32);
+            asm_push(OP_FMV_D_X, REG_FT1, REG_A0, 0, 0);
+            if (node_kind[node] == NODE_EPRE) {
+                asm_push(node_val[node] > 0 ? OP_FADD_D : OP_FSUB_D,
+                         REG_FT0, REG_FT0, REG_FT1, 0);
+                asm_push(OP_FSD, 0, REG_T2, REG_FT0, 0);
+            } else {
+                asm_push(node_val[node] > 0 ? OP_FADD_D : OP_FSUB_D,
+                         REG_FT1, REG_FT0, REG_FT1, 0);
+                asm_push(OP_FSD, 0, REG_T2, REG_FT1, 0);
+            }
+            return 1;
+        }
         asm_push(mem_load_op(eet), REG_T1, REG_T2, 0, 0);
         if (node_kind[node] == NODE_EPRE) {
             asm_push(OP_ADDI, REG_T1, REG_T1, 0, node_val[node]);
@@ -1355,6 +1551,11 @@ static int gen_expr(int node) {
         }
         return 1;
     }
+    /* 浮動小数点の二項演算 (v46): どちらかの相手が
+     * double なら、値の置き場が ft0 になる専用の生成へ */
+    if ((node_etype[node_lhs[node]] & 64) ||
+        (node_etype[node_rhs[node]] & 64))
+        return gen_fp_binop(node);
     /* 二項演算: まず左を t1 に */
     if (!gen_expr(node_lhs[node]))
         return 0;
@@ -1451,19 +1652,47 @@ static int gen_expr(int node) {
     return 1;
 }
 
+/* 式を受け側の型に合わせて生成する gen_value_as と、
+ * 浮動小数点の二項演算 gen_fp_binop の本体は
+ * src/03b-genfp.c にある (gen_value_as と gen_fp_binop
+ * の前方宣言は上の「関数の前方宣言」の節に既にある)。
+ * fp_operand_is_ptr の前方宣言だけここに置く (名前の
+ * 登録順を変えないため) */
+static int fp_operand_is_ptr(int node);
+
 /* 呼び出しの引数をスタックに積む (v22): リストの後ろ
  * (右の引数) から先に評価して積む。再帰で「残りを先に」
  * 処理するので、右の引数ほど先に積まれ、スタックの上
  * (sp の近く) には左の引数が来る並びになる。取り出す
  * 側は sp + k*16 を a(k) へ読めば、左から順に対応する。
- * 1つ積むごとに 16 バイト (式の評価の退避と同じ単位) */
-static int gen_call_args(int arg) {
+ * 1つ積むごとに 16 バイト (式の評価の退避と同じ単位)。
+ * v46: 引数は受け側の型に合わせて変換してから積む
+ * (double の引数はビットとして積む。呼び出し規約
+ * そのものは変えない)。f は関数の番号 (本体のある
+ * 関数だけ引数の型が分かる)、sig は署名の番号。
+ * どちらも無ければ変換しない */
+static int gen_call_args(int arg, int f, int sig) {
     if (arg < 0)
         return 1;  /* 積み終わり */
-    if (!gen_call_args(node_next[arg]))
+    if (!gen_call_args(node_next[arg], f, sig))
         return 0;
-    if (!gen_expr(arg))
+    int idx = call_args_idx;
+    call_args_idx = idx - 1;
+    int pet;
+    if (f >= 0 && func_has_body[f] && idx < func_nparams[f])
+        pet = var_etype[func_param_var[f][idx]];
+    else if (sig >= 0 && idx < sig_nparams[sig])
+        pet = sig_petype[sig][idx];
+    else
+        pet = node_etype[arg];  /* 型が分からなければ変換なし */
+    if (!gen_value_as(arg, pet))
         return 0;
+    /* 入れ子の呼び出しが call_args_idx を上書きした
+     * 分を戻す (次の外側の引数の番号は idx - 1) */
+    call_args_idx = idx - 1;
+    if (pet & 64)
+        /* double の引数はビットとして t1 へ戻して積む */
+        asm_push(OP_FMV_X_D, REG_T1, REG_FT0, 0, 0);
     asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
     asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
     return 1;
@@ -1765,8 +1994,12 @@ static int gen_push_args_b(int arg, int sig, int ai) {
     }
     if (!check_fsig(sig_pfsig[sig][ai], arg))
         return 0;
-    if (!gen_expr(arg))
+    /* 引数は受け側の型に合わせて変換する (v46。
+     * double の引数はビットとして積む) */
+    if (!gen_value_as(arg, sig_petype[sig][ai]))
         return 0;
+    if (sig_petype[sig][ai] & 64)
+        asm_push(OP_FMV_X_D, REG_T1, REG_FT0, 0, 0);
     asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
     asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
     return 1;
@@ -1835,6 +2068,9 @@ static int gen_b_call(int node, int mode) {
         /* スカラの戻り値: a0 → t1 + 正規形 (A 方式と同じ) */
         asm_push(OP_ADDI, REG_T1, REG_A0, 0, 0);
         emit_canon(sig_ret_etype[sig]);
+        if (sig_ret_etype[sig] & 64)
+            /* double の戻り値 (v46): ビットを ft0 へ */
+            asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
     }
     return 1;
 }
@@ -1896,6 +2132,17 @@ static void apply_patches(int head, int target) {
 static int gen_switch(int node);  /* switch の生成 (本体は
                                    * gen_stmt の後ろ、v43) */
 
+/* 条件の式を生成し、結果を t1 の 0 / 非0 に揃える
+ * (v46)。double の条件は ft0 に値が残るので、整数の
+ * 0/1 に直してから分岐の道具 (emit_beq_t1z) に渡す */
+static int gen_cond_expr(int node) {
+    if (!gen_expr(node))
+        return 0;
+    if (node_etype[node] & 64)
+        emit_fp_bool();
+    return 1;
+}
+
 static int gen_stmt(int node) {
     int kind = node_kind[node];
     if (kind == NODE_PREINC || kind == NODE_POSTINC ||
@@ -1948,20 +2195,41 @@ static int gen_stmt(int node) {
             if (!check_fsig(want, val_node))
                 return 0;
         }
+        int dst_et = elem_etype(addr_node);
         if (!gen_elem_addr(addr_node))
             return 0;
         if (!is_leaf(val_node)) {
             asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
             asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
-            if (!gen_expr(val_node))
+            /* 値は要素の型に合わせて生成する (v46:
+             * double の要素なら ft0 に残る) */
+            if (!gen_value_as(val_node, dst_et))
                 return 0;
             asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
             asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        } else if (dst_et & 64) {
+            /* double の要素への書き込み (v46): 葉の
+             * 値をビットか整数として t1 に作り、
+             * ft0 へ移すか変換する */
+            gen_load_leaf(REG_T1, val_node);
+            if (node_etype[val_node] & 64)
+                asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
+            else
+                emit_cvt_d(REG_FT0, REG_T1, node_etype[val_node]);
+        } else if (node_etype[val_node] & 64) {
+            /* 整数の要素へ double の値を書く (v46) */
+            gen_load_leaf(REG_T1, val_node);
+            asm_push(OP_FMV_D_X, REG_FT0, REG_T1, 0, 0);
+            emit_cvt_l(dst_et);
+            emit_canon(dst_et);
         } else {
             gen_load_leaf(REG_T1, val_node);
         }
-        asm_push(mem_store_op(elem_etype(addr_node)),
-                 0, REG_T2, REG_T1, 0);
+        if (dst_et & 64)
+            asm_push(OP_FSD, 0, REG_T2, REG_FT0, 0);
+        else
+            asm_push(mem_store_op(dst_et),
+                     0, REG_T2, REG_T1, 0);
         return 1;
     }
     if (kind == NODE_VDECL) {
@@ -1985,8 +2253,16 @@ static int gen_stmt(int node) {
         /* 代入先が関数ポインタなら署名を照合する (v44) */
         if (!check_fsig(var_fsig[node_val[node]], node_lhs[node]))
             return 0;
-        if (!gen_expr(node_lhs[node]))
+        /* 値は代入先の型に合わせて生成する (v46:
+         * double の変数なら ft0 に残る) */
+        int vet = var_value_etype(node_val[node]);
+        if (!gen_value_as(node_lhs[node], vet))
             return 0;
+        if (vet & 64) {
+            gen_var_addr(REG_T2, node_val[node]);
+            asm_push(OP_FSD, 0, REG_T2, REG_FT0, 0);
+            return 1;
+        }
         /* 結果 (t1) を変数の置き場所へ書く (代入、v21) */
         gen_store_var(node_val[node], REG_T1);
         return 1;
@@ -2030,15 +2306,21 @@ static int gen_stmt(int node) {
             errmsg = "構造体の値は構造体にだけ代入できます";
             return 0;
         }
-        if (!gen_expr(node_rhs[node]))
-            return 0;
         int addr = node_lhs[node];
+        /* 値は指す先の型に合わせて生成する (v46:
+         * double の指す先なら ft0 に残る) */
+        int dst_et = deref_etype(addr);
+        if (!gen_value_as(node_rhs[node], dst_et))
+            return 0;
         if (node_kind[addr] == NODE_NUM)
             gen_load_addr_sym(REG_T2, 0, node_val[addr]);
         else /* NODE_VAR: 変数の値そのものが住所 (ポインタ) */
             gen_load_var(REG_T2, node_val[addr]);
-        asm_push(mem_store_op(deref_etype(addr)),
-                 0, REG_T2, REG_T1, 0);
+        if (dst_et & 64)
+            asm_push(OP_FSD, 0, REG_T2, REG_FT0, 0);
+        else
+            asm_push(mem_store_op(dst_et),
+                     0, REG_T2, REG_T1, 0);
         return 1;
     }
     if (kind == NODE_CALL || kind == NODE_ICALL) {
@@ -2073,7 +2355,7 @@ static int gen_stmt(int node) {
          *   else の文...
          * L_end:
          * 飛び先の書き直しは while と同じやり方 */
-        if (!gen_expr(node_lhs[node]))
+        if (!gen_cond_expr(node_lhs[node]))
             return 0;
         int beq_index = emit_beq_t1z();
         int then_body = node_rhs[node];
@@ -2101,7 +2383,7 @@ static int gen_stmt(int node) {
     }
     if (kind == NODE_WHILE) {
         int l_cond = nasm;  /* 条件判定の命令番号 */
-        if (!gen_expr(node_lhs[node]))
+        if (!gen_cond_expr(node_lhs[node]))
             return 0;
         /* beq t1, zero, L_end -- 飛び先はまだ分からないので
          * 仮に 0 を入れておき、下で書き直す */
@@ -2155,7 +2437,7 @@ static int gen_stmt(int node) {
             }
         }
         int l_cond = nasm;
-        if (!gen_expr(node_lhs[node]))
+        if (!gen_cond_expr(node_lhs[node]))
             return 0;
         int beq_index = emit_beq_t1z();
         if (loop_depth >= 32) {
@@ -2272,8 +2554,15 @@ static int gen_stmt(int node) {
             return 0;
         }
         if (node_lhs[node] >= 0) {
-            if (!gen_expr(node_lhs[node]))
+            /* 値は関数の戻り値の型に合わせて生成する
+             * (v46: double を返すなら ft0 に残るので、
+             * ビットとして a0 へ戻す) */
+            int ret_et = gen_cur_func >= 0
+                ? func_ret_etype[gen_cur_func] : 8;
+            if (!gen_value_as(node_lhs[node], ret_et))
                 return 0;
+            if (ret_et & 64)
+                asm_push(OP_FMV_X_D, REG_T1, REG_FT0, 0, 0);
             asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
         }
         emit_patch_jump(&return_patch_head);
@@ -2302,6 +2591,12 @@ static int gen_stmt(int node) {
  * に、負なら slli / srai 32 の符号拡張を足す形で、
  * 式の中の数リテラルと同じ流儀に揃える */
 static int gen_switch(int node) {
+    if (node_etype[node_lhs[node]] & 64) {
+        /* switch の制御式と case は整数の世界 (v46、
+         * doc/float.md の切り捨て) */
+        errmsg = "switch の制御式に浮動小数点は使えません";
+        return 0;
+    }
     if (!gen_expr(node_lhs[node]))
         return 0;
     int et = node_etype[node_lhs[node]];
@@ -2503,6 +2798,37 @@ static int gen_func(int f) {
  * 従来と1バイトも変わらない */
 static int stack_needed;
 
+/* プログラムが浮動小数点を使うか (v46)。名簿と
+ * ノードを先に眺めて決める (stack_needed と同じ流儀)。
+ * ベアメタルの入口は、使うプログラムだけ FPU の
+ * 有効化 (sstatus の FS) を出す: QEMU + OpenSBI の
+ * S モードでは FS が立っていないと浮動小数点命令が
+ * 不正命令になる (fmv だけは通る)。KosabaOS 向けは
+ * OS が有効化するので出さない */
+static int prog_uses_fp;
+
+static int scan_uses_fp(void) {
+    for (int v = 0; v < nvar; v++)
+        if (var_etype[v] & 64)
+            return 1;
+    for (int a = 0; a < narr; a++)
+        if (arr_etype[a] & 64)
+            return 1;
+    for (int m = 0; m < nsmem; m++)
+        if (smem_etype[m] & 64)
+            return 1;
+    for (int f = 0; f < nfunc; f++)
+        if (func_ret_etype[f] & 64)
+            return 1;
+    for (int s = 0; s < nsig; s++)
+        if (sig_ret_etype[s] & 64)
+            return 1;
+    for (int n = 0; n < nnode; n++)
+        if (node_kind[n] == NODE_NUMFP)
+            return 1;
+    return 0;
+}
+
 static int expr_needs_stack(int node) {
     int k = node_kind[node];
     if (k == NODE_ADD || k == NODE_SUB || k == NODE_AND ||
@@ -2693,6 +3019,14 @@ static int gen_all(void) {
         /* lui t0, 0x10000 -- UART ベース 0x10000000 を t0 に作る
          * (KosabaOS ターゲットでは UART を直接触らないので不要) */
         asm_push(OP_LUI, REG_T0, 0, 0, 0x10000);
+        if (prog_uses_fp) {
+            /* FPU の有効化 (v46): sstatus の FS (13ビット
+             * 目) を立てる。値の作り方は gen_load_const、
+             * 立てる命令は csrs。浮動小数点を使う
+             * プログラムの入口だけに出る */
+            gen_load_const(REG_T1, 8192);
+            asm_push(OP_CSRS, 0, REG_T1, 0, 0x100);
+        }
     }
     if (stack_needed && !target_kosaba) {
         /* スタックの用意: 天井の住所を sp に作る
@@ -2711,6 +3045,10 @@ static int gen_all(void) {
     if (prog_has_final) {
         if (!gen_expr(prog_final))
             return 0;
+        if (node_etype[prog_final] & 64)
+            /* 最後の式が double なら、出力の道具が
+             * 読む t1 へビットを戻す (v46) */
+            asm_push(OP_FMV_X_D, REG_T1, REG_FT0, 0, 0);
         if (target_kosaba) {
             /* 最後の式の出力も putc システムコールで */
             asm_push(OP_ADDI, REG_A0, REG_T1, 0, 0);
@@ -2896,6 +3234,8 @@ static int gen_program(void) {
     /* スタックが要るかは生成の前に AST から決める */
     stack_needed = nfunc > 0 || list_needs_stack(prog_stmts) ||
                    (prog_has_final && expr_needs_stack(prog_final));
+    /* 浮動小数点を使うかも生成の前に決める (v46) */
+    prog_uses_fp = scan_uses_fp();
     for (int f = 0; f < nfunc && !stack_needed; f++)
         stack_needed = list_needs_stack(func_body[f]);
     stack_top_addr = LOAD_BASE;  /* 1回目は仮の値 (個数は同じ) */

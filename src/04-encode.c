@@ -268,6 +268,97 @@ static unsigned int encode_inst(int i) {
          * wfi と同じ末尾 0x73 の系統で、上位のビットが違う */
         return 0x00000073u;
     }
+    if (op == OP_FLD) {
+        /* fld rd, imm(rs1) -- I 形式 (v46)。読み込み系
+         * (opcode 0x07) で funct3 が 3 (8バイト幅)。
+         * rd は浮動小数点レジスタ */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (3u << 12) | ((unsigned int)rd << 7) | 0x07u;
+    }
+    if (op == OP_FSD) {
+        /* fsd rs2, imm(rs1) -- S 形式 (v46)。書き込み系
+         * (opcode 0x27) で funct3 が 3。rs2 は浮動小数点
+         * レジスタ */
+        return ((unsigned int)(imm >> 5) << 25) |
+               ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
+               (3u << 12) | ((unsigned int)(imm & 31) << 7) | 0x27u;
+    }
+    if (op == OP_FADD_D || op == OP_FSUB_D || op == OP_FMUL_D ||
+        op == OP_FDIV_D) {
+        /* fadd.d / fsub.d / fmul.d / fdiv.d rd, rs1, rs2
+         * -- R 形式 (v46、opcode 0x53)。funct7 が演算を
+         * 決める: add=0x01、sub=0x05、mul=0x09、div=0x0D
+         * (funct7 の下2ビットは精度の印で、D は 01)。
+         * funct3 は丸め指定で 0 (fcsr のデフォルト) */
+        unsigned int f7 = op == OP_FADD_D ? 0x01u :
+                          op == OP_FSUB_D ? 0x05u :
+                          op == OP_FMUL_D ? 0x09u : 0x0Du;
+        return (f7 << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x53u;
+    }
+    if (op == OP_FEQ_D || op == OP_FLT_D || op == OP_FLE_D) {
+        /* feq.d / flt.d / fle.d rd, rs1, rs2 -- R 形式
+         * (v46)。funct7 は 0x51 で共通、funct3 が比較を
+         * 決める: le=0、lt=1、eq=2。rd は整数レジスタ
+         * (結果は 0/1) */
+        unsigned int f3 = op == OP_FLE_D ? 0u :
+                          op == OP_FLT_D ? 1u : 2u;
+        return (0x51u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (f3 << 12) |
+               ((unsigned int)rd << 7) | 0x53u;
+    }
+    if (op == OP_FMV_D_X) {
+        /* fmv.d.x rd, rs1 -- R 形式 (v46)。funct7 が
+         * 0x79、funct3 は 0。整数レジスタのビットを
+         * そのまま浮動小数点レジスタへ移す */
+        return (0x79u << 25) | ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x53u;
+    }
+    if (op == OP_FMV_X_D) {
+        /* fmv.x.d rd, rs1 -- R 形式 (v46)。funct7 が
+         * 0x71、funct3 は 0。逆向きのビットの移し */
+        return (0x71u << 25) | ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x53u;
+    }
+    if (op == OP_FCVT_D_L || op == OP_FCVT_D_LU) {
+        /* fcvt.d.l / fcvt.d.lu rd, rs1 -- R 形式 (v46)。
+         * funct7 が 0x69、rs2 の欄が変換元 (l=2、
+         * lu=3)。funct3 は丸め指定で 0 (最近接偶数) */
+        unsigned int src = op == OP_FCVT_D_L ? 2u : 3u;
+        return (0x69u << 25) | (src << 20) |
+               ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x53u;
+    }
+    if (op == OP_FCVT_L_D || op == OP_FCVT_LU_D) {
+        /* fcvt.l.d / fcvt.lu.d rd, rs1 -- R 形式 (v46)。
+         * funct7 が 0x61、rs2 の欄が変換先 (l=2、
+         * lu=3)。funct3 は丸め指定で 1 (切り捨て、
+         * C の変換の意味)。範囲外と NaN は飽和する
+         * (ハードウェアの決まり) */
+        unsigned int dst = op == OP_FCVT_L_D ? 2u : 3u;
+        return (0x61u << 25) | (dst << 20) |
+               ((unsigned int)rs1 << 15) | (1u << 12) |
+               ((unsigned int)rd << 7) | 0x53u;
+    }
+    if (op == OP_CSRS) {
+        /* csrrs zero, csr, rs1 -- SYSTEM 系 (v46)。
+         * [ csr << 20 | rs1 << 15 | funct3(2) << 12
+         *   | rd(0) << 7 | opcode 0x73 ]。imm が CSR
+         * 番号 (sstatus = 0x100) */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (2u << 12) | 0x73u;
+    }
+    if (op == OP_FNEG_D || op == OP_FMV_D) {
+        /* fneg.d / fmv.d rd, rs1 -- R 形式 (v46)。
+         * 符号操作系 (fsgnj.d、funct7 が 0x11) で、
+         * funct3 が neg=1 (符号を反転)、mov=0 (符号を
+         * そのまま写す)。どちらも rs2 = rs1 で使う */
+        unsigned int f3 = op == OP_FNEG_D ? 1u : 0u;
+        return (0x11u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (f3 << 12) |
+               ((unsigned int)rd << 7) | 0x53u;
+    }
     /* OP_WFI: 引数を取らない固定パターン */
     return 0x10500073u;
 }
@@ -597,6 +688,24 @@ static char *op_name(int op) {
     if (op == OP_REMU) return "remu";
     if (op == OP_SRL) return "srl";
     if (op == OP_SRAI) return "srai";
+    if (op == OP_FLD) return "fld";
+    if (op == OP_FSD) return "fsd";
+    if (op == OP_FADD_D) return "fadd.d";
+    if (op == OP_FSUB_D) return "fsub.d";
+    if (op == OP_FMUL_D) return "fmul.d";
+    if (op == OP_FDIV_D) return "fdiv.d";
+    if (op == OP_FEQ_D) return "feq.d";
+    if (op == OP_FLT_D) return "flt.d";
+    if (op == OP_FLE_D) return "fle.d";
+    if (op == OP_FMV_D_X) return "fmv.d.x";
+    if (op == OP_FMV_X_D) return "fmv.x.d";
+    if (op == OP_FCVT_D_L) return "fcvt.d.l";
+    if (op == OP_FCVT_D_LU) return "fcvt.d.lu";
+    if (op == OP_FCVT_L_D) return "fcvt.l.d";
+    if (op == OP_FCVT_LU_D) return "fcvt.lu.d";
+    if (op == OP_FNEG_D) return "fneg.d";
+    if (op == OP_FMV_D) return "fmv.d";
+    if (op == OP_CSRS) return "csrs";
     return "?";
 }
 

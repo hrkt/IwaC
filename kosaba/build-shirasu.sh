@@ -82,8 +82,9 @@ apply 02-parse.c '[12288]' '[2048]' 6
 apply 02-parse.c 'nnode >= 12288' 'nnode >= 2048' 1
 apply 02-parse.c 'str_used >= 24575' 'str_used >= 4095' 1
 apply 02-parse.c '[1280]' '[256]' 11
-apply 02-parse.c '[1024]' '[256]' 2
+apply 02-parse.c '[1024]' '[256]' 3
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 256' 1
+apply 02-parse.c 'fp_nbits >= 1024' 'fp_nbits >= 256' 1
 apply 02-parse.c 'nvar >= 1280' 'nvar >= 256' 1
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[1024]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3

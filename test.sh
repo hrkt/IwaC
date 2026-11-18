@@ -827,11 +827,11 @@ echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
 # TU 基準化で一括セルフコンパイルが上限超えになった
 # ため引退した
 if [ -x "$TMP/nori" ]; then
-    for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+    for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
         "$IWAC" --kosaba --elf "src/decls.c" "src/$f.c" > "$TMP/v33-$f.eo" || fail "v33: 断片 $f のオブジェクト化に失敗"
     done
     "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v33-rt.eo" || fail "v33: rt のオブジェクト化に失敗"
-    "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
+    "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-02c-fpconv.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-03b-genfp.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
     size=$(wc -c < "$TMP/v33split.elf")
     [ "$size" -gt 100000 ] || fail "v33: 分割セルフホストの出力が小さすぎる ($size バイト)"
     [ "$size" -lt 1000000 ] || fail "v33: 分割セルフホストの出力が大きすぎる ($size バイト)"
@@ -961,7 +961,7 @@ asari_check() {
     cmp -s "$TMP/v38.eo" "$TMP/v38a.eo" || fail "v38: Asari の出力が内部 encode と違う ($label)"
 }
 asari_check hello examples/hello-kosaba.c
-for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     asari_check "断片 $f" src/decls.c "src/$f.c"
 done
 echo "ok: v38: Asari が全断片で内部 encode とバイト一致"
@@ -1003,7 +1003,7 @@ elf_check() {
 elf_check hello examples/hello-kosaba.c
 # 全断片 (rt と組でリンクし、一括版と比べる)
 V39_OBJS_EO=""
-for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$IWAC" --kosaba --elf src/decls.c "src/$f.c" > "$TMP/v39-$f.eo" || fail "v39: 断片 $f の ELF 出力に失敗"
     V39_OBJS_EO="$V39_OBJS_EO $TMP/v39-$f.eo"
 done
@@ -1403,6 +1403,241 @@ echo "ok: v45: 構造体の値セマンティクス (初期化子つき) のリ�
 cmp -s "$TMP/v45iwac.eo" "$TMP/v45asari.eo" || fail "v45: Asari のオブジェクトが iwac と違う"
 echo "ok: v45: Asari のオブジェクトが iwac と一致 (構造体の値セマンティクス)"
 
+
+# --- v46: 浮動小数点 (double、doc/float.md) ---
+# リテラルの変換の正確さ: ビットパターンを16進で出し、
+# ホストの strtod と一致する値 (事前に照合済み) と比べる
+cat > "$TMP/v46a.c" <<'V46A'
+void puthex(long v) {
+    int i; int sh; int d;
+    for (i = 0; i < 16; i++) {
+        sh = 60 - i * 4;
+        d = (int)((v >> sh) & 15);
+        if (d < 10) putc('0' + d); else putc('a' + d - 10);
+    }
+    putc(10);
+}
+long bits_of(double d) {
+    double *dp = &d;
+    long *bp = (long *)dp;
+    return *bp;
+}
+int main() {
+    puthex(bits_of(1.5));
+    puthex(bits_of(0.1));
+    puthex(bits_of(0.2));
+    puthex(bits_of(0.3));
+    puthex(bits_of(3.141592653589793));
+    puthex(bits_of(1e10));
+    puthex(bits_of(1e-10));
+    puthex(bits_of(1e308));
+    puthex(bits_of(1.7976931348623157e308));
+    puthex(bits_of(5e-324));
+    puthex(bits_of(2.2250738585072014e-308));
+    puthex(bits_of(2.2250738585072011e-308));
+    puthex(bits_of(9007199254740993.0));
+    puthex(bits_of(9007199254740995.0));
+    puthex(bits_of(1e23));
+    puthex(bits_of(0.5));
+    puthex(bits_of(2.5));
+    puthex(bits_of(123456789.123456789));
+    puthex(bits_of(1e-5));
+    puthex(bits_of(6.62607015e-34));
+    puthex(bits_of(4.9406564584124654e-324));
+    puthex(bits_of(2.4703282292062327e-324));
+    puthex(bits_of(0.30000000000000004));
+    puthex(bits_of(1e-310));
+    puthex(bits_of(123.456e-7));
+    putc('E');
+    return 0;
+}
+V46A
+"$IWAC" "$TMP/v46a.c" > "$TMP/v46a.bin"
+check_tail "$TMP/v46a.bin" '3ff8000000000000
+3fb999999999999a
+3fc999999999999a
+3fd3333333333333
+400921fb54442d18
+4202a05f20000000
+3ddb7cdfd9d7bdbb
+7fe1ccf385ebc8a0
+7fefffffffffffff
+0000000000000001
+0010000000000000
+000fffffffffffff
+4340000000000000
+4340000000000002
+44b52d02c7e14af6
+3fe0000000000000
+4004000000000000
+419d6f34547e6b75
+3ee4f8b588e368f1
+390b860bde023111
+0000000000000001
+0000000000000000
+3fd3333333333334
+000012688b70e62b
+3ee9e3fe580f5494
+E' "v46: リテラルの変換 (境界・subnormal・丸めの tie 含む)"
+# 四則・混合演算・キャスト
+cat > "$TMP/v46b.c" <<'V46B'
+long bits_of(double d) {
+    double *dp = &d;
+    long *bp = (long *)dp;
+    return *bp;
+}
+int main() {
+    double a = 1.5;
+    double b = 2.25;
+    int ok = bits_of(a + b) == bits_of(3.75);
+    ok = ok && bits_of(a - b) == bits_of(-0.75);
+    ok = ok && bits_of(a * b) == bits_of(3.375);
+    ok = ok && bits_of(b / a) == bits_of(1.5);
+    ok = ok && bits_of(1.0 / 3.0) == (((long)0x3FD55555 << 32) | (long)0x55555555);
+    ok = ok && bits_of(-a) == bits_of(-1.5);
+    ok = ok && bits_of(1 + 0.25) == bits_of(1.25);
+    ok = ok && bits_of(10 - 2.5) == bits_of(7.5);
+    ok = ok && bits_of(3 * 1.5) == bits_of(4.5);
+    ok = ok && bits_of(7.5 / 2) == bits_of(3.75);
+    ok = ok && (int)3.99 == 3 && (int)(-3.99) == -3;
+    ok = ok && (int32)1e10 == 1410065408;
+    ok = ok && (uint64)1e20 == (uint64)-1;
+    ok = ok && bits_of((double)(uint64)-1) == ((long)0x43F00000 << 32);
+    ok = ok && bits_of((double)-3) == bits_of(-3.0);
+    ok = ok && (long)(a + b) == 3;
+    ok = ok && bits_of(1.0 / 0.0) == ((long)0x7FF00000 << 32);
+    ok = ok && (0.0 / 0.0) != (0.0 / 0.0);
+    ok = ok && (int)(0.0 / 0.0) == (int)(((long)0x7FFFFFFF << 32) | (long)0xFFFFFFFF);
+    a += 0.5;
+    ok = ok && bits_of(a) == bits_of(2.0);
+    a *= 3.0;
+    a -= 1.0;
+    a /= 2.0;
+    ok = ok && bits_of(a) == bits_of(2.5);
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V46B
+"$IWAC" "$TMP/v46b.c" > "$TMP/v46b.bin"
+check_tail "$TMP/v46b.bin" 'Y' "v46: 四則・混合演算・複合代入・キャスト・Inf/NaN"
+# 比較・条件・ループ
+cat > "$TMP/v46c.c" <<'V46C'
+int main() {
+    double a = 0.0;
+    int i = 0;
+    int ok = (1.5 < 2.5) && (2.5 > 1.5) && (1.5 <= 1.5) &&
+             (1.5 >= 1.5) && (1.5 == 1.5) && (1.5 != 2.5);
+    ok = ok && !(1.5 < 1.5) && !(1.5 == 2.5);
+    ok = ok && !0.0 && !(!2.5);
+    ok = ok && (1.5 && 2.5) && !(1.5 && 0.0) && (0.0 || 2.5);
+    while (a < 2.0) {
+        a += 0.5;
+        i++;
+    }
+    ok = ok && i == 4 && a == 2.0;
+    for (a = 0.0; a < 1.0; a = a + 0.25)
+        i++;
+    ok = ok && i == 8;
+    if (a - 1.0 == 0.0)
+        ok = ok && 1;
+    else
+        ok = 0;
+    ok = ok && (1.5 > 1.0 ? 2.5 : 3.5) == 2.5;
+    ok = ok && (1.5 < 1.0 ? 2.5 : 3.5) == 3.5;
+    ok = ok && (0.0 ? 2.5 : 3.5) == 3.5;
+    ok = ok && (1 ? 2.5 : 3) == 2.5;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V46C
+"$IWAC" "$TMP/v46c.c" > "$TMP/v46c.bin"
+check_tail "$TMP/v46c.bin" 'Y' "v46: 比較・論理・条件式・ループ条件"
+# 関数・配列・構造体・関数ポインタ・ポインタ
+cat > "$TMP/v46d.c" <<'V46D'
+typedef double real;
+struct P { char tag; double x; int n; double y; };
+typedef double (*binop_t)(double, double);
+double op_add(double a, double b) { return a + b; }
+double op_mul(double a, double b) { return a * b; }
+binop_t ops[2] = { op_add, op_mul };
+struct P mk(real x) {
+    struct P p;
+    p.tag = 'A'; p.x = x; p.n = 7; p.y = x * 2.0;
+    return p;
+}
+double use_struct(struct P p) { return p.x + p.y; }
+double globalsum;
+real g = 1.5;
+double h = 2;
+double arr[3];
+int main() {
+    struct P p;
+    double loc[2];
+    double d = 6.25;
+    double *dp = &d;
+    binop_t f = ops[1];
+    int ok = g == 1.5 && h == 2.0;
+    arr[0] = 1.25; arr[1] = 2.5; arr[2] = arr[0] + arr[1];
+    ok = ok && arr[2] == 3.75;
+    arr[1]++;
+    ++arr[1];
+    ok = ok && arr[1] == 4.5;
+    loc[0] = 0.5; loc[1] = loc[0] * 4.0;
+    ok = ok && loc[1] == 2.0;
+    p = mk(1.5);
+    ok = ok && p.x == 1.5 && p.y == 3.0 && p.n == 7;
+    ok = ok && use_struct(p) == 4.5;
+    p.x = p.x + 0.5;
+    ok = ok && p.x == 2.0;
+    *dp = *dp + 0.75;
+    ok = ok && d == 7.0 && *dp == 7.0;
+    ok = ok && f(1.5, 4.0) == 6.0 && ops[0](1.5, 4.0) == 5.5;
+    globalsum = op_add(arr[2], loc[1]);
+    ok = ok && globalsum == 5.75;
+    ok = ok && sizeof(double) == 8 && sizeof(struct P) == 32;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V46D
+"$IWAC" "$TMP/v46d.c" > "$TMP/v46d.bin"
+check_tail "$TMP/v46d.bin" 'Y' "v46: 関数・配列・構造体・関数ポインタ・typedef・初期化子"
+check_error 'int main() { double d = 1.5; return (int)(d % 2.0); }' "v46: 浮動小数点の %"
+check_error 'int main() { double d = 1.5; return (int)(d & 2.0); }' "v46: 浮動小数点のビット演算"
+check_error 'int main() { double d = 1.5; return (int)(d << 1); }' "v46: 浮動小数点のシフト"
+check_error 'int main() { double d = 1.5; return (int)(~d); }' "v46: 浮動小数点の ~"
+check_error 'int main() { double d = 1.5; switch (d) { case 1: return 1; } return 0; }' "v46: switch の制御式に浮動小数点"
+check_error 'int main() { int x = 1; switch (x) { case 1.5: return 1; } return 0; }' "v46: case ラベルに浮動小数点"
+check_error 'double a[2] = { 1.5, 2.5 }; int main() { return 0; }' "v46: 浮動小数点の配列初期化子"
+check_error 'int main() { double d = .5; return 0; }' "v46: . から始まるリテラル"
+check_error 'int main() { char *s = "x"; double d = s + 1.5; return 0; }' "v46: ポインタと浮動小数点の演算"
+check_error 'int x = 1.5; int main() { return 0; }' "v46: 整数変数への浮動小数点の初期化子"
+# オブジェクト経路: double を含むプログラムでも、リンク結果が
+# 一括ビルドと一致し、Asari のオブジェクトが iwac と一致すること
+cat > "$TMP/v46obj.c" <<'V46OBJ'
+struct P { double x; int n; };
+struct P mk(double x) { struct P p; p.x = x * 1.5; p.n = 3; return p; }
+double add(double a, double b) { return a + b; }
+int main() {
+    struct P p = mk(2.0);
+    return (int)add(p.x, 1.25);
+}
+V46OBJ
+cat > "$TMP/v46rt.c" <<'V46RT'
+void kosaba_flush(void) { }
+V46RT
+printf 'void kosaba_flush();\n' > "$TMP/v46pre.c"
+"$IWAC" --kosaba "$TMP/v46pre.c" "$TMP/v46obj.c" "$TMP/v46rt.c" > "$TMP/v46direct.elf" || fail "v46: 一括ビルドに失敗"
+"$IWAC" --kosaba --elf "$TMP/v46pre.c" "$TMP/v46obj.c" > "$TMP/v46obj.eo" || fail "v46: オブジェクト出力に失敗"
+"$IWAC" --kosaba --elf "$TMP/v46pre.c" "$TMP/v46rt.c" > "$TMP/v46rt.eo" || fail "v46: rt のオブジェクト出力に失敗"
+"$TMP/nori" "$TMP/v46obj.eo" "$TMP/v46rt.eo" > "$TMP/v46link.elf" || fail "v46: nori でのリンクに失敗"
+cmp -s "$TMP/v46direct.elf" "$TMP/v46link.elf" || fail "v46: リンク結果が一括ビルドと違う"
+echo "ok: v46: double を含むリンクが一括と一致"
+"$IWAC" --kosaba --asari "$TMP/v46pre.c" "$TMP/v46obj.c" "$TMP/v46rt.c" > "$TMP/v46.ias" || fail "v46: Asari 形式の出力に失敗"
+"$TMP/asari" "$TMP/v46.ias" > "$TMP/v46asari.eo" || fail "v46: Asari が失敗"
+"$IWAC" --kosaba --elf "$TMP/v46pre.c" "$TMP/v46obj.c" "$TMP/v46rt.c" > "$TMP/v46iwac.eo" || fail "v46: オブジェクト出力 (一括) に失敗"
+cmp -s "$TMP/v46iwac.eo" "$TMP/v46asari.eo" || fail "v46: Asari のオブジェクトが iwac と違う"
+echo "ok: v46: Asari のオブジェクトが iwac と一致 (浮動小数点)"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに
@@ -1410,7 +1645,7 @@ echo "ok: v45: Asari のオブジェクトが iwac と一致 (構造体の値セ
 # (段3で上限が TU 基準になり、iwac 自身の一括は上限
 # 超えになったため、一括側は nori 本体で代表する)
 "$IWAC" --kosaba --stats nori/nori.c libdashi/libdashi.c kosaba/kosaba_rt.c > /dev/null 2> "$TMP/cap-all.txt"
-for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$IWAC" --kosaba --elf --stats src/decls.c "src/$f.c" > /dev/null 2> "$TMP/cap-$f.txt"
 done
 capmax() {

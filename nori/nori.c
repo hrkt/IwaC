@@ -42,7 +42,10 @@ static int MAX_SEQ = 4096;     /* 登録順の控え */
    の 1MB 枠に収めるための手 (doc/notes.md の手札を実行) */
 static char share_buf[393216]; /* in_buf と out_code の共有置き場 */
 static char *in_buf;           /* オブジェクト1つの全文 (share_buf) */
-static char code_pool[262144]; /* 全オブジェクトのコード */
+static char code_pool[294912]; /* 全オブジェクトのコード
+                                * (v46 で 262144 → 294912:
+                                * iwac のコード合計が
+                                * 262,660 になり溢れた) */
 static char str_pool[131072];  /* 全オブジェクトの文字列 */
 static char ainit_buf[262144]; /* 配列の初期値のバイト列 (v40) */
 static char *out_code;         /* 並べた後のコード (share_buf) */
@@ -207,10 +210,14 @@ static long in_len;
  * 形式の設計は doc/elf-object.md。中身は内部構造
  * (名前表・登録順・穴の控え) に写し、配置と
  * 穴埋めは後段が担う */
-static int esym_tag[16384];  /* 0 = 名前あり、1 = 文字列
+static int esym_tag[8192];  /* 0 = 名前あり、1 = 文字列
                               * セクション、2 = 絶対、3 = その他、
                               * 4 = 名前あり (弱い) */
-static int esym_sym[16384];  /* 名前 → 名前表の番号 */
+static int esym_sym[8192];  /* 名前 → 名前表の番号。
+                             * 大きさは「オブジェクト1つの
+                             * シンボル表の最大」用 (v46 で
+                             * 16384 → 8192 に分離: 実測最大は
+                             * 2,655。穴の表とは別枠にした) */
 static int eabs_idx[256];
 static long eabs_val[256];
 static int neabs;
@@ -362,7 +369,7 @@ static int read_object_elf(int obj) {
     eget_shdr(shoff, text_i);
     obj_code_len[obj] = (int)esec_size;
     for (long k = 0; k < esec_size; k++) {
-        if (code_used >= 262144)
+        if (code_used >= 294912)
             return fail("コードが入りません");
         code_pool[code_used] = in_buf[esec_off + k];
         code_used++;
@@ -398,7 +405,7 @@ static int read_object_elf(int obj) {
         earr_off = esec_off;
         earr_type = (int)esec_type;
     }
-    if (nsym_e > 16384)
+    if (nsym_e > 8192)
         return fail("シンボルが多すぎます");
     neabs = 0;
     nedata = 0;
@@ -725,7 +732,7 @@ static int layout(void) {
         int s = seq_sym[i];
         if (sym_kind[s] != 1 || sym_obj[s] < 0 || sym_place[s] >= 0)
             continue;
-        if (out_len + sym_size[s] > 262144)
+        if (out_len + sym_size[s] > 294912)
             return fail("コードが大きすぎます");
         sym_place[s] = out_len;
         sym_addr[s] = CODE_BASE + out_len;  /* 0x40000000 */

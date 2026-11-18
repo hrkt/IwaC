@@ -15,15 +15,19 @@
 #     (展開後もほぼ同量)
 #
 # 容量プロファイル (標準 → 断片):
-#   ノード表        12288 → 8192
+#   ノード表        12288 → 8448 (v46 で 8192 から引き上げ:
+#                   実測ピーク 8,248 は 03-gen)
 #   命令表          標準と同じ 24576 (段3で TU 基準化され、
-#                   断片 TU の実測最大 20,244 に収まるため下げない)
-#   再配置表         6144 → 2048
-#   変数表           1280 → 512
-#   文字列プール    16384 → 8192 バイト (個数 512 は不変)
+#                   断片 TU の実測最大 22,356 に収まるため下げない)
+#   再配置表         6144 → 2304 (v46 で 2048 から引き上げ:
+#                   実測ピーク 2,086 は 03-gen)
+#   変数表           1280 → 576 (v46 で 512 から引き上げ:
+#                   実測ピーク 506 は 02-parse)
+#   文字列プール    24576 → 8192 バイト
 #   ソース上限      約464KB → 160KB
 #   展開バッファ    約464KB → 160KB
 #   配列初期値プール 49152 → 4096 要素 (v40)
+#   浮動小数点リテラル表 1024 → 512 個 (v46)
 # 狙いは静的データ 1MB 未満 (K210 のデータ領域)。
 # 出来た ELF のデータ量を最後に測り、1MB 以上なら
 # 失敗として止まる (段6 の判定そのもの)。
@@ -68,19 +72,20 @@ apply() {
 
 # 02-parse.c: ノード表・変数表・文字列プール
 apply 02-parse.c 'str_pool[24576]' 'str_pool[8192]' 1
-apply 02-parse.c '[12288]' '[8192]' 6
-apply 02-parse.c 'nnode >= 12288' 'nnode >= 8192' 1
+apply 02-parse.c '[12288]' '[8448]' 6
+apply 02-parse.c 'nnode >= 12288' 'nnode >= 8448' 1
 apply 02-parse.c 'str_used >= 24575' 'str_used >= 8191' 1
-apply 02-parse.c '[1280]' '[512]' 11
-apply 02-parse.c '[1024]' '[512]' 2
+apply 02-parse.c '[1280]' '[576]' 11
+apply 02-parse.c '[1024]' '[512]' 3
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 512' 1
-apply 02-parse.c 'nvar >= 1280' 'nvar >= 512' 1
+apply 02-parse.c 'fp_nbits >= 1024' 'fp_nbits >= 512' 1
+apply 02-parse.c 'nvar >= 1280' 'nvar >= 576' 1
 # 配列初期値プール (v40): 表と 02b 側のガードを一緒に
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[4096]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 4096' 3
 # 03-gen.c: 命令表 (5つ+パッチ表+緩和の印) と再配置表
-apply 03-gen.c '[6144]' '[2048]' 3
-apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2048' 1
+apply 03-gen.c '[6144]' '[2304]' 3
+apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2304' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)、表示 (2か所)
 apply 05-input.c 'src_buf[475136]' 'src_buf[163840]' 1
 apply 05-input.c '475135' '163839' 4
@@ -98,7 +103,7 @@ cat ../src/0*.c > "$WORK/iwac_std_all.c"
 # 容量だけが違うことの確認: 全断片のオブジェクトが
 # 標準と一致すること (断片プロファイルの本分)
 mkdir -p "$WORK/objs"
-for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$WORK/iwac-std" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-std.eo"
     "$WORK/iwac-frag" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-frag.eo"
     if ! cmp -s "$WORK/objs/$f-std.eo" "$WORK/objs/$f-frag.eo"; then

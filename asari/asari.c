@@ -85,10 +85,28 @@ static int OP_DIVU = 36;
 static int OP_REMU = 37;
 static int OP_SRL = 38;
 static int OP_SRAI = 39;
+static int OP_FLD = 40;
+static int OP_FSD = 41;
+static int OP_FADD_D = 42;
+static int OP_FSUB_D = 43;
+static int OP_FMUL_D = 44;
+static int OP_FDIV_D = 45;
+static int OP_FEQ_D = 46;
+static int OP_FLT_D = 47;
+static int OP_FLE_D = 48;
+static int OP_FMV_D_X = 49;
+static int OP_FMV_X_D = 50;
+static int OP_FCVT_D_L = 51;
+static int OP_FCVT_D_LU = 52;
+static int OP_FCVT_L_D = 53;
+static int OP_FCVT_LU_D = 54;
+static int OP_FNEG_D = 55;
+static int OP_FMV_D = 56;
+static int OP_CSRS = 57;
 
 /* op の名前 → 番号。名前の表は iwac 本体の
  * op_name (src/04-encode.c) と対になる */
-static char *op_names[40];
+static char *op_names[58];
 static int op_inited;
 static void op_init(void) {
     op_names[OP_LUI] = "lui";
@@ -131,11 +149,29 @@ static void op_init(void) {
     op_names[OP_REMU] = "remu";
     op_names[OP_SRL] = "srl";
     op_names[OP_SRAI] = "srai";
+    op_names[OP_FLD] = "fld";
+    op_names[OP_FSD] = "fsd";
+    op_names[OP_FADD_D] = "fadd.d";
+    op_names[OP_FSUB_D] = "fsub.d";
+    op_names[OP_FMUL_D] = "fmul.d";
+    op_names[OP_FDIV_D] = "fdiv.d";
+    op_names[OP_FEQ_D] = "feq.d";
+    op_names[OP_FLT_D] = "flt.d";
+    op_names[OP_FLE_D] = "fle.d";
+    op_names[OP_FMV_D_X] = "fmv.d.x";
+    op_names[OP_FMV_X_D] = "fmv.x.d";
+    op_names[OP_FCVT_D_L] = "fcvt.d.l";
+    op_names[OP_FCVT_D_LU] = "fcvt.d.lu";
+    op_names[OP_FCVT_L_D] = "fcvt.l.d";
+    op_names[OP_FCVT_LU_D] = "fcvt.lu.d";
+    op_names[OP_FNEG_D] = "fneg.d";
+    op_names[OP_FMV_D] = "fmv.d";
+    op_names[OP_CSRS] = "csrs";
     op_inited = 1;
 }
 
 static int op_lookup(char *name) {
-    for (int i = 0; i < 40; i++)
+    for (int i = 0; i < 58; i++)
         if (ds_streq(op_names[i], name))
             return i;
     return -1;
@@ -661,6 +697,42 @@ static long encode_inst(int i) {
             (rd << 7) | 0x6f;
     } else if (op == OP_ECALL) {
         w = 0x73;
+    } else if (op == OP_FLD) {
+        /* fld (v46): 本体の符号化と同じ並び */
+        w = (imm << 20) | (rs1 << 15) | (3 << 12) |
+            (rd << 7) | 0x07;
+    } else if (op == OP_FSD) {
+        w = ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) |
+            (3 << 12) | ((imm & 31) << 7) | 0x27;
+    } else if (op == OP_FADD_D || op == OP_FSUB_D ||
+               op == OP_FMUL_D || op == OP_FDIV_D) {
+        long f7 = op == OP_FADD_D ? 1 : op == OP_FSUB_D ? 5 :
+                  op == OP_FMUL_D ? 9 : 0x0D;
+        w = (f7 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (rd << 7) | 0x53;
+    } else if (op == OP_FEQ_D || op == OP_FLT_D ||
+               op == OP_FLE_D) {
+        long f3 = op == OP_FLE_D ? 0 : op == OP_FLT_D ? 1 : 2;
+        w = (0x51 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (f3 << 12) | (rd << 7) | 0x53;
+    } else if (op == OP_FMV_D_X) {
+        w = (0x79 << 25) | (rs1 << 15) | (rd << 7) | 0x53;
+    } else if (op == OP_FMV_X_D) {
+        w = (0x71 << 25) | (rs1 << 15) | (rd << 7) | 0x53;
+    } else if (op == OP_FCVT_D_L || op == OP_FCVT_D_LU) {
+        long src = op == OP_FCVT_D_L ? 2 : 3;
+        w = (0x69 << 25) | (src << 20) | (rs1 << 15) |
+            (rd << 7) | 0x53;
+    } else if (op == OP_FCVT_L_D || op == OP_FCVT_LU_D) {
+        long dst = op == OP_FCVT_L_D ? 2 : 3;
+        w = (0x61 << 25) | (dst << 20) | (rs1 << 15) |
+            (1 << 12) | (rd << 7) | 0x53;
+    } else if (op == OP_FNEG_D || op == OP_FMV_D) {
+        long f3 = op == OP_FNEG_D ? 1 : 0;
+        w = (0x11 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (f3 << 12) | (rd << 7) | 0x53;
+    } else if (op == OP_CSRS) {
+        w = (imm << 20) | (rs1 << 15) | (2 << 12) | 0x73;
     } else {
         /* OP_WFI */
         w = 0x10500073;

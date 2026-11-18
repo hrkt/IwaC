@@ -6,25 +6,28 @@
 # と対で、KosabaOS の 1MB 級データ領域でも
 # Misoni のチェーン全体が回るようにする。
 #
-# 実測のピーク (2026-11-06、iwac 自身のリンク):
-#   最大のオブジェクト 144,706 バイト (02-parse.iwo)
-#   コード合計 120,556 バイト / 文字列合計 7,688
-#   再配置 約 3,164 / 名前 約 510 (登録順の控え 約 950)
+# 実測のピーク (2026-11-19、v46、iwac 自身のリンク):
+#   最大のオブジェクト 280,488 バイト (03-gen.eo)
+#   コード合計 262,660 / 文字列合計 17,106
+#   再配置 6,898 / 名前 568 (登録順の控え 2,277)
+#   名前プール 6,480 バイト / オブジェクト1つの
+#   シンボル表は最大 2,655 件 (03-gen.eo)
+#   配列初期値の穴埋め (afix) は 0 件
 #
 # 容量プロファイル (標準 → 断片):
-#   名前表         4096 → 768 (配列 15 本とも。
-#     v40 で配列初期値の控え 2 本が増えた)
-#   登録順         4096 → 1792
-#   再配置表      16384 → 6656 (v45 で増量: iwac の
-#     再配置の実測合計が 6,105 になり 6144 を超えた)
-#   入力バッファ 約384KB → 約250KB (最大オブジェクト
-#     253,560 バイト (03-gen.eo、v45) が入る大きさ)
-#   コード置き場  256KB → 約228KB (iwac のコード
-#     合計の実測 231,080 に合わせた)
-#   文字列置き場  128KB → 16KB
-#   名前プール     64KB → 8KB (実測 5,884)
+#   名前表         4096 → 672 (配列 15 本とも)
+#   登録順         4096 → 2560
+#   再配置表      16384 → 7168
+#   シンボル表の鏡 8192 → 3072 (esym、v46 で新設)
+#   入力バッファ 約384KB → 276KB (最大オブジェクト
+#     280,488 バイトが入る大きさ)
+#   コード置き場  288KB → 258KB (コード合計の
+#     実測 262,660 に合わせた)
+#   文字列置き場  128KB → 18KB
+#   名前プール     64KB → 7KB (実測 6,480)
 #   配列初期値    256KB → 1KB (v40。断片プロファイルの
 #     仕事は iwac 自身のリンクで、初期値は現れない)
+#   afix の控え   1024 → 256 (実測 0 件)
 # 狙いは静的データ 1MB 未満。最後に測り、以上なら
 # 失敗として止まる。
 #
@@ -60,36 +63,44 @@ apply() {
 }
 
 # 名前表: まず登録順 (seq) を名指しで替えてから残りを一括
-apply nori.c 'seq_sym[4096]' 'seq_sym[1792]' 1
-apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 1792' 1
-apply nori.c '[4096]' '[768]' 15
-apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 768' 1
+apply nori.c 'seq_sym[4096]' 'seq_sym[2560]' 1
+apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2560' 1
+apply nori.c '[4096]' '[672]' 15
+apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 672' 1
 # 再配置表
-apply nori.c '[16384]' '[6656]' 7
-apply nori.c 'MAX_REL = 16384' 'MAX_REL = 6656' 1
+apply nori.c '[16384]' '[7168]' 5
+apply nori.c 'MAX_REL = 16384' 'MAX_REL = 7168' 1
+# オブジェクト1つのシンボル表の鏡 (esym、v46 で穴の表と分離)
+apply nori.c 'esym_tag[8192]' 'esym_tag[3072]' 1
+apply nori.c 'esym_sym[8192]' 'esym_sym[3072]' 1
+apply nori.c 'nsym_e > 8192' 'nsym_e > 3072' 1
 # 共有バッファ (in_buf と out_code の相乗り、v44) と読みのガード
-apply nori.c 'share_buf[393216]' 'share_buf[255872]' 1
-apply nori.c '393216 - in_len' '255872 - in_len' 1
-apply nori.c 'in_len >= 393216' 'in_len >= 255872' 1
+apply nori.c 'share_buf[393216]' 'share_buf[282624]' 1
+apply nori.c '393216 - in_len' '282624 - in_len' 1
+apply nori.c 'in_len >= 393216' 'in_len >= 282624' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[262144]' 'code_pool[233472]' 1
-apply nori.c 'code_used >= 262144' 'code_used >= 233472' 1
-apply nori.c '> 262144' '> 233472' 1
-# 配列の初期値の置き場 (v40)
+apply nori.c 'code_pool[294912]' 'code_pool[264192]' 1
+apply nori.c 'code_used >= 294912' 'code_used >= 264192' 1
+apply nori.c '> 294912' '> 264192' 1
+# 配列の初期値の置き場 (v40) と、その穴埋めの控え (afix)
 apply nori.c 'ainit_buf[262144]' 'ainit_buf[1024]' 1
 apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 1024' 1
+apply nori.c 'afix_arr[1024]' 'afix_arr[256]' 1
+apply nori.c 'afix_off[1024]' 'afix_off[256]' 1
+apply nori.c 'afix_func[1024]' 'afix_func[256]' 1
+apply nori.c 'nafix >= 1024' 'nafix >= 256' 1
 # 文字列置き場と名前プール
-apply nori.c 'str_pool[131072]' 'str_pool[16384]' 1
-apply nori.c 'str_used >= 131072' 'str_used >= 16384' 1
-apply nori.c 'name_pool[65536]' 'name_pool[8192]' 1
-apply nori.c 'name_used >= 65536' 'name_used >= 8192' 1
+apply nori.c 'str_pool[131072]' 'str_pool[18432]' 1
+apply nori.c 'str_used >= 131072' 'str_used >= 18432' 1
+apply nori.c 'name_pool[65536]' 'name_pool[7168]' 1
+apply nori.c 'name_used >= 65536' 'name_used >= 7168' 1
 
 # 標準の iwac (ホスト版) でオブジェクト一式を用意する
 cat ../src/0*.c > "$WORK/iwac_all.c"
 "$HOSTCC" -std=c11 -Wall -Wextra -O2 -o "$WORK/iwac-std" "$WORK/iwac_all.c"
 mkdir -p "$WORK/objs"
 OBJS=""
-for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$WORK/iwac-std" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f.eo"
     OBJS="$OBJS objs/$f.eo"
 done

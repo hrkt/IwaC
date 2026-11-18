@@ -341,7 +341,9 @@ static int parse_stmt_list(int in_brace) {
  * のは数、文字列、単項 - !、二項の算術・ビット演算だけ
  * (変数や呼び出しは定数ではない)。戻り値: 1 = 数値定数
  * (*out に値)、2 = 文字列 (*out に文字列番号。実際の値は
- * 文字列の住所で、生成のときに決まる)、0 = 定数でない */
+ * 文字列の住所で、生成のときに決まる)、0 = 定数でない。
+ * v46 で 4 = 浮動小数点のリテラル (*out にビット
+ * パターン) が加わった */
 static int eval_const(int node, long *out) {
     int k = node_kind[node];
     if (k == NODE_FADDR) {
@@ -358,12 +360,30 @@ static int eval_const(int node, long *out) {
         *out = node_val[node] & 0xFFFFFFFFL;
         return 1;
     }
+    if (k == NODE_NUMFP) {
+        /* 浮動小数点のリテラル (v46): 種別 4 で、
+         * *out にはビットパターンをそのまま入れる。
+         * 受けるのはファイル範囲の double の初期化
+         * 子だけ (parse_decl_stmt が種別を見て振り
+         * 分ける)。case ラベルなど他の使い手は
+         * 種別 1 だけを受けるので、従来どおり整数
+         * 専用のまま */
+        *out = fp_bits[node_val[node]];
+        return 4;
+    }
     if (k == NODE_STR) {
         *out = node_val[node];
         return 2;
     }
     if (k == NODE_NEG) {
-        if (eval_const(node_lhs[node], out) != 1)
+        int ck = eval_const(node_lhs[node], out);
+        if (ck == 4) {
+            /* 浮動小数点の符号反転は最上位ビットの
+             * 反転 (v46) */
+            *out = *out ^ (long)(1UL << 63);
+            return 4;
+        }
+        if (ck != 1)
             return 0;
         *out = -*out;
         return 1;
@@ -1626,6 +1646,23 @@ static int parse_decl_stmt(void) {
                 }
             } else if (fsig != 0 && !(kind == 1 && v == 0)) {
                 errmsg = "関数ポインタの初期化子は関数名か 0 だけです";
+                return -1;
+            }
+            if ((etype & 64) && plevel == 0) {
+                /* double の初期化子 (v46): 浮動小数点の
+                 * リテラル (種別 4) はビットをそのまま
+                 * 置くので種別を通常の数 (1) に直し、
+                 * 整数 (種別 1) は値の変換が要る */
+                if (kind == 4)
+                    kind = 1;
+                else if (kind == 1)
+                    v = fp_bits_from_long(v);
+                else {
+                    errmsg = "double の初期化子は数だけです";
+                    return -1;
+                }
+            } else if (kind == 4) {
+                errmsg = "浮動小数点の初期化子は double の変数だけです";
                 return -1;
             }
             if (var_init_kind[var] != 0) {
