@@ -8,14 +8,23 @@ doc/roadmap.md の「セルフホストへの階段」にあり、ここには
 ## 完了の定義（固定点）
 
 1. gcc でビルドした iwac（ホスト版、または kosaba 版
-   iwac.elf）が、kosaba_rt.c + iwac.c をコンパイルして
-   iwac2.elf を作る
-2. KosabaOS 上で iwac2.elf が同じ入力をコンパイルして
+   iwac.elf）が、iwac を分割ビルドして iwac2.elf を
+   作る。分割ビルドとは、共有宣言の src/decls.c を
+   各断片の前に置いて断片ごとにオブジェクトを作り、
+   nori でリンクする形で、駆動は Misoni が担う
+2. KosabaOS 上で iwac2.elf が同じ分割ビルドで
    iwac3.elf を作る
 3. **iwac2.elf と iwac3.elf がバイト一致する**（固定点）。
    一致すれば「自分で自分を作れる」ことが証明できる
 4. ついでに iwac2.elf が hello.c をコンパイルして
    Hello World が動くこと
+
+（2026-11-18 に定義を一括コンパイルから分割ビルドへ
+移した。経緯と段立ては doc/split-selfhost.md。
+移行時点では一括と分割の生成物はバイト一致して
+おり、digest は変わっていない。一括コンパイルは
+言語機能として残るが、セルフホストの物差しでは
+なくなった）
 
 ## 地ならし（実測、2026-11-02）
 

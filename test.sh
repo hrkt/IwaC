@@ -733,6 +733,10 @@ check_tail "$TMP/v27deref.bin" ABCDE "v27: 関数をまたぐ大きな値と *p 
 # iwac が自分自身 (+ ランタイム) をコンパイルできること。
 # OS 上での固定点 (iwac2 == iwac3) の確認は統合検証として
 # 別途実施 (doc/selfhost.md)
+# (2026-11-18、doc/split-selfhost.md 段2) 固定点の定義は
+# 分割ビルドへ移った。この一括ビルドは、移行期の追加の
+# 物差し (分割との一致確認) と容量レポートの入力として
+# 残す。正の iwac2 は v33 の節で作る分割ビルドの方
 "$IWAC" --kosaba src/0*.c kosaba/kosaba_rt.c > "$TMP/v27self.elf" || fail "v27: セルフコンパイルに失敗"
 size=$(wc -c < "$TMP/v27self.elf")
 # v28 で ELF は BSS 方式になり、iwac2.elf は約3.0MB から
@@ -819,7 +823,9 @@ fi
 "$IWAC" --kosaba 'int x = 1; int x = 2; int main() { return x; }' >/dev/null 2>&1 && fail "v33: 初期値の二重が通ってしまった"
 echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
 # 分割セルフホスト: 断片ごとにオブジェクト化し、nori で
-# つないだ iwac2 が、一括の iwac2 (v27 の節) とバイト一致
+# つないだものが正の iwac2 (2026-11-18 に定義を移行、
+# doc/split-selfhost.md 段2)。一括 (v27 の節) との
+# バイト一致は移行期の追加の物差しとして残す
 if [ -x "$TMP/nori" ]; then
     for f in 01-head 02-parse 02b-decl 03-gen 04-encode 05-input 06-preproc 07-main; do
         "$IWAC" --kosaba --elf "src/decls.c" "src/$f.c" > "$TMP/v33-$f.eo" || fail "v33: 断片 $f のオブジェクト化に失敗"
@@ -828,6 +834,7 @@ if [ -x "$TMP/nori" ]; then
     "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
     cmp -s "$TMP/v27self.elf" "$TMP/v33split.elf" || fail "v33: 分割と一括で iwac2 が違う"
     echo "ok: v33: 分割セルフホスト (断片→nori) が一括とバイト一致"
+    cp "$TMP/v33split.elf" "$TMP/iwac2.elf"
 else
     echo "skip: v33: 分割セルフホスト (nori が無いため)"
 fi
@@ -842,7 +849,7 @@ if [ -x "$TMP/nori" ]; then
     cp "$IWAC" "$TMP/v34/iwac"
     cp "$TMP/nori" "$TMP/v34/nori/nori"
     (cd "$TMP/v34" && ./misoni/misoni.sh > misoni.log 2>&1) || fail "段5: Misoni での分割ビルドに失敗"
-    cmp -s "$TMP/v27self.elf" "$TMP/v34/iwac2.elf" || fail "段5: Misoni の iwac2 が一括と違う"
+    cmp -s "$TMP/iwac2.elf" "$TMP/v34/iwac2.elf" || fail "段5: Misoni の iwac2 が分割ビルドの iwac2 と違う"
     echo "ok: 段5: Misoni (マニフェスト駆動) でも iwac2 がバイト一致"
     # v34: --out は出力そのものを変えない (名前は OS 上でのみ効く)
     "$IWAC" --kosaba --elf examples/hello-kosaba.c > "$TMP/v34/plain.eo" || fail "v34: オブジェクト化に失敗"
