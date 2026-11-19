@@ -403,6 +403,17 @@
  * 名簿はデータ予算の都合で char に +1 符号化で
  * 詰めてある (タグ32個・メンバ合計160まで)
  *
+ * v48 は do-while と sizeof(式) (設計は
+ * doc/dowhile-sizeof.md): do-while は新種
+ * NODE_DOWHILE (62) で、欄の使い方は NODE_WHILE
+ * と同じ。生成は本体を先に置き、条件を後ろで
+ * 判定する (continue の飛び先は条件、break は
+ * 末尾)。sizeof は式の形が加わり、parse が
+ * 単項式を読み、評価せずに木から大きさだけを
+ * 求めて定数にする (型の見積もりは生成の
+ * type_node の規則に合わせる)。配列の大きさ
+ * にも sizeof が書ける
+ *
  * v47 は enum と union (設計は doc/enum-union.md):
  * enum は「名前 → 値」の表 (列挙子 256・タグ 32) を
  * parse に持ち、式の中の列挙子は数のノードに化ける

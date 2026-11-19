@@ -6,28 +6,31 @@
 # と対で、KosabaOS の 1MB 級データ領域でも
 # Misoni のチェーン全体が回るようにする。
 #
-# 実測のピーク (2026-11-19、v47、iwac 自身のリンク):
-#   最大のオブジェクト 281,008 バイト (03-gen.eo)
-#   コード合計 268,824 / 文字列合計 18,153
-#   再配置 7,074 / 名前 582 (登録順の控え 2,317)
-#   名前プール 6,649 バイト / オブジェクト1つの
-#   シンボル表は最大 2,668 件 (03-gen.eo)
+# 実測のピーク (2026-11-19、v48、iwac 自身のリンク):
+#   最大のオブジェクト 284,312 バイト (03-gen.eo)
+#   コード合計 277,548 / 文字列合計 18,315
+#   再配置 7,375 / 名前 589 (登録順の控え 2,320)
+#   名前プール 6,736 バイト / オブジェクト1つの
+#   シンボル表は最大 2,693 件 (03-gen.eo)
 #   配列初期値の穴埋め (afix) は 0 件
 #
 # 容量プロファイル (標準 → 断片):
-#   名前表         4096 → 640 (配列 15 本とも)
-#   登録順         4096 → 2432
-#   再配置表      16384 → 7296
-#   シンボル表の鏡 8192 → 2816 (esym、v46 で新設)
-#   入力バッファ 約384KB → 276KB (最大オブジェクト
-#     281,008 バイトが入る大きさ)
-#   コード置き場  288KB → 264KB (コード合計の
-#     実測 268,824 に合わせた)
-#   文字列置き場  128KB → 19KB
-#   名前プール     64KB → 7KB (実測 6,649)
-#   配列初期値    256KB → 1KB (v40。断片プロファイルの
-#     仕事は iwac 自身のリンクで、初期値は現れない)
-#   afix の控え   1024 → 128 (実測 0 件)
+#   名前表         4096 → 608 (配列 15 本とも)
+#   登録順         4096 → 2368
+#   再配置表      16384 → 7424
+#   シンボル表の鏡 8192 → 2752 (esym、v46 で新設)
+#   入力バッファ 約384KB → 280KB (最大オブジェクト
+#     284,312 バイトが入る大きさ)
+#   コード置き場  288KB → 272KB (コード合計の
+#     実測 277,548 に合わせた)
+#   文字列置き場  128KB → 18KB
+#   名前プール     64KB → 6.75KB (実測 6,736)
+#   配列初期値    256KB → 512B (v48 で 1KB から下げる。
+#     断片プロファイルの仕事は iwac 自身のリンクで、
+#     初期値は現れない)
+#   afix の控え   1024 → 64 (実測 0 件)
+#   edata / eabs  256 → 64 (v48 で新設。どちらも
+#     iwac 自身のリンクでは 0 件の実測)
 # 狙いは静的データ 1MB 未満。最後に測り、以上なら
 # 失敗として止まる。
 #
@@ -63,37 +66,47 @@ apply() {
 }
 
 # 名前表: まず登録順 (seq) を名指しで替えてから残りを一括
-apply nori.c 'seq_sym[4096]' 'seq_sym[2432]' 1
-apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2432' 1
-apply nori.c '[4096]' '[640]' 15
-apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 640' 1
+apply nori.c 'seq_sym[4096]' 'seq_sym[2368]' 1
+apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2368' 1
+apply nori.c '[4096]' '[608]' 15
+apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 608' 1
 # 再配置表
-apply nori.c '[16384]' '[7296]' 5
-apply nori.c 'MAX_REL = 16384' 'MAX_REL = 7296' 1
+apply nori.c '[16384]' '[7424]' 5
+apply nori.c 'MAX_REL = 16384' 'MAX_REL = 7424' 1
 # オブジェクト1つのシンボル表の鏡 (esym、v46 で穴の表と分離)
-apply nori.c 'esym_tag[8192]' 'esym_tag[2816]' 1
-apply nori.c 'esym_sym[8192]' 'esym_sym[2816]' 1
-apply nori.c 'nsym_e > 8192' 'nsym_e > 2816' 1
+apply nori.c 'esym_tag[8192]' 'esym_tag[2752]' 1
+apply nori.c 'esym_sym[8192]' 'esym_sym[2752]' 1
+apply nori.c 'nsym_e > 8192' 'nsym_e > 2752' 1
 # 共有バッファ (in_buf と out_code の相乗り、v44) と読みのガード
-apply nori.c 'share_buf[393216]' 'share_buf[282624]' 1
-apply nori.c '393216 - in_len' '282624 - in_len' 1
-apply nori.c 'in_len >= 393216' 'in_len >= 282624' 1
+apply nori.c 'share_buf[393216]' 'share_buf[286720]' 1
+apply nori.c '393216 - in_len' '286720 - in_len' 1
+apply nori.c 'in_len >= 393216' 'in_len >= 286720' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[294912]' 'code_pool[270336]' 1
-apply nori.c 'code_used >= 294912' 'code_used >= 270336' 1
-apply nori.c '> 294912' '> 270336' 1
+apply nori.c 'code_pool[294912]' 'code_pool[278528]' 1
+apply nori.c 'code_used >= 294912' 'code_used >= 278528' 1
+apply nori.c '> 294912' '> 278528' 1
 # 配列の初期値の置き場 (v40) と、その穴埋めの控え (afix)
-apply nori.c 'ainit_buf[262144]' 'ainit_buf[1024]' 1
-apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 1024' 1
-apply nori.c 'afix_arr[1024]' 'afix_arr[128]' 1
-apply nori.c 'afix_off[1024]' 'afix_off[128]' 1
-apply nori.c 'afix_func[1024]' 'afix_func[128]' 1
-apply nori.c 'nafix >= 1024' 'nafix >= 128' 1
+apply nori.c 'ainit_buf[262144]' 'ainit_buf[512]' 1
+apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 512' 1
+apply nori.c 'afix_arr[1024]' 'afix_arr[64]' 1
+apply nori.c 'afix_off[1024]' 'afix_off[64]' 1
+apply nori.c 'afix_func[1024]' 'afix_func[64]' 1
+apply nori.c 'nafix >= 1024' 'nafix >= 64' 1
+# .data の受け口と絶対シンボルの控え (edata / eabs):
+# iwac 自身のリンクではどちらも 0 件 (実測) なので小さく
+apply nori.c 'eabs_idx[256]' 'eabs_idx[64]' 1
+apply nori.c 'eabs_val[256]' 'eabs_val[64]' 1
+apply nori.c 'neabs < 256' 'neabs < 64' 1
+apply nori.c 'edata_off[256]' 'edata_off[64]' 1
+apply nori.c 'edata_sym[256]' 'edata_sym[64]' 1
+apply nori.c 'edata_val[256]' 'edata_val[64]' 1
+apply nori.c 'edata_hit[256]' 'edata_hit[64]' 1
+apply nori.c 'nedata >= 256' 'nedata >= 64' 1
 # 文字列置き場と名前プール
-apply nori.c 'str_pool[131072]' 'str_pool[19456]' 1
-apply nori.c 'str_used >= 131072' 'str_used >= 19456' 1
-apply nori.c 'name_pool[65536]' 'name_pool[7168]' 1
-apply nori.c 'name_used >= 65536' 'name_used >= 7168' 1
+apply nori.c 'str_pool[131072]' 'str_pool[18432]' 1
+apply nori.c 'str_used >= 131072' 'str_used >= 18432' 1
+apply nori.c 'name_pool[65536]' 'name_pool[6912]' 1
+apply nori.c 'name_used >= 65536' 'name_used >= 6912' 1
 
 # 標準の iwac (ホスト版) でオブジェクト一式を用意する
 cat ../src/0*.c > "$WORK/iwac_all.c"

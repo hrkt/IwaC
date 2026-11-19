@@ -673,6 +673,24 @@ Misoni を駆動し、全断片のコンパイルと
 K210 実機の 1MB 領域での実行確認は残り
 （実機セッション側の仕事）。
 
+### v48 do-while / sizeof(式) の固定点（済み、2026-11-19。branch `v48`）
+
+通常版 iwac2 の digest は len=302755
+sum=0000000001252e1e hash=beef2268b6e7d32e
+（ホスト側で算出）。v48 は do-while と
+sizeof(式) を足した（設計は
+doc/dowhile-sizeof.md）。do-while は新しい
+ノード 1 種と gen のループ 1 形、sizeof(式)
+は parse の測定器（expr_size）で、どちらも
+iwac 自身のソースでは使わないので、固定点の
+形は従来どおり。静的データは 2,873,100
+バイト。容量の追随として、断片プロファイル
+（kosaba / nori の build-frag.sh）を実測で
+組み替えた（ノード 9,216・入力約 168KB・
+命令表 24,064、nori は edata/eabs の
+切り詰めを追加）。詳細は doc/progress.md の
+v48 の項。
+
 ### v47 enum / union の固定点（済み、2026-11-19。branch `v47`）
 
 通常版 iwac2 の digest は len=294369

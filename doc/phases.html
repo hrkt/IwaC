@@ -2104,10 +2104,37 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   点検しないといけません。</p></div>
 </section>
 
+<!-- ================= v48 ================= -->
+<section class="phase" id="v48">
+  <div class="head"><span class="badge b-v4">v48</span><h2>do-while と sizeof(式) — 小物を2つ</h2></div>
+  <p class="goal-line">目標：<b>繰り返しの後判定（do-while）と、式の大きさを測る sizeof を足す。</b></p>
+  <p>do-while は新しいノード <code>NODE_DOWHILE</code> で、欄の使い方は
+  while と同じです。生成は本体を先に置き、条件を後ろで判定します。
+  「真なら戻る」は分岐の道具（beq + jal への伸ばし）の形に合わせ、
+  「偽なら落ちる + jal で戻る」に分解しました。continue の飛び先は
+  条件判定、break は末尾で、while と同じ積み重ねの仕組みに乗ります。</p>
+  <p>sizeof は型の形（v37）に式の形が加わりました。まず型として
+  読んでみて（キャストの判定と同じ巻き戻し）、違えば単項式として
+  読み、<b>評価せずに</b>木から大きさだけを求めて定数にします。
+  型の見積もりは生成の type_node の規則に合わせたので、
+  <code>sizeof(int16 + int)</code> は iwac の中での値の型どおり 2 です。
+  配列の大きさにも <code>int buf[sizeof(int)]</code> のように書けます。</p>
+  <div>
+    <span class="chip">continue は条件へ飛ぶ</span><span class="chip">sizeof は評価しない</span><span class="chip">型の規則は生成と一致</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  文の振り分けは parse_stmt だけでなく、文の並びを読む側
+  （parse_stmt_list の先読み分類）にもありました。新しく
+  <code>do</code> を足したとき、そちらのキーワード表に無いと
+  「while の本体には文だけが書けます」という、関係なさそうな
+  エラーになりました。入り口が2つある場所では、両方に足すのが
+  要ります（v47 で parse_stmt 側の型判定でも同じ目に遭っています）。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-19（v47 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-19（v48 時点）</p>
 </footer>
 
 </div>

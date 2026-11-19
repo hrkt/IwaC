@@ -796,7 +796,7 @@ static void type_node(int node) {
         return;
     int k = node_kind[node];
     /* まず子を型付けする */
-    if (k == NODE_WHILE) {
+    if (k == NODE_WHILE || k == NODE_DOWHILE) {
         type_node(node_lhs[node]);
         type_list(node_rhs[node]);
     } else if (k == NODE_IF) {
@@ -2416,6 +2416,41 @@ static int gen_stmt(int node) {
         loop_depth--;
         return 1;
     }
+    if (kind == NODE_DOWHILE) {
+        /* do-while (v48): 本体を先に置き、条件は後ろ。
+         * 「真なら戻る」は分岐の道具 (emit_beq_t1z) の
+         * 形に合わせ、「偽なら落ちる + jal で戻る」に
+         * 分解する (新しい分岐種を relax に足さない) */
+        int l_top = nasm;  /* 本体の先頭の命令番号 */
+        if (loop_depth >= 32) {
+            errmsg = "ループの入れ子が深すぎます";
+            return 0;
+        }
+        loop_depth++;
+        loop_break_head[loop_depth] = -1;
+        loop_cont_head[loop_depth] = -1;
+        ctrl_depth++;
+        ctrl_is_switch[ctrl_depth] = 0;
+        int body = node_rhs[node];
+        for (int s = body; s != -1; s = node_next[s]) {
+            if (!gen_stmt(s))
+                return 0;
+        }
+        /* continue の飛び先は条件判定 (本体の直後) */
+        apply_patches(loop_cont_head[loop_depth], nasm);
+        if (!gen_cond_expr(node_lhs[node]))
+            return 0;
+        /* beq t1, zero, L_end -- 飛び先は下で書き直す */
+        int beq_index = emit_beq_t1z();
+        /* jal zero, L_top -- 条件が真なら本体へ戻る */
+        asm_push(OP_JAL, 0, 0, 0, l_top);
+        /* ここ (末尾) が L_end。beq と break の飛び先 */
+        asm_imm[beq_index] = nasm;
+        apply_patches(loop_break_head[loop_depth], nasm);
+        ctrl_depth--;
+        loop_depth--;
+        return 1;
+    }
     if (kind == NODE_FOR) {
         /* for の作り方 (while への読み替え):
          *   初期化の文 (あれば)
@@ -2910,7 +2945,7 @@ static int stmt_needs_stack(int node) {
             return 1;
         return expr_needs_stack(node_lhs[node]);
     }
-    if (k == NODE_WHILE)
+    if (k == NODE_WHILE || k == NODE_DOWHILE)
         return expr_needs_stack(node_lhs[node]) ||
                list_needs_stack(node_rhs[node]);
     if (k == NODE_IF)

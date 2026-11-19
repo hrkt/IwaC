@@ -227,6 +227,10 @@ KosabaOS の C 版が `-mcmodel=medany`（auipc 前提）を
   大きさは最大のメンバ）だけが違う。どちらも
   生成とオブジェクト形式は知らない。設計の
   正本は doc/enum-union.md。
+  v48 で do-while と sizeof(式) が加わった。
+  sizeof は式を評価せず、parse が生成の
+  type_node と同じ規則で型を見積もって大きさを
+  定数にする。設計の正本は doc/dowhile-sizeof.md。
   v36 の typedef（予定）は、etype とポインタ
   段数の組への名前付けにすぎない。表を引いて
   展開したら消えるので、生成もオブジェクト

@@ -147,6 +147,10 @@ static int NODE_FADDR = 60;  /* 関数の住所 (v44)。
 static int NODE_NUMFP = 61;  /* 浮動小数点リテラル (v46)。
                              * node_val = ビットパターンの
                              * 置き場 (fp_bits) の番号 */
+static int NODE_DOWHILE = 62; /* do-while 文 (v48)。
+                             * node_lhs = 条件の式、
+                             * node_rhs = 本体の文の並び
+                             * (NODE_WHILE と同じ欄) */
 static int NODE_ADDR = 44;    /* 単項 & (住所、v21)。
                              * node_lhs = 変数か配列のノード */
 static int NODE_INDEX_STORE = 20; /* 配列の要素への書き込み文。
@@ -933,14 +937,28 @@ static int parse_number_value(void) {
     return (int)value;
 }
 
-/* 配列の大きさを読む (v47): 数字か、列挙子の名前。
- * 列挙子でなければカーソルを戻して数字として読む。
- * 失敗したら -1 (理由は errmsg) */
+static int parse_sizeof_value(void);  /* sizeof の本体 (v48、
+                                       * 定義は式の節) */
+
+/* 配列の大きさを読む (v47): 数字か、列挙子の名前か、
+ * sizeof (v48)。どれでもなければカーソルを戻して
+ * 数字として読む。失敗したら -1 (理由は errmsg) */
 static int parse_const_value(void) {
     skip_spaces();
     if (is_ident_start(*cur)) {
         char *save = cur;
         if (parse_ident()) {
+            /* "sizeof" の判定: ident_is の宣言がこの
+             * ファイルでは後ろにあるので、ここだけ
+             * 文字を直接比べる */
+            char *w = "sizeof";
+            int match = (ident_len == 6);
+            for (int i = 0; match && i < 6; i++) {
+                if (ident_buf[i] != w[i])
+                    match = 0;
+            }
+            if (match)
+                return parse_sizeof_value();
             int ec = find_enum_const(ident_buf, ident_len);
             if (ec >= 0)
                 return econ_val[ec];
@@ -1302,6 +1320,288 @@ static int parse_char_node(void) {
     return new_node(NODE_NUM, value, 0, 0);
 }
 
+/* sizeof(式) のための型の見積もり (v48、設計は
+ * doc/dowhile-sizeof.md)。式の木を歩いて、型を
+ * (型タグ, ポインタ段数, 構造体番号) の3つ組で
+ * sot_* に返す。規則は生成の type_node に合わせる
+ * (二項演算: double があれば double、幅つきが
+ * あればその型 (両方なら左)、それ以外は 8)。
+ * 分からない形は 0 を返す */
+static int sot_etype;
+static int sot_plevel;
+static int sot_struct;
+
+static int size_type_of(int node) {
+    int k = node_kind[node];
+    if (k == NODE_NUM || k == NODE_SYSCALL3) {
+        sot_etype = 8; sot_plevel = 0; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_NUMFP) {
+        sot_etype = 8 + 64; sot_plevel = 0; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_STR) {
+        /* 文字列は char へのポインタとして扱う
+         * (大きさそのものは expr_size の特別扱い) */
+        sot_etype = 1; sot_plevel = 1; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_VAR) {
+        int v = node_val[node];
+        sot_etype = var_etype[v];
+        sot_plevel = var_plevel[v];
+        sot_struct = var_struct[v] - 1;
+        return 1;
+    }
+    if (k == NODE_ARRAY || k == NODE_ROWADDR) {
+        /* 配列名 (と2次元の行) は先頭要素への
+         * ポインタ (parse_postfix_expr と同じ) */
+        int a = node_val[node];
+        sot_etype = arr_etype[a];
+        sot_plevel = arr_plevel[a] + 1;
+        sot_struct = arr_struct[a] - 1;
+        return 1;
+    }
+    if (k == NODE_INDEX || k == NODE_INDEX2) {
+        int a = node_val[node];
+        sot_etype = arr_etype[a];
+        sot_plevel = arr_plevel[a];
+        sot_struct = arr_struct[a] - 1;
+        return 1;
+    }
+    if (k == NODE_PINDEX) {
+        int v = node_val[node];
+        sot_etype = var_etype[v];
+        sot_plevel = var_plevel[v] - 1;
+        sot_struct = var_struct[v] - 1;
+        return 1;
+    }
+    if (k == NODE_MEMBER || k == NODE_MELEM) {
+        int mi = node_val[node];
+        sot_etype = smem_etype[mi];
+        sot_plevel = smem_plevel[mi];
+        sot_struct = smem_struct[mi] - 1;
+        return 1;
+    }
+    if (k == NODE_CALL) {
+        int s = func_sig[node_val[node]];
+        sot_etype = sig_ret_etype[s];
+        sot_plevel = sig_ret_plevel[s];
+        sot_struct = sig_ret_struct[s] - 1;
+        return 1;
+    }
+    if (k == NODE_ICALL) {
+        int s = node_val[node];
+        sot_etype = sig_ret_etype[s];
+        sot_plevel = sig_ret_plevel[s];
+        sot_struct = sig_ret_struct[s] - 1;
+        return 1;
+    }
+    if (k == NODE_FADDR) {
+        sot_etype = 8; sot_plevel = 1; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_DEREF) {
+        int o = node_lhs[node];
+        if (node_kind[o] == NODE_NUM) {
+            /* 絶対アドレス読みは1バイト
+             * (生成の deref_etype の約束) */
+            sot_etype = 1; sot_plevel = 0; sot_struct = -1;
+            return 1;
+        }
+        if (!size_type_of(o))
+            return 0;
+        if (sot_plevel < 1)
+            return 0;
+        sot_plevel--;
+        return 1;
+    }
+    if (k == NODE_ADDR) {
+        if (!size_type_of(node_lhs[node]))
+            return 0;
+        sot_plevel++;
+        return 1;
+    }
+    if (k == NODE_ADD || k == NODE_SUB) {
+        int let; int lpl; int lst;
+        int ret; int rpl; int rst;
+        if (!size_type_of(node_lhs[node]))
+            return 0;
+        let = sot_etype; lpl = sot_plevel; lst = sot_struct;
+        if (!size_type_of(node_rhs[node]))
+            return 0;
+        ret = sot_etype; rpl = sot_plevel; rst = sot_struct;
+        if (lpl > 0 && rpl > 0) {
+            /* ポインタ同士の差は整数 */
+            sot_etype = 8; sot_plevel = 0; sot_struct = -1;
+        } else if (lpl > 0) {
+            sot_etype = let; sot_plevel = lpl; sot_struct = lst;
+        } else if (rpl > 0) {
+            sot_etype = ret; sot_plevel = rpl; sot_struct = rst;
+        } else if ((let & 64) || (ret & 64)) {
+            sot_etype = 8 + 64; sot_plevel = 0; sot_struct = -1;
+        } else {
+            sot_etype = (let & 32) ? let : (ret & 32) ? ret : 8;
+            sot_plevel = 0; sot_struct = -1;
+        }
+        return 1;
+    }
+    if (k == NODE_MUL || k == NODE_DIV || k == NODE_MOD ||
+        k == NODE_AND || k == NODE_OR || k == NODE_XOR) {
+        int let; int ret;
+        if (!size_type_of(node_lhs[node]))
+            return 0;
+        let = sot_etype;
+        if (!size_type_of(node_rhs[node]))
+            return 0;
+        ret = sot_etype;
+        if ((let & 64) || (ret & 64))
+            sot_etype = 8 + 64;
+        else
+            sot_etype = (let & 32) ? let : (ret & 32) ? ret : 8;
+        sot_plevel = 0; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_SHL || k == NODE_SHR) {
+        if (!size_type_of(node_lhs[node]))
+            return 0;
+        if (sot_etype & 64)
+            sot_etype = 8 + 64;
+        else if (!(sot_etype & 32))
+            sot_etype = 8;
+        sot_plevel = 0; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_EQ || k == NODE_NE || k == NODE_LT ||
+        k == NODE_GT || k == NODE_LE || k == NODE_GE ||
+        k == NODE_LAND || k == NODE_LOR || k == NODE_NOT) {
+        sot_etype = 8; sot_plevel = 0; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_NEG || k == NODE_BITNOT) {
+        if (!size_type_of(node_lhs[node]))
+            return 0;
+        sot_plevel = 0; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_CAST) {
+        sot_etype = node_val[node];
+        sot_plevel = 0; sot_struct = -1;
+        return 1;
+    }
+    if (k == NODE_ASSIGN || k == NODE_PREINC ||
+        k == NODE_PREDEC || k == NODE_POSTINC ||
+        k == NODE_POSTDEC) {
+        int v = node_val[node];
+        sot_etype = var_etype[v];
+        sot_plevel = var_plevel[v];
+        sot_struct = var_struct[v] - 1;
+        return 1;
+    }
+    if (k == NODE_EPRE || k == NODE_EPOST)
+        return size_type_of(node_lhs[node]);
+    if (k == NODE_COND) {
+        int tet; int tpl; int tst;
+        int eet; int epl; int est;
+        if (!size_type_of(node_val[node]))
+            return 0;
+        tet = sot_etype; tpl = sot_plevel; tst = sot_struct;
+        if (!size_type_of(node_rhs[node]))
+            return 0;
+        eet = sot_etype; epl = sot_plevel; est = sot_struct;
+        if ((tet & 64) || (eet & 64))
+            sot_etype = 8 + 64;
+        else
+            sot_etype = (tet & 32) ? tet : (eet & 32) ? eet : 8;
+        if (tpl == epl) {
+            sot_plevel = tpl;
+            sot_struct = (tst == est) ? tst : -1;
+        } else {
+            sot_plevel = 0; sot_struct = -1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* 式の値の大きさ (バイト数)。分からなければ -1。
+ * 配列名・2次元の行・文字列・配列メンバは「値の
+ * 型」ではなく対象そのものの大きさが要るので、
+ * ここで特別扱いする (C の sizeof と同じ) */
+static int expr_size(int node) {
+    int k = node_kind[node];
+    if (k == NODE_ARRAY) {
+        int a = node_val[node];
+        int n = arr_size[a];
+        if (arr_cols[a] > 0)
+            n = n * arr_cols[a];
+        return arr_esize[a] * n;
+    }
+    if (k == NODE_ROWADDR) {
+        int a = node_val[node];
+        return arr_esize[a] * arr_cols[a];
+    }
+    if (k == NODE_STR)
+        return str_len[node_val[node]] + 1;
+    if (k == NODE_MEMBER && smem_count[node_val[node]] > 0) {
+        /* 配列メンバそのもの: 要素の大きさ × 個数 */
+        int mi = node_val[node];
+        int es;
+        if (smem_plevel[mi] > 0)
+            es = 8;
+        else if (smem_struct[mi] > 0)
+            es = stag_size[smem_struct[mi] - 1];
+        else
+            es = smem_etype[mi] & 15;
+        return es * smem_count[mi];
+    }
+    if (!size_type_of(node))
+        return -1;
+    if (sot_plevel > 0)
+        return 8;
+    if (sot_struct >= 0)
+        return stag_size[sot_struct];
+    return sot_etype & 15;
+}
+
+/* sizeof の本体 (v48): 「sizeof」の識別子の直後から
+ * 読み、大きさを返す。失敗は -1 (理由は errmsg)。
+ * まず型として読んでみて (キャストの判定と同じ
+ * 巻き戻し)、型でなければ単項式として読み、評価
+ * せずに木から大きさだけを求める (木は捨てる)。
+ * parse_primary_node と parse_const_value
+ * (配列の大きさ) の両方から使う */
+static int parse_sizeof_value(void) {
+    skip_spaces();
+    if (*cur == '(') {
+        char *save = cur;
+        cur++;
+        skip_spaces();
+        if (parse_type()) {
+            skip_spaces();
+            if (*cur == ')') {
+                cur++;
+                if (parse_type_plevel >= 1)
+                    return 8;
+                if (parse_type_struct >= 0)
+                    return stag_size[parse_type_struct];
+                return parse_type_etype & 15;
+            }
+        }
+        cur = save;
+    }
+    int operand = parse_unary_expr();
+    if (operand < 0)
+        return -1;
+    int sz = expr_size(operand);
+    if (sz < 0) {
+        errmsg = "sizeof で大きさが分からない式です";
+        return -1;
+    }
+    return sz;
+}
+
 static int parse_primary_node(void) {
     skip_spaces();
     if (is_digit(*cur))
@@ -1328,25 +1628,13 @@ static int parse_primary_node(void) {
         if (!parse_ident())
             return -1;
         if (ident_is("sizeof")) {
-            /* sizeof ( 型 ) (v37): 解析時に値が決まる定数。
-             * ポインタは 8、構造体はパディング込みの
-             * 大きさ、それ以外は型の幅 */
-            skip_spaces();
-            if (!expect_char('(', "sizeof の後には ( が必要です"))
+            /* sizeof ( 型 ) (v37) と sizeof 式 (v48):
+             * 解析時に値が決まる定数。本体は
+             * parse_sizeof_value (設計は
+             * doc/dowhile-sizeof.md) */
+            int sz = parse_sizeof_value();
+            if (sz < 0)
                 return -1;
-            if (!parse_type()) {
-                errmsg = "sizeof の中は型で書きます";
-                return -1;
-            }
-            if (!expect_char(')', "sizeof の後には ) が必要です"))
-                return -1;
-            int sz;
-            if (parse_type_plevel >= 1)
-                sz = 8;
-            else if (parse_type_struct >= 0)
-                sz = stag_size[parse_type_struct];
-            else
-                sz = parse_type_etype & 15;
             return new_node(NODE_NUM, sz, 0, 0);
         }
         if (ident_is("syscall3")) {
@@ -2935,6 +3223,34 @@ static int parse_stmt(void) {
     char *stmt_name_start = cur;  /* 要素の増減文の読み直し用 */
     if (!parse_ident())
         return -1;
+
+    if (ident_is("do")) {
+        /* do 本体 while ( 条件 ); (v48)。本体は
+         * { } か文1つ (while と同じ parse_body)。
+         * 条件は後ろで読むので、ノードの欄は
+         * NODE_WHILE と同じ (lhs = 条件、rhs = 本体) */
+        parse_loop_depth++;
+        int body = parse_body();
+        parse_loop_depth--;
+        if (body == -2)
+            return -1;
+        skip_spaces();
+        if (!is_ident_start(*cur) || !parse_ident() ||
+            !ident_is("while")) {
+            errmsg = "do の後には while が必要です";
+            return -1;
+        }
+        if (!expect_char('(', "while の後には ( が必要です"))
+            return -1;
+        int cond = parse_expr();
+        if (cond < 0)
+            return -1;
+        if (!expect_char(')', "while の条件の後には ) が必要です"))
+            return -1;
+        if (!expect_char(';', "do-while の終わりには ; が必要です"))
+            return -1;
+        return new_node(NODE_DOWHILE, 0, cond, body);
+    }
 
     if (ident_is("while")) {
         /* while ( 条件 ) 本体。本体は { } か文1つ (v25) */

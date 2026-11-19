@@ -1807,6 +1807,519 @@ echo "ok: v47: enum / union を含むリンクが一括と一致"
 cmp -s "$TMP/v47iwac.eo" "$TMP/v47asari.eo" || fail "v47: Asari のオブジェクトが iwac と違う"
 echo "ok: v47: Asari のオブジェクトが iwac と一致 (enum / union)"
 
+# --- v48: do-while と sizeof(式) (doc/dowhile-sizeof.md) ---
+cat > "$TMP/v48a.c" <<'V48A'
+int main() {
+    int ok = 1;
+    int i = 0;
+    int n = 0;
+    do { n++; } while (n < 5);
+    if (n != 5) ok = 0;
+    do { i++; } while (i < 0);
+    if (i != 1) ok = 0;
+    i = 0;
+    do i++; while (i < 3);
+    if (i != 3) ok = 0;
+    i = 0;
+    do { i++; if (i == 4) break; } while (1);
+    if (i != 4) ok = 0;
+    i = 0; n = 0;
+    do { i++; if (i % 2) continue; n++; } while (i < 10);
+    if (n != 5) ok = 0;
+    i = 0; n = 0;
+    do { int j = 0; do { j++; n++; } while (j < 3); i++; } while (i < 2);
+    if (n != 6) ok = 0;
+    i = 0; n = 0;
+    while (i < 3) { do { n++; } while (n % 2); i++; }
+    if (n != 6) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V48A
+"$IWAC" "$TMP/v48a.c" > "$TMP/v48a.bin"
+check_tail "$TMP/v48a.bin" 'Y' "v48: do-while (最低1回・break・continue・入れ子)"
+cat > "$TMP/v48b.c" <<'V48B'
+struct Point { int32 x; int32 y; };
+struct Big { char c; int v; char buf[8]; struct Point p; };
+int arr[10];
+char cbuf[7];
+int mat[3][4];
+int16 sarr[5];
+double darr[3];
+int g;
+char gc;
+int16 gs;
+uint32 gu;
+double gd;
+int *gp;
+char *gcp;
+struct Point gpt;
+struct Big gb;
+int geti() { return 42; }
+double getd() { return 1.5; }
+int16 gets() { return 7; }
+char *getcp() { return "x"; }
+struct Point getpt() { struct Point r; r.x = 1; r.y = 2; return r; }
+int main() {
+    int ok = 1;
+    int i = 3;
+    int *p = &g;
+    char *cp = "hello";
+    if (sizeof(g) != 8) ok = 0;
+    if (sizeof(gc) != 1) ok = 0;
+    if (sizeof(gs) != 2) ok = 0;
+    if (sizeof(gu) != 4) ok = 0;
+    if (sizeof(gd) != 8) ok = 0;
+    if (sizeof(gp) != 8) ok = 0;
+    if (sizeof(gpt) != 8) ok = 0;
+    if (sizeof(gb) != 32) ok = 0;
+    if (sizeof(*p) != 8) ok = 0;
+    if (sizeof(*cp) != 1) ok = 0;
+    if (sizeof(&g) != 8) ok = 0;
+    if (sizeof(p + 1) != 8) ok = 0;
+    if (sizeof(*(p + 1)) != 8) ok = 0;
+    if (sizeof(*getcp()) != 1) ok = 0;
+    if (sizeof(arr) != 80) ok = 0;
+    if (sizeof(arr[0]) != 8) ok = 0;
+    if (sizeof(cbuf) != 7) ok = 0;
+    if (sizeof(mat) != 96) ok = 0;
+    if (sizeof(mat[1]) != 32) ok = 0;
+    if (sizeof(mat[1][2]) != 8) ok = 0;
+    if (sizeof(sarr) != 10) ok = 0;
+    if (sizeof(sarr[0]) != 2) ok = 0;
+    if (sizeof(darr) != 24) ok = 0;
+    if (sizeof(arr + 0) != 8) ok = 0;
+    if (sizeof(42) != 8) ok = 0;
+    if (sizeof('a') != 8) ok = 0;
+    if (sizeof(1.5) != 8) ok = 0;
+    if (sizeof(gs + gs) != 2) ok = 0;
+    if (sizeof(gs + g) != 2) ok = 0;
+    if (sizeof(gd + 1) != 8) ok = 0;
+    if (sizeof(g == 1) != 8) ok = 0;
+    if (sizeof(-gs) != 2) ok = 0;
+    if (sizeof(gs << 1) != 2) ok = 0;
+    if (sizeof(i > 0 ? gs : gu) != 2) ok = 0;
+    if (sizeof((int32)g) != 4) ok = 0;
+    if (sizeof(geti()) != 8) ok = 0;
+    if (sizeof(getd()) != 8) ok = 0;
+    if (sizeof(gets()) != 2) ok = 0;
+    if (sizeof(getcp()) != 8) ok = 0;
+    if (sizeof(getpt()) != 8) ok = 0;
+    if (sizeof(gb.c) != 1) ok = 0;
+    if (sizeof(gb.buf) != 8) ok = 0;
+    if (sizeof(gb.buf[0]) != 1) ok = 0;
+    if (sizeof(gb.p.x) != 4) ok = 0;
+    if (sizeof("hello") != 6) ok = 0;
+    if (sizeof("") != 1) ok = 0;
+    if (sizeof g != 8) ok = 0;
+    if (sizeof *p != 8) ok = 0;
+    if (sizeof arr[0] != 8) ok = 0;
+    i = 0;
+    if (sizeof(i++) != 8) ok = 0;
+    if (i != 0) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V48B
+"$IWAC" "$TMP/v48b.c" > "$TMP/v48b.bin"
+check_tail "$TMP/v48b.bin" 'Y' "v48: sizeof(式) (変数・配列・メンバ・式・呼び出し・評価しない)"
+cat > "$TMP/v48c.c" <<'V48C'
+enum Color { RED, GREEN, BLUE };
+union U { int i; char c[8]; double d; };
+typedef int (*BinOp)(int, int);
+int add(int a, int b) { return a + b; }
+int buf2[sizeof(int)];
+int x = sizeof(buf2);
+int main() {
+    int ok = 1;
+    enum Color col = BLUE;
+    union U u;
+    BinOp fp = add;
+    double d = 0.5;
+    int i = 0;
+    if (sizeof(col) != 8) ok = 0;
+    if (sizeof(u) != 8) ok = 0;
+    if (sizeof(u.c) != 8) ok = 0;
+    if (sizeof(fp) != 8) ok = 0;
+    if (sizeof(fp(1, 2)) != 8) ok = 0;
+    if (sizeof(buf2) != 64) ok = 0;
+    if (x != 64) ok = 0;
+    switch (sizeof(char)) { case 1: break; default: ok = 0; }
+    if (sizeof(sizeof(buf2)) != 8) ok = 0;
+    i = 0;
+    do { i++; d = d + 0.25; } while (d < 1.0);
+    if (i != 2) ok = 0;
+    i = 0;
+    if (i == 0) do { i++; } while (i < 3); else i = 99;
+    if (i != 3) ok = 0;
+    i = 0;
+    do {
+        switch (i) { case 0: i = 5; break; default: i = 9; }
+    } while (i < 5);
+    if (i != 5) ok = 0;
+    putc(ok ? 'Y' : 'N');
+    return 0;
+}
+V48C
+"$IWAC" "$TMP/v48c.c" > "$TMP/v48c.bin"
+check_tail "$TMP/v48c.bin" 'Y' "v48: sizeof の定数文脈・enum/union・関数ポインタ・FP 条件の do-while"
+cat > "$TMP/v48d.c" <<'V48D'
+int main() {
+    int i = 0;
+    int n = 0;
+    do {
+        i++;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        n = n + 1;
+        if (i == 2) continue;
+        n = n + 1000;
+    } while (i < 3);
+    if (n != 2900) { putc(78); return 0; }
+    i = 0;
+    do { i++; if (i == 5) break; } while (1);
+    if (i != 5) { putc(78); return 0; }
+    putc(89);
+    return 0;
+}
+V48D
+"$IWAC" "$TMP/v48d.c" > "$TMP/v48d.bin"
+check_tail "$TMP/v48d.bin" 'Y' "v48: 4KB を超える本体を持つ do-while (分岐の緩和)"
+check_error 'int main() { int i = 0; do i++; return 0; }' "v48: do の後に while が無い"
+check_error 'int main() { int i = 0; do { i++; } while (i < 3) return 0; }' "v48: do-while の終わりの ; が無い"
+check_error 'int main() { return sizeof(); }' "v48: sizeof の中身が空"
+check_error 'int main() { return sizeof(nosuch); }' "v48: sizeof の中の未定義の名前"
+check_error 'typedef int (*F)(int); int f(int a) { return a; } int main() { F fp = f; return sizeof(*fp); }' "v48: 関数の sizeof"
+# オブジェクト経路: do-while と sizeof を含むプログラムでも、リンク結果が
+# 一括ビルドと一致し、Asari のオブジェクトが iwac と一致すること
+cat > "$TMP/v48obj.c" <<'V48OBJ'
+int tbl[4];
+int sum() {
+    int i = 0;
+    int s = 0;
+    do { s = s + tbl[i]; i++; } while (i < sizeof(tbl) / sizeof(tbl[0]));
+    return s;
+}
+int main() {
+    int i = 0;
+    do { tbl[i] = i + 1; i++; } while (i < 4);
+    return sum();
+}
+V48OBJ
+cat > "$TMP/v48rt.c" <<'V48RT'
+void kosaba_flush(void) { }
+V48RT
+printf 'void kosaba_flush();\n' > "$TMP/v48pre.c"
+"$IWAC" --kosaba "$TMP/v48pre.c" "$TMP/v48obj.c" "$TMP/v48rt.c" > "$TMP/v48direct.elf" || fail "v48: 一括ビルドに失敗"
+"$IWAC" --kosaba --elf "$TMP/v48pre.c" "$TMP/v48obj.c" > "$TMP/v48obj.eo" || fail "v48: オブジェクト出力に失敗"
+"$IWAC" --kosaba --elf "$TMP/v48pre.c" "$TMP/v48rt.c" > "$TMP/v48rt.eo" || fail "v48: rt のオブジェクト出力に失敗"
+"$TMP/nori" "$TMP/v48obj.eo" "$TMP/v48rt.eo" > "$TMP/v48link.elf" || fail "v48: nori でのリンクに失敗"
+cmp -s "$TMP/v48direct.elf" "$TMP/v48link.elf" || fail "v48: リンク結果が一括ビルドと違う"
+echo "ok: v48: do-while / sizeof を含むリンクが一括と一致"
+"$IWAC" --kosaba --asari "$TMP/v48pre.c" "$TMP/v48obj.c" "$TMP/v48rt.c" > "$TMP/v48.ias" || fail "v48: Asari 形式の出力に失敗"
+"$TMP/asari" "$TMP/v48.ias" > "$TMP/v48asari.eo" || fail "v48: Asari が失敗"
+"$IWAC" --kosaba --elf "$TMP/v48pre.c" "$TMP/v48obj.c" "$TMP/v48rt.c" > "$TMP/v48iwac.eo" || fail "v48: オブジェクト出力 (一括) に失敗"
+cmp -s "$TMP/v48iwac.eo" "$TMP/v48asari.eo" || fail "v48: Asari のオブジェクトが iwac と違う"
+echo "ok: v48: Asari のオブジェクトが iwac と一致 (do-while / sizeof)"
+
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに

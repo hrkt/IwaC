@@ -17,13 +17,23 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v47（enum と union）を main に追加
+## 現在地: v48（do-while と sizeof(式)）を main に追加
 
-enum と union を足した（設計は
-doc/enum-union.md）。enum の列挙子は parse の
-表（名前 → 値）に載り、式の中では数のノードに
-化ける。値は定数式（符号つき32ビットまで）で、
-enum タグは int と同じ型として宣言・typedef・
+do-while と sizeof の式の形を足した（設計は
+doc/dowhile-sizeof.md）。do-while は本体を
+先に置き条件を後ろで判定する繰り返しで、
+break / continue は while と同じ仕組みに
+乗る（continue の飛び先は条件）。sizeof は
+型の形（v37）に加えて任意の式が書けるように
+なり、式を評価せずに、生成の型付けと同じ
+規則で大きさを求めて定数にする。配列の
+大きさにも sizeof が書ける。
+
+v47（enum と union）は main にマージ済み:
+enum の列挙子は parse の表（名前 → 値）に
+載り、式の中では数のノードに化ける。値は
+定数式（符号つき32ビットまで）で、enum
+タグは int と同じ型として宣言・typedef・
 関数の引数と戻り値に使え、列挙子は case
 ラベル・初期化子・配列の大きさにも書ける。
 union は構造体とタグ・メンバの仕組みを共有し、
