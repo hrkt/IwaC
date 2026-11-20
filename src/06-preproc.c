@@ -8,7 +8,8 @@
  *   - 置き換えは単語 (識別子) 単位。文字列の中と // コメントの
  *     中は置き換えない (C と同じ)
  *   - 置き換えた結果はもう一度走査しない (入れ子は展開しない)
- *   - 再定義はエラー。define は最大16個、置き換えは127文字まで
+ *   - 再定義はエラー。define は最大64個 (v50 で 16 から緩和)、
+ *   置き換えは127文字まで
  *   - # で始まる行は #define / #ifdef / #ifndef / #else /
  *     #endif だけ。それ以外はエラー (#include 等は対象外)
  * 条件付きコンパイル (v18):
@@ -22,11 +23,12 @@
  * これは「コンパイルされる側のプログラム」のための機能。
  * ================================================================ */
 
-static char def_names[16][32];
-static int def_name_len[16];
-static char def_text[16][128];
-static int def_text_len[16];
+static char def_names[66][32];  /* 利用者分 64 + 定義済み 2 */
+static int def_name_len[66];
+static char def_text[66][128];
+static int def_text_len[66];
 static int ndef;
+static int ndef_base;  /* 定義済みマクロの分 (上限の数え方から外す) */
 
 static char exp_buf[475136];
 static int exp_len;
@@ -57,8 +59,8 @@ static int add_define(char *name, int nlen, char *text, int tlen) {
         errmsg = "#define の名前が重なっています";
         return 0;
     }
-    if (ndef >= 16) {
-        errmsg = "#define は16個までです";
+    if (ndef - ndef_base >= 64) {
+        errmsg = "#define は64個までです";
         return 0;
     }
     if (tlen > 127) {
@@ -123,6 +125,8 @@ static int expand_defines(char *src) {
         return 0;
     if (target_kosaba && !add_define("__KOSABA__", 10, "1", 1))
         return 0;
+    /* 定義済みマクロは上限 (利用者分 64) の数に入れない */
+    ndef_base = ndef;
     int i = 0;
     int sol = 1;  /* 行頭 (その行にまだ空白しか無い) か */
     int in_comment = 0;  /* ブロックコメントの中か (v18) */

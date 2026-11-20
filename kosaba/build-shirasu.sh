@@ -100,9 +100,18 @@ apply 03-genstmt.c 'i < 24576' 'i < 4096' 1
 apply 05-input.c 'src_buf[475136]' 'src_buf[32768]' 1
 apply 05-input.c '475135' '32767' 4
 apply 05-input.c '約464KBまで' '約32KBまで' 3
-# 06-preproc.c: 展開バッファと上限のガード
+# 06-preproc.c: 展開バッファと上限のガード。#define の表は
+# 標準は利用者分 64 + 定義済み 2 = 66 だが、iwac 自身の
+# ソースは #define を使わないので利用者分 16 + 2 = 18 に
+# 絞る (v50)
 apply 06-preproc.c 'exp_buf[475136]' 'exp_buf[32768]' 1
 apply 06-preproc.c 'exp_len >= 475135' 'exp_len >= 32767' 1
+apply 06-preproc.c 'def_names[66]' 'def_names[18]' 1
+apply 06-preproc.c 'def_name_len[66]' 'def_name_len[18]' 1
+apply 06-preproc.c 'def_text[66]' 'def_text[18]' 1
+apply 06-preproc.c 'def_text_len[66]' 'def_text_len[18]' 1
+apply 06-preproc.c 'ndef - ndef_base >= 64' 'ndef - ndef_base >= 16' 1
+apply 06-preproc.c '#define は64個までです' '#define は16個までです' 1
 
 # 小容量の iwac (ホスト版) と、標準の iwac (ホスト版) を作る
 cat "$WORK"/0*.c > "$WORK/iwac_all.c"

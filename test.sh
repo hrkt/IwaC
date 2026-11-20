@@ -2444,6 +2444,33 @@ echo "ok: v49: ポインタ演算を含むリンクが一括と一致"
 cmp -s "$TMP/v49iwac.eo" "$TMP/v49asari.eo" || fail "v49: Asari のオブジェクトが iwac と違う"
 echo "ok: v49: Asari のオブジェクトが iwac と一致 (ポインタ演算)"
 
+# --- v50: #define の上限 (16 → 64。設計は doc/define-limit.md) ---
+# 40 個の define を使う (16 の壁を超えることが要点)
+{ i=0; while [ $i -lt 40 ]; do echo "#define K$i $((i + 1))"; i=$((i + 1)); done;
+  echo 'putc(K0 + K19 + K39 + 4);'; } > "$TMP/v50a.c"
+"$IWAC" "$TMP/v50a.c" > "$TMP/v50a.bin"
+check_tail "$TMP/v50a.bin" A "v50: #define 40 個 (K0+K19+K39+4 = 65)"
+
+# ちょうど 64 個までは通る
+{ i=0; while [ $i -lt 64 ]; do echo "#define L$i 1"; i=$((i + 1)); done;
+  echo 'putc(66);'; } > "$TMP/v50b.c"
+"$IWAC" "$TMP/v50b.c" > "$TMP/v50b.bin"
+check_tail "$TMP/v50b.bin" B "v50: #define 64 個ちょうど"
+
+# --kosaba では定義済みが 2 個 (__IWAC__ / __KOSABA__) あるが、
+# 利用者分はそちらでも 64 個ちょうど書ける
+"$IWAC" --kosaba "$TMP/v50b.c" > "$TMP/v50b.elf" || fail "v50: --kosaba で #define 64 個が通らなかった"
+echo "ok: v50: #define 64 個 (--kosaba でも利用者分は 64 個)"
+
+# 65 個目は上限エラー (文言も確かめる)
+{ i=0; while [ $i -lt 65 ]; do echo "#define M$i 1"; i=$((i + 1)); done;
+  echo 'putc(65);'; } > "$TMP/v50c.c"
+if "$IWAC" "$TMP/v50c.c" > "$TMP/v50c.bin" 2> "$TMP/v50c.err"; then
+    fail "v50: 65 個目の #define がエラーにならなかった"
+fi
+[ ! -s "$TMP/v50c.bin" ] || fail "v50: エラーなのにバイナリが出力された"
+grep -q '64個まで' "$TMP/v50c.err" || fail "v50: 上限のエラー文言が違う"
+echo "ok: v50: 65 個目の #define は上限エラーになり、出力は空だった"
 
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
