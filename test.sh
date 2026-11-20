@@ -827,11 +827,11 @@ echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
 # TU 基準化で一括セルフコンパイルが上限超えになった
 # ため引退した
 if [ -x "$TMP/nori" ]; then
-    for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+    for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
         "$IWAC" --kosaba --elf "src/decls.c" "src/$f.c" > "$TMP/v33-$f.eo" || fail "v33: 断片 $f のオブジェクト化に失敗"
     done
     "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v33-rt.eo" || fail "v33: rt のオブジェクト化に失敗"
-    "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-02c-fpconv.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-03b-genfp.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
+    "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-02c-fpconv.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-03-genstmt.eo" "$TMP/v33-03b-genfp.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
     size=$(wc -c < "$TMP/v33split.elf")
     [ "$size" -gt 100000 ] || fail "v33: 分割セルフホストの出力が小さすぎる ($size バイト)"
     [ "$size" -lt 1000000 ] || fail "v33: 分割セルフホストの出力が大きすぎる ($size バイト)"
@@ -961,7 +961,7 @@ asari_check() {
     cmp -s "$TMP/v38.eo" "$TMP/v38a.eo" || fail "v38: Asari の出力が内部 encode と違う ($label)"
 }
 asari_check hello examples/hello-kosaba.c
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     asari_check "断片 $f" src/decls.c "src/$f.c"
 done
 echo "ok: v38: Asari が全断片で内部 encode とバイト一致"
@@ -1003,7 +1003,7 @@ elf_check() {
 elf_check hello examples/hello-kosaba.c
 # 全断片 (rt と組でリンクし、一括版と比べる)
 V39_OBJS_EO=""
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$IWAC" --kosaba --elf src/decls.c "src/$f.c" > "$TMP/v39-$f.eo" || fail "v39: 断片 $f の ELF 出力に失敗"
     V39_OBJS_EO="$V39_OBJS_EO $TMP/v39-$f.eo"
 done
@@ -2319,6 +2319,131 @@ echo "ok: v48: do-while / sizeof を含むリンクが一括と一致"
 cmp -s "$TMP/v48iwac.eo" "$TMP/v48asari.eo" || fail "v48: Asari のオブジェクトが iwac と違う"
 echo "ok: v48: Asari のオブジェクトが iwac と一致 (do-while / sizeof)"
 
+# --- v49: ポインタ演算のスケール修正 (doc/ptr-arith.md) ---
+cat > "$TMP/v49a.c" <<'V49A'
+int64 a64[4] = { 100, 200, 300, 400 };
+int32 a32[4] = { 100000, 200000, 300000, 400000 };
+int16 a16[4] = { 100, 200, 300, 400 };
+uint32 au[4] = { 70000, 80000, 90000, 100000 };
+char ac[5] = { 10, 20, 30, 40, 50 };
+int main() {
+    int r = 0;
+    int64 *p64 = &a64[0]; p64 = p64 + 1; if (*p64 == 200) r = r + 1;
+    int32 *p32 = &a32[0]; p32 = p32 + 1; if (*p32 == 200000) r = r + 1;
+    int16 *p16 = &a16[0]; p16 = p16 + 1; if (*p16 == 200) r = r + 1;
+    uint32 *pu = &au[0]; pu = pu + 1; if (*pu == 80000) r = r + 1;
+    char *pc = &ac[0]; pc = pc + 1; if (*pc == 20) r = r + 1;
+    int32 *q = &a32[3]; q = q - 2; if (*q == 200000) r = r + 1;
+    int32 *q2 = &a32[0]; q2++; if (*q2 == 200000) r = r + 1;
+    int32 *q3 = &a32[3]; q3--; if (*q3 == 300000) r = r + 1;
+    int32 *q4 = &a32[0]; q4 += 3; if (*q4 == 400000) r = r + 1;
+    int32 *q5 = &a32[3]; q5 -= 1; if (*q5 == 300000) r = r + 1;
+    int32 *q6 = &a32[0]; if (*(q6 + 2) == 300000) r = r + 1;
+    int32 *q7 = &a32[3]; if (*(q7 - 1) == 300000) r = r + 1;
+    int32 *q8 = a32 + 1; if (*q8 == 200000) r = r + 1;
+    int32 *q9 = 1 + a32; if (*q9 == 200000) r = r + 1;
+    int32 tab[16];
+    int i = 0;
+    while (i < 16) { tab[i] = i + 1; i = i + 1; }
+    int32 *w = &tab[0];
+    i = 0;
+    while (i < 16) { w = w + 1; i = i + 1; }
+    if (*(w - 1) == 16) r = r + 1;
+    if (r == 15) putc(89); else putc(78);
+    return 0;
+}
+V49A
+"$IWAC" "$TMP/v49a.c" > "$TMP/v49a.bin"
+check_tail "$TMP/v49a.bin" 'Y' "v49: 幅のある型の p±n・++/--・+=/-= ・*(p±n)・配列名+整数"
+cat > "$TMP/v49b.c" <<'V49B'
+struct Big { int64 a; int64 b; int64 c; };
+struct Big bigs[3];
+struct Huge { int64 x[300]; };
+struct Huge hs[2];
+int32 t32[6] = { 111, 222, 333, 444, 555, 666 };
+int32 m2[3][4] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+struct Holder { int32 *p; int32 x; };
+int32 *gparr[3];
+int main() {
+    int r = 0;
+    bigs[1].a = 1000; bigs[2].a = 2000;
+    struct Big *bp = &bigs[0]; bp = bp + 1; if (bp->a == 1000) r = r + 1;
+    bp++; if (bp->a == 2000) r = r + 1;
+    struct Big *bq = &bigs[2]; if (bq - bp == 0) r = r + 1;
+    bq = &bigs[0]; if (bp - bq == 2) r = r + 1;
+    int32 *p = &t32[5]; int32 *q = &t32[1];
+    if (p - q == 4) r = r + 1;
+    if (q - p == 0 - 4) r = r + 1;
+    int32 *a2 = m2 + 1; if (*a2 == 4) r = r + 1;
+    hs[1].x[0] = 777;
+    struct Huge *hp = &hs[0]; hp++; if (hp->x[0] == 777) r = r + 1;
+    hp--; hp++; if (hp->x[0] == 777) r = r + 1;
+    int32 *base = &t32[0];
+    int32 **pp = &base; *pp = *pp + 1; if (*base == 222) r = r + 1;
+    int32 *arr[3];
+    arr[0] = &t32[0]; arr[0]++; if (*arr[0] == 222) r = r + 1;
+    struct Holder h; h.p = &t32[0]; h.p++; if (*h.p == 222) r = r + 1;
+    gparr[0] = &t32[2]; if (*gparr[0] == 333) r = r + 1;
+    if (r == 13) putc(89); else putc(78);
+    return 0;
+}
+V49B
+"$IWAC" "$TMP/v49b.c" > "$TMP/v49b.bin"
+check_tail "$TMP/v49b.bin" 'Y' "v49: ポインタ差・構造体ポインタ・二重ポインタ・要素/メンバの ++"
+cat > "$TMP/v49c.c" <<'V49C'
+int32 t32[6] = { 111, 222, 333, 444, 555, 666 };
+int32 *getp() { return &t32[2]; }
+struct P { int64 a; };
+int32 *pick(struct P p) { return &t32[p.a]; }
+typedef int32 *(*FP)(void);
+int main() {
+    int r = 0;
+    int32 *a = getp(); if (*a == 333) r = r + 1;
+    a = a + 2; if (*a == 555) r = r + 1;
+    FP fp = getp;
+    int32 *b = fp(); if (*b == 333) r = r + 1;
+    struct P p; p.a = 4;
+    int32 *c = pick(p); if (*c == 555) r = r + 1;
+    if (r == 4) putc(89); else putc(78);
+    return 0;
+}
+V49C
+"$IWAC" "$TMP/v49c.c" > "$TMP/v49c.bin"
+check_tail "$TMP/v49c.bin" 'Y' "v49: ポインタを返す関数 (直接・関数ポインタ・B方式) の戻り値"
+cat > "$TMP/v49obj.c" <<'V49OBJ'
+int32 tbl[6] = { 111, 222, 333, 444, 555, 666 };
+int32 *second() { return &tbl[1]; }
+int walk() {
+    int32 *p = &tbl[0];
+    int s = 0;
+    int i = 0;
+    while (i < 6) { s = s + *p; p = p + 1; i = i + 1; }
+    return s;
+}
+int main() {
+    int32 *p = second();
+    p = p + 3;
+    if (*p != 555) return 1;
+    if (walk() != 2331) return 2;
+    return 0;
+}
+V49OBJ
+cat > "$TMP/v49rt.c" <<'V49RT'
+void kosaba_flush(void) { }
+V49RT
+printf 'void kosaba_flush();\n' > "$TMP/v49pre.c"
+"$IWAC" --kosaba "$TMP/v49pre.c" "$TMP/v49obj.c" "$TMP/v49rt.c" > "$TMP/v49direct.elf" || fail "v49: 一括ビルドに失敗"
+"$IWAC" --kosaba --elf "$TMP/v49pre.c" "$TMP/v49obj.c" > "$TMP/v49obj.eo" || fail "v49: オブジェクト出力に失敗"
+"$IWAC" --kosaba --elf "$TMP/v49pre.c" "$TMP/v49rt.c" > "$TMP/v49rt.eo" || fail "v49: rt のオブジェクト出力に失敗"
+"$TMP/nori" "$TMP/v49obj.eo" "$TMP/v49rt.eo" > "$TMP/v49link.elf" || fail "v49: nori でのリンクに失敗"
+cmp -s "$TMP/v49direct.elf" "$TMP/v49link.elf" || fail "v49: リンク結果が一括ビルドと違う"
+echo "ok: v49: ポインタ演算を含むリンクが一括と一致"
+"$IWAC" --kosaba --asari "$TMP/v49pre.c" "$TMP/v49obj.c" "$TMP/v49rt.c" > "$TMP/v49.ias" || fail "v49: Asari 形式の出力に失敗"
+"$TMP/asari" "$TMP/v49.ias" > "$TMP/v49asari.eo" || fail "v49: Asari が失敗"
+"$IWAC" --kosaba --elf "$TMP/v49pre.c" "$TMP/v49obj.c" "$TMP/v49rt.c" > "$TMP/v49iwac.eo" || fail "v49: オブジェクト出力 (一括) に失敗"
+cmp -s "$TMP/v49iwac.eo" "$TMP/v49asari.eo" || fail "v49: Asari のオブジェクトが iwac と違う"
+echo "ok: v49: Asari のオブジェクトが iwac と一致 (ポインタ演算)"
+
 
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
@@ -2327,7 +2452,7 @@ echo "ok: v48: Asari のオブジェクトが iwac と一致 (do-while / sizeof)
 # (段3で上限が TU 基準になり、iwac 自身の一括は上限
 # 超えになったため、一括側は nori 本体で代表する)
 "$IWAC" --kosaba --stats nori/nori.c libdashi/libdashi.c kosaba/kosaba_rt.c > /dev/null 2> "$TMP/cap-all.txt"
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$IWAC" --kosaba --elf --stats src/decls.c "src/$f.c" > /dev/null 2> "$TMP/cap-$f.txt"
 done
 capmax() {

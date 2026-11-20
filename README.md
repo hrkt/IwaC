@@ -17,8 +17,21 @@ OS上のシェルからコンパイラを実行して Hello World をコンパ�
 [`doc/riscv-basics.md`](doc/riscv-basics.md) にまとめた
 （命令の区画、即値で値を運ぶ仕組み、レジスタに乗る値）。
 
-## 現在地: v48（do-while と sizeof(式)）を main に追加
+## 現在地: v49（ポインタ演算のバグ修正）を main に追加
 
+ポインタ演算のスケール抜けを直した（設計は
+doc/ptr-arith.md）。`p + 1` などが指す先の
+大きさで進まず常に 1 バイトだったもので、
+二項演算・複合代入・++/-- にスケールを入れ、
+ポインタ同士の差は要素数にした。検証で
+見つけた同族の 4 件（配列名 + 整数のアドレス
+切り捨て、*(p + n) の 1 バイト読み、ポインタ
+戻り値の切り捨て、ポインタ配列の要素幅）も
+あわせて直した。あわせて容量対策で 03-gen.c
+を分割し、文と関数全体の生成を 03-genstmt.c
+へ出した（断片は 11 本）。
+
+v48（do-while と sizeof(式)）は main にマージ済み:
 do-while と sizeof の式の形を足した（設計は
 doc/dowhile-sizeof.md）。do-while は本体を
 先に置き条件を後ろで判定する繰り返しで、
@@ -402,7 +415,7 @@ iwac hello.c > hello.bin
 ./build.sh
 ```
 
-本体は `src/` の10断片（01-head.c 〜 07-main.c と 02b-decl.c、02c-fpconv.c、03b-genfp.c）に分かれて
+本体は `src/` の11断片（01-head.c 〜 07-main.c と 02b-decl.c、02c-fpconv.c、03-genstmt.c、03b-genfp.c）に分かれて
 いて、build.sh が番号順に連結した `iwac_all.c` を gcc で
 コンパイルする（`#include` を使わない約束のための形。
 手でやるなら `cat src/0*.c > iwac_all.c` してから

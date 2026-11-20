@@ -8,25 +8,26 @@
 # 実測した断片ピークに余裕を乗せた値にしてある。
 # 名前は当面の呼び名で、正式な命名は保留。
 #
-# 実測のピーク (2026-11-19、v48、TU = decls.c + 断片):
-#   ノード 9,044 (02-parse) / 命令 22,595 (03-gen)
-#   再配置 2,115 (03-gen) / 変数 556 (02-parse)
-#   関数 233 / 文字列 7,005 バイト
-#   入力 168,564 バイト (02-parse、展開後も同量)
+# 実測のピーク (2026-11-20、v49、TU = decls.c + 断片):
+#   ノード 9,047 (02-parse) / 命令 18,418 (02-parse。
+#   v49 で 03-gen を分割し、最大の TU は 03-gen の
+#   23,380 から 02-parse に移った)
+#   再配置 1,493 (02-parse) / 変数 556 (02-parse)
+#   関数 236 / 文字列 7,005 バイト
+#   入力 168,913 バイト (02-parse、展開後も同量)
 #
 # 容量プロファイル (標準 → 断片):
 #   ノード表        12288 → 9216 (v48 で 8448 から引き上げ:
-#                   実測ピーク 9,044 は 02-parse)
+#                   実測ピーク 9,047 は 02-parse)
 #   命令表          24576 → 24064 (v48 で初めて下げる:
-#                   実測ピーク 22,595 は 03-gen。下げた分で
-#                   ノード表とソース上限の引き上げを相殺)
+#                   実測ピーク 18,418 は 02-parse)
 #   再配置表         6144 → 2304 (v46 で 2048 から引き上げ:
-#                   実測ピーク 2,115 は 03-gen)
+#                   実測ピーク 1,493 は 02-parse)
 #   変数表           1280 → 576 (v46 で 512 から引き上げ:
 #                   実測ピーク 556 は 02-parse)
 #   文字列プール    24576 → 8192 バイト
 #   ソース上限      約464KB → 168KB (v48 で 160KB から
-#                   引き上げ: 実測ピーク 168,564)
+#                   引き上げ: 実測ピーク 168,913)
 #   展開バッファ    約464KB → 168KB (同上)
 #   配列初期値プール 49152 → 1024 要素 (v48 で 4096 から
 #                   下げる: iwac 自身のソースでは現れず、
@@ -94,12 +95,15 @@ apply 02-parse.c 'nvar >= 1280' 'nvar >= 576' 1
 # 配列初期値プール (v40): 表と 02b 側のガードを一緒に
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[1024]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
-# 03-gen.c: 命令表 (5つ+パッチ表+緩和の印) と再配置表
+# 03-gen.c: 命令表 (5つ+緩和の印) と再配置表。パッチ表と
+# その掃引は v49 で 03-genstmt.c へ分かれた
 apply 03-gen.c '[6144]' '[2304]' 3
 apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2304' 1
-apply 03-gen.c '[24576]' '[24064]' 7
-apply 03-gen.c 'nasm >= 24576' 'nasm >= 24064' 2
-apply 03-gen.c 'i < 24576' 'i < 24064' 1
+apply 03-gen.c '[24576]' '[24064]' 6
+apply 03-gen.c 'nasm >= 24576' 'nasm >= 24064' 1
+apply 03-genstmt.c '[24576]' '[24064]' 1
+apply 03-genstmt.c 'nasm >= 24576' 'nasm >= 24064' 1
+apply 03-genstmt.c 'i < 24576' 'i < 24064' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)、表示 (2か所)
 apply 05-input.c 'src_buf[475136]' 'src_buf[172032]' 1
 apply 05-input.c '475135' '172031' 4
@@ -117,7 +121,7 @@ cat ../src/0*.c > "$WORK/iwac_std_all.c"
 # 容量だけが違うことの確認: 全断片のオブジェクトが
 # 標準と一致すること (断片プロファイルの本分)
 mkdir -p "$WORK/objs"
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$WORK/iwac-std" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-std.eo"
     "$WORK/iwac-frag" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-frag.eo"
     if ! cmp -s "$WORK/objs/$f-std.eo" "$WORK/objs/$f-frag.eo"; then

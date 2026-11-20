@@ -88,11 +88,13 @@ apply 02-parse.c 'fp_nbits >= 1024' 'fp_nbits >= 256' 1
 apply 02-parse.c 'nvar >= 1280' 'nvar >= 256' 1
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[1024]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
-# 03-gen.c: 命令表 (5つ) とパッチ表
-apply 03-gen.c '[24576]' '[4096]' 7
+# 03-gen.c: 命令表 (5つ+緩和の印)。パッチ表は v49 で
+# 03-genstmt.c へ分かれた
+apply 03-gen.c '[24576]' '[4096]' 6
+apply 03-genstmt.c '[24576]' '[4096]' 1
 # branch_long を消すループの上限も命令表に合わせる (v27 で追加
 # されたループ。これを忘れると小さい配列をはみ出して書く)
-apply 03-gen.c 'i < 24576' 'i < 4096' 1
+apply 03-genstmt.c 'i < 24576' 'i < 4096' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)。
 # エラー表示の数字も合わせる (2か所)
 apply 05-input.c 'src_buf[475136]' 'src_buf[32768]' 1

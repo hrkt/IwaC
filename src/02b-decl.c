@@ -1755,9 +1755,13 @@ static int parse_decl_stmt(void) {
         }
         /* 要素の大きさ (v23): 型に * が付いていれば要素は
          * ポインタなので 8 バイト。そうでなければ型の
-         * 基本の大きさ (char は 1、それ以外は 8) */
+         * 基本の大きさ (char は 1、それ以外は 8)。
+         * 型タグはポインタの配列でも基底の型を残す
+         * (v49: 以前は 8 に畳んでおり、要素の指す先の
+         * 型が宣言の時点で消えていた。要素の「値」の
+         * 型タグは elem_etype が段数を見て 8 に直す) */
         int esize = plevel >= 1 ? 8 : bsize;
-        int eet = plevel >= 1 ? 8 : etype;
+        int eet = etype;
         skip_spaces();
         if (*cur == '=') {
             /* 配列の初期化子 (v40、設計は doc/array-init.md)。

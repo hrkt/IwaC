@@ -9,6 +9,7 @@ obj 02-parse.eo src/decls.c src/02-parse.c
 obj 02b-decl.eo src/decls.c src/02b-decl.c
 obj 02c-fpconv.eo src/decls.c src/02c-fpconv.c
 obj 03-gen.eo src/decls.c src/03-gen.c
+obj 03-genstmt.eo src/decls.c src/03-genstmt.c
 obj 03b-genfp.eo src/decls.c src/03b-genfp.c
 obj 04-encode.eo src/decls.c src/04-encode.c
 obj 05-input.eo src/decls.c src/05-input.c

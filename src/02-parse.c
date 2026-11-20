@@ -1327,11 +1327,14 @@ static int parse_char_node(void) {
  * (二項演算: double があれば double、幅つきが
  * あればその型 (両方なら左)、それ以外は 8)。
  * 分からない形は 0 を返す */
-static int sot_etype;
-static int sot_plevel;
-static int sot_struct;
+/* sot_* と size_type_of は v49 から生成 (03-gen.c) と
+ * 共有する (ポインタ演算のスケールが同じ型の規則を
+ * 使うため)。decls.c に宣言がある */
+int sot_etype;
+int sot_plevel;
+int sot_struct;
 
-static int size_type_of(int node) {
+int size_type_of(int node) {
     int k = node_kind[node];
     if (k == NODE_NUM || k == NODE_SYSCALL3) {
         sot_etype = 8; sot_plevel = 0; sot_struct = -1;
