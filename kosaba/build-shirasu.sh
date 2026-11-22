@@ -112,6 +112,8 @@ apply 06-preproc.c 'def_text[66]' 'def_text[18]' 1
 apply 06-preproc.c 'def_text_len[66]' 'def_text_len[18]' 1
 apply 06-preproc.c 'ndef - ndef_base >= 64' 'ndef - ndef_base >= 16' 1
 apply 06-preproc.c '#define は64個までです' '#define は16個までです' 1
+# #include の置き場 (v51): 小容量でも実用になる大きさに
+apply 06-preproc.c 'inc_arena[131072]' 'inc_arena[16384]' 1
 
 # 小容量の iwac (ホスト版) と、標準の iwac (ホスト版) を作る
 cat "$WORK"/0*.c > "$WORK/iwac_all.c"

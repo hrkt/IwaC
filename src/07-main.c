@@ -130,6 +130,7 @@ int main(int argc, char **argv) {
      * ファイルが開ければファイル、無ければ引数そのもの
      * がプログラム */
     char *src = argv[argi];
+    char *file_arg = 0;  /* ファイルから読めたとき、その名前 */
     if (argc - argi >= 2) {
         int loaded = load_files(&argv[argi], argc - argi);
         if (loaded <= 0) {
@@ -144,6 +145,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         src = src_buf;
+        file_arg = argv[argi];
     } else {
         int must_file = ends_with_c(argv[argi]);
         int loaded = load_file(argv[argi]);
@@ -160,6 +162,7 @@ int main(int argc, char **argv) {
         }
         if (loaded == 1) {
             src = src_buf;
+            file_arg = argv[argi];
         } else {
             /* 引数そのものがプログラム: src_buf へ移して
              * から読む (行継続の処理を揃える、v41) */
@@ -178,8 +181,27 @@ int main(int argc, char **argv) {
     while (src_buf[src_len] != '\0')
         src_len++;
 
+    /* #include の解決用: 最初のファイルのあるディレクトリ
+     * (末尾の '/' まで。ファイル入力でなければ空) */
+    char src_dir[512];
+    src_dir[0] = '\0';
+    if (file_arg) {
+        int last = -1;
+        for (int k = 0; file_arg[k] != '\0'; k++)
+            if (file_arg[k] == '/')
+                last = k;
+        if (last >= 0) {
+            int m = 0;
+            while (m <= last && m < 511) {
+                src_dir[m] = file_arg[m];
+                m++;
+            }
+            src_dir[m] = '\0';
+        }
+    }
+
     /* 前処理: #define を展開してから parse に渡す (v13) */
-    if (!expand_defines(src)) {
+    if (!expand_defines(src, src_dir)) {
         print_str(2, "iwac: ");
         print_str(2, errmsg);
         print_str(2, "\n");

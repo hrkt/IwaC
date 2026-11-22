@@ -26,9 +26,13 @@
 #   入力バッファ 約384KB → 280KB (入力オブジェクトは
 #     最大 224,232 まで下がったが、相乗りする out_code
 #     がコード合計 281,528 を抱えるので、こちらが上限)
-#   コード置き場  288KB → 276KB (コード合計の
-#     実測 281,528 に合わせた)
-#   文字列置き場  128KB → 18KB
+#   コード置き場  288KB → 280KB (コード合計の
+#     実測に合わせる。v51 で #include の実処理が
+#     増え、実測が 285,132 になったため 276KB から
+#     引き上げた)
+#   文字列置き場  128KB → 19KB (実測に合わせる。
+#     v51 で #include のエラー文が増え、実測が
+#     18,766 になったため 18KB から引き上げた)
 #   名前プール     64KB → 6.75KB (実測 6,777)
 #   配列初期値    256KB → 128B (v49 で 512B から下げる。
 #     断片プロファイルの仕事は iwac 自身のリンクで、
@@ -88,9 +92,9 @@ apply nori.c 'share_buf[393216]' 'share_buf[286720]' 1
 apply nori.c '393216 - in_len' '286720 - in_len' 1
 apply nori.c 'in_len >= 393216' 'in_len >= 286720' 1
 # コード置き場 (入力側・出力側) とその上限
-apply nori.c 'code_pool[294912]' 'code_pool[282624]' 1
-apply nori.c 'code_used >= 294912' 'code_used >= 282624' 1
-apply nori.c '> 294912' '> 282624' 1
+apply nori.c 'code_pool[294912]' 'code_pool[286720]' 1
+apply nori.c 'code_used >= 294912' 'code_used >= 286720' 1
+apply nori.c '> 294912' '> 286720' 1
 # 配列の初期値の置き場 (v40) と、その穴埋めの控え (afix)
 apply nori.c 'ainit_buf[262144]' 'ainit_buf[128]' 1
 apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 128' 1
@@ -109,8 +113,8 @@ apply nori.c 'edata_val[256]' 'edata_val[64]' 1
 apply nori.c 'edata_hit[256]' 'edata_hit[64]' 1
 apply nori.c 'nedata >= 256' 'nedata >= 64' 1
 # 文字列置き場と名前プール
-apply nori.c 'str_pool[131072]' 'str_pool[18432]' 1
-apply nori.c 'str_used >= 131072' 'str_used >= 18432' 1
+apply nori.c 'str_pool[131072]' 'str_pool[19456]' 1
+apply nori.c 'str_used >= 131072' 'str_used >= 19456' 1
 apply nori.c 'name_pool[65536]' 'name_pool[6912]' 1
 apply nori.c 'name_used >= 65536' 'name_used >= 6912' 1
 

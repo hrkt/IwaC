@@ -2192,10 +2192,36 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   足りていた間は 16 が正しかった、という整理です。</p></div>
 </section>
 
+<!-- ================= v51 ================= -->
+<section class="phase" id="v51">
+  <div class="head"><span class="badge b-v4">v51</span><h2>#include — ファイルを取り込む</h2></div>
+  <p class="goal-line">目標：<b>ヘッダに宣言と #define を置いて共有する、C の普通の形を使えるようにする。</b></p>
+  <p>プリプロセッサの行ループに <code>#include</code> の枝を足し、
+  ファイルを読んで同じ行ループを再帰で回すことで実現しました。
+  <code>#define</code> の表は大域に 1 つなので、取り込みの境界を
+  越えて共有され、<code>#ifndef</code> の include guard が
+  そのまま効きます。解決は <code>"..."</code> が取り込む側の
+  ファイルのディレクトリ優先、<code>&lt;...&gt;</code> は
+  カレントのみ。入れ子は深さ 8 までです。</p>
+  <p>容量では、取り込んだテキストの置き場（128KB）が増えた分を、
+  小さい版（断片プロファイルと shirasu）では置き場を絞る
+  書き換えで吸収しました。あわせて、コードと文字列の増加で
+  nori 断片の上限（code_pool と str_pool）を実測に合わせて
+  引き上げています。nori 断片のデータは 1MB まで残り
+  186 バイトで、余裕はほぼ使い切りました。</p>
+  <div>
+    <span class="chip">行ループの再帰</span><span class="chip">define 表は境界を越えて共有</span><span class="chip">guard がそのまま効く</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  可変長引数の設計で stdarg.h の置き場に困ったのがきっかけで、
+  土台の機能が後の機能の割り切りを減らすことを実感しました。
+  順番も設計のうちです。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-20（v50 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-22（v51 時点）</p>
 </footer>
 
 </div>

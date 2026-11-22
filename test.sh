@@ -371,8 +371,8 @@ check_run "$TMP/v13b.bin" '[' "v13: 式の中での展開"
 check_error '#define A 65
 #define A 66
 putc(A);' "#define の再定義"
-check_error '#include "x.h"
-putc(65);' "#include は対象外"
+check_error '#pragma once
+putc(65);' "知らない指令"
 
 # --- v14: KosabaOS ターゲット (--kosaba) ---
 # ELF の構造を readelf で確かめる (OS 上での実行確認は
@@ -2471,6 +2471,76 @@ fi
 [ ! -s "$TMP/v50c.bin" ] || fail "v50: エラーなのにバイナリが出力された"
 grep -q '64個まで' "$TMP/v50c.err" || fail "v50: 上限のエラー文言が違う"
 echo "ok: v50: 65 個目の #define は上限エラーになり、出力は空だった"
+
+# --- v51: #include (設計は doc/include.md) ---
+# 取り込みは実ファイルが要るので、この節は $TMP の下に
+# ヘッダと本体を用意してコンパイルする
+mkdir -p "$TMP/inc/sub"
+cat > "$TMP/inc/common.h" <<'EOF'
+#ifndef COMMON_H
+#define COMMON_H
+#define IVAL 65
+#endif
+EOF
+cat > "$TMP/inc/helper.h" <<'EOF'
+int twice(int x) { return x * 2; }
+EOF
+cat > "$TMP/inc/sub/inner.h" <<'EOF'
+#define DEEPV 66
+EOF
+cat > "$TMP/inc/sub/outer.h" <<'EOF'
+#include "inner.h"
+EOF
+cat > "$TMP/inc/main.c" <<'EOF'
+#include "common.h"
+#include "common.h"
+#include "helper.h"
+putc(IVAL - 1 + twice(1));
+EOF
+"$IWAC" "$TMP/inc/main.c" > "$TMP/v51a.bin"
+check_run "$TMP/v51a.bin" B "v51: #include (define と関数、guard で二重取り込み可)"
+cat > "$TMP/inc/main2.c" <<'EOF'
+#include "sub/outer.h"
+putc(DEEPV);
+EOF
+"$IWAC" "$TMP/inc/main2.c" > "$TMP/v51b.bin"
+check_run "$TMP/v51b.bin" B "v51: 入れ子の #include (取り込む側のディレクトリから解決)"
+cat > "$TMP/inc/main3.c" <<'EOF'
+#ifdef NOPE
+#include "missing.h"
+#endif
+#include <common.h>
+putc(IVAL);
+EOF
+(cd "$TMP/inc" && "$IWAC" main3.c > "$TMP/v51c.bin")
+check_run "$TMP/v51c.bin" A "v51: <...> はカレントから、無効な範囲の取り込みは読まない"
+cat > "$TMP/inc/main4.c" <<'EOF'
+#include "missing.h"
+putc(65);
+EOF
+if "$IWAC" "$TMP/inc/main4.c" > "$TMP/v51d.bin" 2>"$TMP/v51d.err"; then
+    fail "v51: 無いファイルの #include はエラーになるはず"
+fi
+grep -q "#include のファイルが開けません" "$TMP/v51d.err" || fail "v51: 無いファイルのエラー文が違う"
+echo "ok: v51: 無いファイルの #include はエラー"
+cat > "$TMP/inc/self.h" <<'EOF'
+#include "self.h"
+EOF
+cat > "$TMP/inc/main5.c" <<'EOF'
+#include "self.h"
+putc(65);
+EOF
+if "$IWAC" "$TMP/inc/main5.c" > "$TMP/v51e.bin" 2>"$TMP/v51e.err"; then
+    fail "v51: guard 無しの自己取り込みはエラーになるはず"
+fi
+grep -q "#include の入れ子が深すぎます" "$TMP/v51e.err" || fail "v51: 深さエラーの文が違う"
+echo "ok: v51: guard 無しの自己取り込みは深さエラー"
+if "$IWAC" --kosaba "$TMP/inc/main2.c" > "$TMP/v51f.elf" 2>"$TMP/v51f.err"; then
+    [ -s "$TMP/v51f.elf" ] || fail "v51: --kosaba の #include で ELF が空"
+    echo "ok: v51: --kosaba でも #include できる"
+else
+    fail "v51: --kosaba の #include が失敗: $(cat "$TMP/v51f.err")"
+fi
 
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と

@@ -12,29 +12,35 @@
 
 static char src_buf[475136];
 
-/* 行継続 (v41): src_buf の中のバックスラッシュ+改行を
+/* 行継続 (v41): buf の中のバックスラッシュ+改行を
  * 消す (C の翻訳フェーズ2)。前へ詰めながら書き換える。
  * 対象は LF と CRLF の両方。文字列やコメントの中でも
  * 消えるのが C の決まり (フェーズ2は字句より前)。
- * ソース末尾のバックスラッシュは相手が無いので残る */
-static void remove_splices(void) {
+ * ソース末尾のバックスラッシュは相手が無いので残る。
+ * v51: #include で読んだファイルにも同じ処理が要る
+ * ので、任意のバッファにかける形に分けた */
+static void remove_splices_in(char *buf) {
     int r = 0;
     int w = 0;
-    while (src_buf[r] != '\0') {
-        if (src_buf[r] == '\\' && src_buf[r + 1] == '\n') {
+    while (buf[r] != '\0') {
+        if (buf[r] == '\\' && buf[r + 1] == '\n') {
             r += 2;
             continue;
         }
-        if (src_buf[r] == '\\' && src_buf[r + 1] == '\r' &&
-            src_buf[r + 2] == '\n') {
+        if (buf[r] == '\\' && buf[r + 1] == '\r' &&
+            buf[r + 2] == '\n') {
             r += 3;
             continue;
         }
-        src_buf[w] = src_buf[r];
+        buf[w] = buf[r];
         w++;
         r++;
     }
-    src_buf[w] = '\0';
+    buf[w] = '\0';
+}
+
+static void remove_splices(void) {
+    remove_splices_in(src_buf);
 }
 
 /* path が ".c" で終わる名前かどうか */
@@ -137,5 +143,38 @@ int load_text(char *text) {
     src_buf[used] = '\0';
     remove_splices();
     return 1;
+}
+
+/* #include (v51) 用: ファイル全体を buf へ読む。容量は
+ * cap (末尾の NUL の分を含む)。行継続も消してから、
+ * テキストの長さを返す。戻り値: 0以上 = 長さ、
+ * -1 = 開けない (ディレクトリなど読めないものも含む)、
+ * -2 = 大きすぎる。前処理 (06) から呼ばれる */
+int load_include(char *path, char *buf, int cap) {
+    int fd = open(path, 0);
+    if (fd < 0)
+        return -1;
+    int used = 0;
+    for (;;) {
+        if (used >= cap - 1) {
+            close(fd);
+            return -2;
+        }
+        long n = read(fd, buf + used, cap - 1 - used);
+        if (n < 0) {
+            close(fd);
+            return -1;
+        }
+        if (n == 0)
+            break;
+        used += (int)n;
+    }
+    close(fd);
+    buf[used] = '\0';
+    remove_splices_in(buf);
+    int len = 0;
+    while (buf[len] != '\0')
+        len++;
+    return len;
 }
 

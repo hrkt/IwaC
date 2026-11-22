@@ -11,7 +11,7 @@
  *   - 再定義はエラー。define は最大64個 (v50 で 16 から緩和)、
  *   置き換えは127文字まで
  *   - # で始まる行は #define / #ifdef / #ifndef / #else /
- *     #endif だけ。それ以外はエラー (#include 等は対象外)
+ *     #endif と #include (v51) だけ。それ以外はエラー
  * 条件付きコンパイル (v18):
  *   - #ifdef 名前 / #ifndef 名前 / #else / #endif。入れ子は
  *     32段まで。無効になった範囲の行は出力されず、その中の
@@ -19,6 +19,17 @@
  *   - コンパイラが用意する定義済みマクロ: __IWAC__ は常に、
  *     __KOSABA__ は --kosaba のときに、どちらも 1 として
  *     定義済み。ターゲットでソースを切り替えるのに使う
+ * #include (v51、設計は doc/include.md):
+ *   - 行ループが #include に当たったら、ファイルを
+ *     読んで同じ行ループを再帰で回し、出力をその場へ
+ *     差し込む。#define の表は大域に1つなので境界を
+ *     越えて共有され、#ifndef の guard がそのまま効く
+ *   - 解決: "..." は取り込む側のファイルのディレクトリ
+ *     を先に探し、無ければカレント。<...> はカレント
+ *     のみ。入れ子は深さ8まで。取り込んだテキストの
+ *     置き場 (inc_arena) は入れ子の深さぶん重ねて使う
+ *   - ファイルの中で #ifdef の対応が閉じていない、
+ *     ブロックコメントが閉じていない場合はエラー
  * なお iwac 自身のソースは今もプリプロセッサ無しのままで、
  * これは「コンパイルされる側のプログラム」のための機能。
  * ================================================================ */
@@ -112,21 +123,96 @@ static void exp_str(char *s, int len) {
         exp_ch(s[i]);
 }
 
-/* 前処理: #define を展開し、#ifdef 等で枝を選び、結果を
- * exp_buf に置く。成功したら 1 */
-static int expand_defines(char *src) {
-    ndef = 0;
-    exp_len = 0;
-    exp_failed = 0;
-    cond_n = 0;
-    /* 定義済みマクロ (v18): __IWAC__ は常に、__KOSABA__ は
-     * KosabaOS ターゲットのときに、1 として用意する */
-    if (!add_define("__IWAC__", 8, "1", 1))
+/* #include (v51) の置き場と作業領域。置き場は入れ子の
+ * 深さぶん重ねて使い (inc_used が積み位置)、兄弟の
+ * 取り込みは同じ場所を使い回す */
+static char inc_arena[131072];
+static int inc_used;
+static char inc_path[256];
+static char inc_cand[512];
+
+static int expand_text(char *src, char *dir, int depth);
+
+/* #include の実処理: inc_path のファイルを読んで、
+ * その場へ展開する。dir は取り込む側のファイルの
+ * ディレクトリ (末尾に '/' を含む。無ければ空)。
+ * angled は <...> の形だったか。成功したら 1 */
+static int do_include(char *dir, int depth, int angled) {
+    if (depth >= 8) {
+        errmsg = "#include の入れ子が深すぎます";
         return 0;
-    if (target_kosaba && !add_define("__KOSABA__", 10, "1", 1))
+    }
+    int mark = inc_used;
+    int cap = (int)sizeof(inc_arena) - mark;
+    int len = -1;
+    char *used_path = inc_path;
+    if (!angled && dir[0] != '\0') {
+        /* "..." は取り込む側のディレクトリを先に探す */
+        int k = 0;
+        while (dir[k] != '\0' && k < 500) {
+            inc_cand[k] = dir[k];
+            k++;
+        }
+        int m = 0;
+        while (inc_path[m] != '\0' && k < 510) {
+            inc_cand[k] = inc_path[m];
+            k++;
+            m++;
+        }
+        inc_cand[k] = '\0';
+        len = load_include(inc_cand, inc_arena + mark, cap);
+        if (len >= 0)
+            used_path = inc_cand;
+    }
+    if (len == -2) {
+        errmsg = "#include のファイルが大きすぎます";
         return 0;
-    /* 定義済みマクロは上限 (利用者分 64) の数に入れない */
-    ndef_base = ndef;
+    }
+    if (len < 0) {
+        len = load_include(inc_path, inc_arena + mark, cap);
+        if (len == -2) {
+            errmsg = "#include のファイルが大きすぎます";
+            return 0;
+        }
+        if (len < 0) {
+            errmsg = "#include のファイルが開けません";
+            return 0;
+        }
+        used_path = inc_path;
+    }
+    /* 取り込めたパスのディレクトリを子の基準にする */
+    char child_dir[512];
+    int last = -1;
+    int k = 0;
+    while (used_path[k] != '\0') {
+        if (used_path[k] == '/')
+            last = k;
+        k++;
+    }
+    if (last < 0) {
+        child_dir[0] = '\0';
+    } else {
+        int m = 0;
+        while (m <= last && m < 511) {
+            child_dir[m] = used_path[m];
+            m++;
+        }
+        child_dir[m] = '\0';
+    }
+    inc_used = mark + len + 1;
+    int ok = expand_text(inc_arena + mark, child_dir, depth + 1);
+    inc_used = mark;
+    return ok;
+}
+
+/* 前処理の本体: 1つのテキストを走査し、#define の展開と
+ * #ifdef 等の枝選びをしながら exp_buf へ書く。#include は
+ * do_include 経由でこの関数を再帰に呼ぶ。成功したら 1 */
+static int expand_text(char *src, char *dir, int depth) {
+    /* このファイルに入った時点の条件の段数。ファイルの
+     * 中で開いた #ifdef は、そのファイルの中で閉じる
+     * こと (チェックは関数の終わりで) */
+    int cond_base = cond_n;
     int i = 0;
     int sol = 1;  /* 行頭 (その行にまだ空白しか無い) か */
     int in_comment = 0;  /* ブロックコメントの中か (v18) */
@@ -213,8 +299,43 @@ static int expand_defines(char *src) {
                                         src + ts, te - ts))
                             return 0;
                     }
+                } else if (kw_eq(src, j, "include", 7)) {
+                    /* 有効な範囲の中の #include だけが
+                     * ファイルを読む (v51) */
+                    if (cond_active()) {
+                        j += 7;
+                        while (src[j] == ' ' || src[j] == '\t')
+                            j++;
+                        int angled = 0;
+                        if (src[j] == '<') {
+                            angled = 1;
+                        } else if (src[j] != '"') {
+                            errmsg = "#include には \"...\" か <...> でパスを書きます";
+                            return 0;
+                        }
+                        j++;
+                        int ps = j;
+                        char term = angled ? '>' : '"';
+                        while (src[j] != '\0' && src[j] != '\n' &&
+                               src[j] != term)
+                            j++;
+                        if (src[j] != term) {
+                            errmsg = "#include のパスが閉じていません";
+                            return 0;
+                        }
+                        int plen = j - ps;
+                        if (plen == 0 || plen >= 256) {
+                            errmsg = "#include のパスが長すぎます";
+                            return 0;
+                        }
+                        for (int k = 0; k < plen; k++)
+                            inc_path[k] = src[ps + k];
+                        inc_path[plen] = '\0';
+                        if (!do_include(dir, depth, angled))
+                            return 0;
+                    }
                 } else if (cond_active()) {
-                    errmsg = "# で始まる行は #define / #ifdef / #ifndef / #else / #endif だけが使えます";
+                    errmsg = "# で始まる行は #define / #ifdef / #ifndef / #else / #endif / #include だけが使えます";
                     return 0;
                 }
                 /* 指令行そのものは出力しない。行末まで進み、
@@ -378,10 +499,39 @@ static int expand_defines(char *src) {
         else if (c != ' ' && c != '\t' && c != '\r')
             sol = 0;
     }
-    if (cond_n > 0) {
-        errmsg = "#endif が足りません";
+    if (cond_n != cond_base) {
+        if (depth == 0)
+            errmsg = "#endif が足りません";
+        else
+            errmsg = "#ifdef / #endif の対応がファイルの中で閉じていません";
         return 0;
     }
+    if (depth > 0 && in_comment) {
+        errmsg = "ブロックコメントが閉じていません";
+        return 0;
+    }
+    return 1;
+}
+
+/* 前処理の入口: 状態を用意し、定義済みマクロを登録
+ * してから本体 (expand_text) を回す。dir は最初の
+ * ファイルのあるディレクトリ (#include の解決用) */
+static int expand_defines(char *src, char *dir) {
+    ndef = 0;
+    exp_len = 0;
+    exp_failed = 0;
+    cond_n = 0;
+    inc_used = 0;
+    /* 定義済みマクロ (v18): __IWAC__ は常に、__KOSABA__ は
+     * KosabaOS ターゲットのときに、1 として用意する */
+    if (!add_define("__IWAC__", 8, "1", 1))
+        return 0;
+    if (target_kosaba && !add_define("__KOSABA__", 10, "1", 1))
+        return 0;
+    /* 定義済みマクロは上限 (利用者分 64) の数に入れない */
+    ndef_base = ndef;
+    if (!expand_text(src, dir, 0))
+        return 0;
     if (exp_failed) {
         errmsg = "展開後のソースが大きすぎます";
         return 0;

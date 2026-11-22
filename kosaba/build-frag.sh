@@ -120,6 +120,9 @@ apply 06-preproc.c 'def_text[66]' 'def_text[18]' 1
 apply 06-preproc.c 'def_text_len[66]' 'def_text_len[18]' 1
 apply 06-preproc.c 'ndef - ndef_base >= 64' 'ndef - ndef_base >= 16' 1
 apply 06-preproc.c '#define は64個までです' '#define は16個までです' 1
+# #include の置き場 (v51): iwac 自身のソースは取り込みを
+# 使わないので、断片プロファイルでは最小に絞る
+apply 06-preproc.c 'inc_arena[131072]' 'inc_arena[2048]' 1
 
 # 断片プロファイルの iwac (ホスト版) と標準の iwac を作る
 cat "$WORK"/0*.c > "$WORK/iwac_all.c"
