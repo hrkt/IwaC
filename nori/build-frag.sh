@@ -25,9 +25,9 @@
 #   配列初期値    256KB → 128B (断片プロファイルの
 #     仕事は iwac 自身のリンクで、初期値は現れない)
 #   afix の控え   1024 → 32 (実測 0 件)
-#   edata / eabs  256 → 64 / 32 (edata はオブジェクト
-#     ごとに数える初期値つき変数で、実測のピーク 63。
-#     eabs は実測 0 件)
+#   edata / eabs  256 → 80 / 32 (edata はオブジェクト
+#     ごとに数える初期値つき変数で、実測のピーク 67
+#     (v53 で OP が4つ増えた)。eabs は実測 0 件)
 # 狙いは静的データ 1MB 未満。最後に測り、以上なら
 # 失敗として止まる。
 #
@@ -87,11 +87,11 @@ apply nori.c 'nafix >= 1024' 'nafix >= 32' 1
 apply nori.c 'eabs_idx[256]' 'eabs_idx[32]' 1
 apply nori.c 'eabs_val[256]' 'eabs_val[32]' 1
 apply nori.c 'neabs < 256' 'neabs < 32' 2
-apply nori.c 'edata_off[256]' 'edata_off[64]' 1
-apply nori.c 'edata_sym[256]' 'edata_sym[64]' 1
-apply nori.c 'edata_val[256]' 'edata_val[64]' 1
-apply nori.c 'edata_hit[256]' 'edata_hit[64]' 1
-apply nori.c 'nedata >= 256' 'nedata >= 64' 1
+apply nori.c 'edata_off[256]' 'edata_off[80]' 1
+apply nori.c 'edata_sym[256]' 'edata_sym[80]' 1
+apply nori.c 'edata_val[256]' 'edata_val[80]' 1
+apply nori.c 'edata_hit[256]' 'edata_hit[80]' 1
+apply nori.c 'nedata >= 256' 'nedata >= 80' 1
 # 名前プール (文字列置き場はストリーミング化で消えた)
 apply nori.c 'name_pool[65536]' 'name_pool[7168]' 1
 apply nori.c 'name_used >= 65536' 'name_used >= 7168' 1
