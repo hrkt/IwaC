@@ -2628,7 +2628,7 @@ EOF
 "$IWAC" --kosaba --asari "$TMP/v53b.c" > "$TMP/v53b.asm"
 n53=$(grep -c '^i ' "$TMP/v53b.asm")
 [ "$n53" -le 134 ] || fail "v53: 命令数が増えている ($n53、融合前は 145)"
-slt53=$(grep -c '^i \(slt\|sltu\|sltiu\) ' "$TMP/v53b.asm")
+slt53=$(grep -c '^i \(slt\|sltu\|sltiu\) ' "$TMP/v53b.asm" || true)
 [ "$slt53" -eq 0 ] || fail "v53: 条件の位置に slt 系が残っている ($slt53、融合前は 7)"
 echo "ok: v53: 分岐の融合が効いている (命令数 $n53、slt 系 $slt53)"
 
