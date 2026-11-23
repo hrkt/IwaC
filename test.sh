@@ -2632,6 +2632,46 @@ slt53=$(grep -c '^i \(slt\|sltu\|sltiu\) ' "$TMP/v53b.asm" || true)
 [ "$slt53" -eq 0 ] || fail "v53: 条件の位置に slt 系が残っている ($slt53、融合前は 7)"
 echo "ok: v53: 分岐の融合が効いている (命令数 $n53、slt 系 $slt53)"
 
+# --- v54: 古典スペルの unsigned の修正 ---
+# unsigned long 等が符号つきとして扱われていた
+# (型の言葉を読み捨てるモデルで、unsigned の印が
+# 落ちていた)。比較・除算・剰余・右シフトが
+# 符号なしになること、符号つきは不変なこと
+cat > "$TMP/v54a.c" <<'EOF'
+unsigned long u;
+long s;
+int r;
+u = 0 - 1;
+s = 0 - 1;
+r = 0;
+if (u > 1) r = r + 1;
+if (s > 1) r = r + 2;
+if ((u / 2) > 1000000) r = r + 4;
+if ((s / 2) > 1000000) r = r + 8;
+if ((u >> 60) == 15) r = r + 16;
+if ((u % 10) == 5) r = r + 32;
+putc(65 + (r - 53));
+EOF
+"$IWAC" "$TMP/v54a.c" > "$TMP/v54a.bin"
+check_run "$TMP/v54a.bin" A "v54: unsigned long は符号なし、long は符号つきのまま"
+cat > "$TMP/v54b.c" <<'EOF'
+typedef unsigned long usz;
+usz u;
+unsigned char c;
+unsigned int w;
+int r;
+u = 0 - 1;
+r = (u > 1) ? 1 : 0;
+c = 200;
+c = c + 100;
+if (c == 44) r = r + 1;
+w = 0 - 1;
+if ((w % 7) == 1) r = r + 1;
+putc(65 + (r - 3));
+EOF
+"$IWAC" "$TMP/v54b.c" > "$TMP/v54b.bin"
+check_run "$TMP/v54b.bin" A "v54: typedef・unsigned char・unsigned int でも符号なし"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに

@@ -2668,6 +2668,10 @@ static int parse_type(void) {
         return 1;
     }
     int has_char = ident_is("char");
+    int uns = ident_is("unsigned");  /* 古典スペルの
+                             * unsigned の印 (v54)。
+                             * 型の言葉の並びのどこかに
+                             * unsigned があれば拾う */
     int sized = sized_type_etype();  /* 幅つきの型 (v35) */
     int dbl = ident_is("double") ? 8 + 64 : 0;  /* double
                              * (v46)。型タグは大きさ 8 +
@@ -2689,6 +2693,8 @@ static int parse_type(void) {
         }
         if (ident_is("char"))
             has_char = 1;
+        if (ident_is("unsigned"))
+            uns = 1;
         int sk = sized_type_etype();
         if (sk)
             sized = sk;
@@ -2714,6 +2720,15 @@ static int parse_type(void) {
     } else {
         parse_type_bsize = has_char ? 1 : 8;
         parse_type_etype = parse_type_bsize;
+        if (uns)
+            /* unsigned の古典スペルは、幅つきの
+             * 符号なし型と同じ型タグにする (v54)。
+             * 大きさは従来の読み捨てモデルどおり
+             * (char だけ1バイト、それ以外は8バイト)
+             * で変えず、符号なしの印 (16) と幅確定の
+             * 印 (32) だけを立てる。これで比較・
+             * 除算・剰余・右シフトが符号なしになる */
+            parse_type_etype = parse_type_bsize + 16 + 32;
     }
     parse_type_plevel = stars;
     return 1;

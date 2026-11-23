@@ -2280,10 +2280,43 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   前提の置き場所を洗うのが増築の本体でした。</p></div>
 </section>
 
+<!-- ================= v54 ================= -->
+<section class="phase" id="v54">
+  <div class="head"><span class="badge b-v4">v54</span><h2>古典スペルの unsigned — 読み捨てていた印を拾う</h2></div>
+  <p class="goal-line">目標：<b><code>unsigned long</code> を C の規格どおり符号なしとして扱う。</b></p>
+  <p>iwac の古典スペル（char / short / int / long と
+  unsigned / signed の組み合わせ）は、v16 以来「型の
+  言葉は読み捨てる」モデルで、char だけ 1 バイト、
+  それ以外は全部 8 バイトの符号つき整数に潰して
+  いました。幅と符号を本当に持つのは v35 の幅つきの
+  名前（uint64 等）だけだったため、<code>unsigned long</code>
+  の比較・除算・剰余・右シフトが全部符号つきに
+  なっていました。実害が見えなかったのは、iwac 自身と
+  nami が符号なしの要る所で幅つきの名前を使っていた
+  からです。</p>
+  <p>直し方は小さく、parse_type が型の言葉の並びの
+  中の unsigned を拾い、型タグに符号なしの印と
+  幅確定の印を立てるだけ。大きさは従来モデルどおり
+  変えていません（int / long は 8 バイトのまま、
+  short も 8 バイトのまま）。typedef 経由の
+  <code>typedef unsigned long usz;</code> でも
+  自動で効きます。</p>
+  <div>
+    <span class="chip">型タグに符号なしの印</span><span class="chip">大きさは不変</span><span class="chip">typedef でも有効</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  「読み捨てる」割り切りは、捨てた情報が後で意味を
+  持つようになると静かな不具合になります。符号なし
+  判定は型タグのビットで決まる設計だったので、
+  拾う場所は parse_type の1か所で済みました。
+  割り切りの置き場所が1か所に寄っていると、
+  後からの修正も1か所で済む、という形です。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-23（v53 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-23（v54 時点）</p>
 </footer>
 
 </div>
