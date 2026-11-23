@@ -2542,6 +2542,43 @@ else
     fail "v51: --kosaba の #include が失敗: $(cat "$TMP/v51f.err")"
 fi
 
+# --- v52: peephole 最適化 (設計は doc/peephole.md) ---
+# 振る舞いが変わらないこと (混合プログラムの出力) と、
+# 最適化が実際に効いていること (--asari の命令数と
+# ロードの mv への転送) の両方を見る
+cat > "$TMP/v52a.c" <<'EOF'
+int add(int a, int b) { return a + b; }
+int arr[4];
+int i;
+int s;
+s = 0;
+for (i = 0; i < 4; i++) {
+    arr[i] = add(i, 10);
+}
+for (i = 0; i < 4; i++) {
+    s = s + arr[i];
+}
+putc(65 + (s - 46));
+EOF
+"$IWAC" "$TMP/v52a.c" > "$TMP/v52a.bin"
+check_run "$TMP/v52a.bin" A "v52: peephole 後も混合プログラムの出力は不変"
+cat > "$TMP/v52b.c" <<'EOF'
+int add(int a, int b) { return a + b; }
+int x;
+int y;
+x = add(40, 2);
+y = x;
+putc(y);
+x = add(x, 23);
+putc(x);
+EOF
+"$IWAC" --kosaba --asari "$TMP/v52b.c" > "$TMP/v52b.asm"
+n52=$(grep -c '^i ' "$TMP/v52b.asm")
+[ "$n52" -le 66 ] || fail "v52: 命令数が増えている ($n52、最適化前は 66)"
+ld52=$(grep -c '^i \(ld\|lw\) ' "$TMP/v52b.asm")
+[ "$ld52" -le 9 ] || fail "v52: peephole の転送が効いていない (ロード $ld52、最適化前は 12)"
+echo "ok: v52: peephole が効いている (命令数 $n52、ロード $ld52)"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに

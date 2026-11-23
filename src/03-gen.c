@@ -346,6 +346,19 @@ static void gen_load_addr(int reg, unsigned int addr) {
     asm_push(OP_ADDI, reg, reg, 0, (int)lo);
 }
 
+/* データの住所を kind と idx から引く (v52)。
+ * gen_load_addr_sym の控えの解決と、溢れたときの
+ * その場焼きの両方で使う */
+static unsigned int daddr_resolve(int kind, int idx) {
+    if (kind == RLOC_STR)
+        return str_addr[idx];
+    if (kind == RLOC_VAR)
+        return var_global_addr(idx);
+    if (kind == RLOC_ARR)
+        return arr_addr[idx];
+    return (unsigned int)idx;
+}
+
 /* 住所作りを「何の住所か」付きで出す (v31)。
  * 一括では gen_load_addr と同じ (今のパスで確定
  * している住所を使う)。オブジェクト出力では
@@ -369,14 +382,27 @@ static void gen_load_addr_sym(int reg, int kind, int idx) {
             asm_push(OP_ADDI, reg, reg, 0, 0);
             return;
         }
-        if (kind == RLOC_STR)
-            gen_load_addr(reg, str_addr[idx]);
-        else if (kind == RLOC_VAR)
-            gen_load_addr(reg, var_global_addr(idx));
-        else if (kind == RLOC_ARR)
-            gen_load_addr(reg, arr_addr[idx]);
-        else
-            gen_load_addr(reg, (unsigned int)idx);
+        /* データの住所 (v52): その場で焼くと、peephole
+         * が命令を消したときに auipc の位置がずれて
+         * hi/lo が狂う。関数の住所 (dfaddr) と同じく
+         * 組だけ置いて控え、gen_all の最後 (peephole
+         * の後) に bake_daddr が埋める。控えの置き場は
+         * オブジェクト出力の obj_reloc を借りる
+         * (一括では使われていない)。溢れたら印を
+         * 付けてその場焼きに切り替える: peephole は
+         * 丸ごと止まるので位置は動かず、焼いた値も
+         * 控えの解決も正しいままになる */
+        if (obj_nreloc >= 0 && obj_nreloc < 6144) {
+            obj_reloc_site[obj_nreloc] = nasm;
+            obj_reloc_kind[obj_nreloc] = kind;
+            obj_reloc_idx[obj_nreloc] = idx;
+            obj_nreloc++;
+            asm_push(OP_AUIPC, reg, 0, 0, 0);
+            asm_push(OP_ADDI, reg, reg, 0, 0);
+        } else {
+            obj_nreloc = -1;  /* あふれの印 (peephole 停止) */
+            gen_load_addr(reg, daddr_resolve(kind, idx));
+        }
         return;
     }
     if (kind == 0) {
@@ -396,6 +422,28 @@ static void gen_load_addr_sym(int reg, int kind, int idx) {
         obj_nreloc = -1;    /* あふれの印 */
     asm_push(OP_AUIPC, reg, 0, 0, 0);
     asm_push(OP_ADDI, reg, reg, 0, 0);
+}
+
+/* 一括出力で、控えておいたデータ住所の組 (auipc +
+ * addi) の即値を埋める (v52)。命令列が確定した後
+ * (peephole の後) に gen_all から呼ばれる。組の
+ * 位置から pc を数え直すので、命令が消えて位置が
+ * ずれても住所は正しい。溢れてその場焼きに切り
+ * 替わった分は obj_nreloc が -1 になっていて、
+ * ここには残っていない */
+void bake_daddr(void) {
+    int i;
+    for (i = 0; i < obj_nreloc; i++) {
+        int site = obj_reloc_site[i];
+        unsigned int addr = daddr_resolve(obj_reloc_kind[i],
+                                          obj_reloc_idx[i]);
+        unsigned int pc = LOAD_BASE + (unsigned int)site * 4u;
+        long diff = (long)addr - (long)pc;
+        long hi = (diff + 0x800) >> 12;
+        long lo = diff - (hi << 12);
+        asm_imm[site] = (int)hi;
+        asm_imm[site + 1] = (int)lo;
+    }
 }
 
 /* 小さな定数をレジスタに作る (v23): 2次元の列数や行の

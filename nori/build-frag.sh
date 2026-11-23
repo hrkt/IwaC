@@ -33,7 +33,8 @@
 #   文字列置き場  128KB → 19KB (実測に合わせる。
 #     v51 で #include のエラー文が増え、実測が
 #     18,766 になったため 18KB から引き上げた)
-#   名前プール     64KB → 6.75KB (実測 6,777)
+#   名前プール     64KB → 7KB (実測 7,007。v52 で
+#     peephole と bake_daddr の名前が増えた)
 #   配列初期値    256KB → 128B (v49 で 512B から下げる。
 #     断片プロファイルの仕事は iwac 自身のリンクで、
 #     初期値は現れない)
@@ -115,8 +116,8 @@ apply nori.c 'nedata >= 256' 'nedata >= 64' 1
 # 文字列置き場と名前プール
 apply nori.c 'str_pool[131072]' 'str_pool[19456]' 1
 apply nori.c 'str_used >= 131072' 'str_used >= 19456' 1
-apply nori.c 'name_pool[65536]' 'name_pool[6912]' 1
-apply nori.c 'name_used >= 65536' 'name_used >= 6912' 1
+apply nori.c 'name_pool[65536]' 'name_pool[7168]' 1
+apply nori.c 'name_used >= 65536' 'name_used >= 7168' 1
 
 # 標準の iwac (ホスト版) でオブジェクト一式を用意する
 cat ../src/0*.c > "$WORK/iwac_all.c"

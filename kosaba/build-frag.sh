@@ -98,7 +98,7 @@ apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
 # 03-gen.c: 命令表 (5つ+緩和の印) と再配置表。パッチ表と
 # その掃引は v49 で 03-genstmt.c へ分かれた
 apply 03-gen.c '[6144]' '[2304]' 3
-apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2304' 1
+apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2304' 2
 apply 03-gen.c '[24576]' '[24064]' 6
 apply 03-gen.c 'nasm >= 24576' 'nasm >= 24064' 1
 apply 03-genstmt.c '[24576]' '[24064]' 1

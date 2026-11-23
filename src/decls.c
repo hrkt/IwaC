@@ -435,6 +435,7 @@ int dfaddr_func[1024];
 int dfaddr_n;
 void gen_load_addr(int reg, unsigned int addr);
 void gen_load_addr_sym(int reg, int kind, int idx);
+void bake_daddr(void);
 void gen_load_const(int reg, int v);
 void gen_load_u32(int reg, int v);
 void emit_load_i64(int reg, long v);

@@ -962,6 +962,234 @@ static int list_needs_stack(int head) {
     return 0;
 }
 
+/* ================================================================
+ * peephole 最適化 (v52): gen が並べた命令列を、呼び出しの
+ * 飛び先を書き直す前に局所的に磨く。設計は doc/peephole.md。
+ *
+ * やること (窓の中だけを見る局所的な書き換え):
+ *   (1) nop move (addi rd, rd, 0) を消す
+ *   (2) store の直後の同じスロットへの load が、store した
+ *       レジスタ宛なら load を消す (dead reload)
+ *   (3) 別レジスタ宛なら load を mv に替える (forwarding)
+ *   (4) load した値をそのまま同じスロットへ戻す store を消す
+ * 消す命令は asm_op を -1 にして印を付け、最後に圧縮する。
+ * 分岐・ジャンプの飛び先は絶対命令番号なので、圧縮の前に
+ * 「消えた命令の数」を差し引いて付け替える。命令番号を
+ * 握る者は飛び先の他に func_entry[]、dfaddr_site[]、
+ * obj_reloc_site[]、obj_abs_site[]、obj_flush_site、
+ * obj_prefix_insts があり、全部付け替える。
+ * 飛び先になっている命令と、住所の組 (auipc + addi) は
+ * 消さない (peep_bits に印を付けて守る)。住所の組は
+ * dfaddr (関数の住所) と obj_reloc / obj_abs (データの
+ * 住所とオブジェクト出力の穴) が控えている。
+ * ================================================================ */
+static char *peep_bits;  /* 飛び先・保護位置の印 (ビット列)。
+                          * 置き場は patch_next の先頭を借りる:
+                          * パッチの鎖は生成が終われば用済みで、
+                          * peep は生成の最後にしか動かない。
+                          * 専用の表を持つと断片プロファイルの
+                          * 1MB 枠を超えるための苦肉の策 */
+
+/* 印の読み書き (位置 j のビット) */
+static int peep_istgt(int j) {
+    return (peep_bits[j >> 3] >> (j & 7)) & 1;
+}
+
+static void peep_settgt(int j) {
+    peep_bits[j >> 3] = peep_bits[j >> 3] | (1 << (j & 7));
+}
+
+/* 命令 i がレジスタ r を書き換えるか。ストアと分岐は
+ * asm_rd を行き先に使わないので除く (呼び出しと ecall は
+ * 呼び出し側で障壁として先に止める) */
+static int peep_writes(int i, int r) {
+    int op = asm_op[i];
+    if (op == OP_SD || op == OP_SW || op == OP_SB ||
+        op == OP_SH || op == OP_FSD || op == OP_BEQ ||
+        op == OP_BNE || op == OP_ECALL || op == OP_WFI)
+        return 0;
+    return asm_rd[i] == r;
+}
+
+static int peep_is_store(int op) {
+    return op == OP_SD || op == OP_SW || op == OP_SB ||
+           op == OP_SH || op == OP_FSD;
+}
+
+/* 呼び出しと ecall はメモリをどう触るか分からないので
+ * パターンを跨がない */
+static int peep_is_barrier(int op) {
+    return op == OP_JAL || op == OP_JALR || op == OP_ECALL;
+}
+
+/* 位置 pos より前に消えた (asm_op が -1 の) 命令の数 */
+static int peep_deleted_before(int pos) {
+    int c = 0;
+    int i;
+    for (i = 0; i < pos; i++)
+        if (asm_op[i] < 0)
+            c = c + 1;
+    return c;
+}
+
+static void peep_run(void) {
+    int i;
+    int j;
+    int f;
+    /* 住所の控えが溢れた生成では、守るべき組を
+     * 特定できないので何もしない (安全側)。
+     * obj_nreloc は一括ではデータ住所の控えの借り物 */
+    if (dfaddr_n < 0 || obj_nreloc < 0 || obj_nabs < 0)
+        return;
+    /* 1. 飛び先と保護位置に印を付ける */
+    peep_bits = (char *)patch_next;
+    for (i = 0; i < 3072; i++)
+        peep_bits[i] = 0;
+    peep_settgt(0);  /* 入口は落とさない */
+    for (i = 0; i < nasm; i++) {
+        int op = asm_op[i];
+        if ((op == OP_BEQ || op == OP_BNE || op == OP_JAL) &&
+            asm_imm[i] >= 0 && asm_imm[i] < nasm)
+            peep_settgt(asm_imm[i]);
+    }
+    for (f = 0; f < nfunc; f++)
+        if (func_entry[f] >= 0 && func_entry[f] < nasm)
+            peep_settgt(func_entry[f]);
+    for (i = 0; i < dfaddr_n; i++) {
+        peep_settgt(dfaddr_site[i]);
+        if (dfaddr_site[i] + 1 < nasm)
+            peep_settgt(dfaddr_site[i] + 1);
+    }
+    for (i = 0; i < obj_nreloc; i++) {
+        peep_settgt(obj_reloc_site[i]);
+        if (obj_reloc_site[i] + 1 < nasm)
+            peep_settgt(obj_reloc_site[i] + 1);
+    }
+    for (i = 0; i < obj_nabs; i++) {
+        peep_settgt(obj_abs_site[i]);
+        if (obj_abs_site[i] + 1 < nasm)
+            peep_settgt(obj_abs_site[i] + 1);
+    }
+    if (obj_flush_site >= 0)
+        peep_settgt(obj_flush_site);
+    /* 2. パターンの適用 (削除は asm_op = -1 の印で) */
+    for (i = 0; i < nasm; i++) {
+        int op = asm_op[i];
+        if (op < 0)
+            continue;
+        /* (1) nop move */
+        if (op == OP_ADDI && asm_rd[i] == asm_rs1[i] &&
+            asm_imm[i] == 0 && !peep_istgt(i)) {
+            asm_op[i] = -1;
+            continue;
+        }
+        /* (2)(3) store の後の同じスロットへの load */
+        if (op == OP_SD || op == OP_SW) {
+            int base = asm_rs1[i];
+            int src = asm_rs2[i];
+            int off = asm_imm[i];
+            int wop = OP_LD;
+            if (op == OP_SW)
+                wop = OP_LW;
+            for (j = i + 1; j < nasm && j <= i + 6; j++) {
+                int jop = asm_op[j];
+                if (jop < 0)
+                    continue;
+                if (peep_istgt(j))
+                    break;
+                if (peep_is_barrier(jop) || peep_is_store(jop))
+                    break;
+                if (jop == wop && asm_rs1[j] == base &&
+                    asm_imm[j] == off) {
+                    if (asm_rd[j] == src) {
+                        asm_op[j] = -1;  /* dead reload */
+                    } else {
+                        /* forwarding: load を mv に替える */
+                        asm_op[j] = OP_ADDI;
+                        asm_rs1[j] = src;
+                        asm_rs2[j] = 0;
+                        asm_imm[j] = 0;
+                    }
+                    break;
+                }
+                if (peep_writes(j, base) || peep_writes(j, src))
+                    break;
+            }
+            continue;
+        }
+        /* (4) load した値の store-back */
+        if ((op == OP_LD || op == OP_LW) &&
+            asm_rd[i] != asm_rs1[i]) {
+            int rd = asm_rd[i];
+            int base = asm_rs1[i];
+            int off = asm_imm[i];
+            int wop = OP_SD;
+            if (op == OP_LW)
+                wop = OP_SW;
+            for (j = i + 1; j < nasm && j <= i + 4; j++) {
+                int jop = asm_op[j];
+                if (jop < 0)
+                    continue;
+                if (peep_istgt(j))
+                    break;
+                if (peep_is_barrier(jop))
+                    break;
+                if (jop == wop && asm_rs1[j] == base &&
+                    asm_rs2[j] == rd && asm_imm[j] == off) {
+                    asm_op[j] = -1;
+                    break;
+                }
+                if (peep_is_store(jop))
+                    break;
+                if (peep_writes(j, rd) || peep_writes(j, base))
+                    break;
+            }
+        }
+    }
+    /* 3. 命令番号の付け替えと圧縮 */
+    for (i = 0; i < nasm; i++) {
+        int op = asm_op[i];
+        if ((op == OP_BEQ || op == OP_BNE || op == OP_JAL) &&
+            asm_imm[i] >= 0)
+            asm_imm[i] = asm_imm[i] -
+                         peep_deleted_before(asm_imm[i]);
+    }
+    for (f = 0; f < nfunc; f++)
+        if (func_entry[f] >= 0)
+            func_entry[f] = func_entry[f] -
+                            peep_deleted_before(func_entry[f]);
+    for (i = 0; i < dfaddr_n; i++)
+        dfaddr_site[i] = dfaddr_site[i] -
+                         peep_deleted_before(dfaddr_site[i]);
+    for (i = 0; i < obj_nreloc; i++)
+        obj_reloc_site[i] = obj_reloc_site[i] -
+                            peep_deleted_before(obj_reloc_site[i]);
+    for (i = 0; i < obj_nabs; i++)
+        obj_abs_site[i] = obj_abs_site[i] -
+                          peep_deleted_before(obj_abs_site[i]);
+    if (obj_flush_site >= 0)
+        obj_flush_site = obj_flush_site -
+                         peep_deleted_before(obj_flush_site);
+    obj_prefix_insts = obj_prefix_insts -
+                       peep_deleted_before(obj_prefix_insts);
+    {
+        int w = 0;
+        for (i = 0; i < nasm; i++) {
+            if (asm_op[i] < 0)
+                continue;
+            if (w != i) {
+                asm_op[w] = asm_op[i];
+                asm_rd[w] = asm_rd[i];
+                asm_rs1[w] = asm_rs1[i];
+                asm_rs2[w] = asm_rs2[i];
+                asm_imm[w] = asm_imm[i];
+            }
+            w = w + 1;
+        }
+        nasm = w;
+    }
+}
+
 /* 命令列を全部作る (1回分): 土台 (UART の住所) → (関数が
  * あれば) スタックの用意 → 文の並び → 最後の式 (あれば) →
  * UART へ書く → 止まる → その後に関数の本体を並べる。
@@ -1141,10 +1369,17 @@ static int gen_all(void) {
         if (!gen_func(f))
             return 0;
     }
+    /* peephole 最適化 (v52): 飛び先の書き直しの前に、
+     * 命令列を局所的に磨く。番号の付け替えまで済ませて
+     * あるので、この後の fixup は従来どおりでよい */
+    peep_run();
     /* 呼び出しの飛び先を書き直す (印: -(関数番号+1))。
      * オブジェクト出力では書き直さず、印のまま
      * リンカへのメモ (call) にする */
     if (!obj_mode) {
+        /* データ住所の組の即値を埋める (v52)。peephole
+         * で確定した位置から pc を数え直す */
+        bake_daddr();
         for (int i = 0; i < nasm; i++) {
             if (asm_op[i] == OP_JAL && asm_imm[i] < 0)
                 asm_imm[i] = func_entry[-asm_imm[i] - 1];
