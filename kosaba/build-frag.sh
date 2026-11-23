@@ -19,11 +19,17 @@
 # 容量プロファイル (標準 → 断片):
 #   ノード表        12288 → 9216 (v48 で 8448 から引き上げ:
 #                   実測ピーク 9,047 は 02-parse)
-#   命令表          24576 → 23552 (v48 で初めて下げて
-#                   24064、v56 で微減: 実測ピーク
-#                   18,418 は 02-parse、対して +27.9%。
-#                   レジスタ割り付け (v56) の表の置き場を
-#                   捻出するため)
+#   命令表          24576 → 23040 (v48 で初めて下げて
+#                   24064、v56 で 23552 へ微減、v57 で
+#                   さらに微減: 実測ピーク 18,418 は
+#                   02-parse、対して +25.1%。レジスタ
+#                   割り付け (v56) とループ最適化
+#                   (v57) の表の置き場を捻出するため)
+#   ループ最適化表   ループ 256 → 48、ポインタ
+#                   512 → 80、変更箇所 1024 → 64
+#                   (v57: 実測ピークはループ 34・
+#                   ポインタ 58・変更 45、すべて
+#                   02-parse か 04-encode の TU)
 #   再配置表         6144 → 2304 (v46 で 2048 から引き上げ:
 #                   実測ピーク 1,493 は 02-parse)
 #   変数表           1280 → 576 (v46 で 512 から引き上げ:
@@ -102,15 +108,32 @@ apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
 # その掃引は v49 で 03-genstmt.c へ分かれた
 apply 03-gen.c '[6144]' '[2304]' 3
 apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2304' 2
-apply 03-gen.c '[24576]' '[23552]' 6
-apply 03-gen.c 'nasm >= 24576' 'nasm >= 23552' 1
-apply 03-genstmt.c '[24576]' '[23552]' 1
-apply 03-genstmt.c 'nasm >= 24576' 'nasm >= 23552' 1
-apply 03-genstmt.c 'i < 24576' 'i < 23552' 1
+apply 03-gen.c '[24576]' '[23040]' 6
+apply 03-gen.c 'nasm >= 24576' 'nasm >= 23040' 1
+apply 03-genstmt.c '[24576]' '[23040]' 1
+apply 03-genstmt.c 'nasm >= 24576' 'nasm >= 23040' 1
+apply 03-genstmt.c 'i < 24576' 'i < 23040' 1
 # レジスタ割り付けの表 (v56): 変数番号で引く3つの表は、
 # 変数表と同じ 576 に絞る (実測ピーク 570 は TU 最大。
 # nvar のガードが先に止めるので安全)
 apply 03-gen.c '[1280]' '[576]' 3
+# ループ最適化の表 (v57): ループ・ポインタ・変更箇所の
+# 表を TU の実測ピークに合わせて絞る (ピークは
+# ループ 34・ポインタ 58・変更 45)
+apply 03-gen.c 'xform_loop_node[256]' 'xform_loop_node[48]' 1
+apply 03-gen.c 'xform_loop_first[256]' 'xform_loop_first[48]' 1
+apply 03-gen.c 'xform_loop_cnt[256]' 'xform_loop_cnt[48]' 1
+apply 03-gen.c 'xform_loop_slot[256]' 'xform_loop_slot[48]' 1
+apply 03-gen.c 'xform_nloops < 256' 'xform_nloops < 48' 1
+apply 03-gen.c 'xform_ptr_base[512]' 'xform_ptr_base[80]' 1
+apply 03-gen.c 'xform_ptr_kind[512]' 'xform_ptr_kind[80]' 1
+apply 03-gen.c 'xform_ptr_ind[512]' 'xform_ptr_ind[80]' 1
+apply 03-gen.c 'xform_ptr_esz[512]' 'xform_ptr_esz[80]' 1
+apply 03-gen.c 'xform_nptrs + np <= 512' 'xform_nptrs + np <= 80' 1
+apply 03-gen.c 'xform_mod_node[1024]' 'xform_mod_node[64]' 1
+apply 03-gen.c 'xform_mod_var[1024]' 'xform_mod_var[64]' 1
+apply 03-gen.c 'xform_mod_delta[1024]' 'xform_mod_delta[64]' 1
+apply 03-gen.c 'xform_nmods + scan_nmod > 1024' 'xform_nmods + scan_nmod > 64' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)、表示 (2か所)
 apply 05-input.c 'src_buf[475136]' 'src_buf[172032]' 1
 apply 05-input.c '475135' '172031' 4

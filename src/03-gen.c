@@ -309,10 +309,10 @@ static char var_reg[1280];       /* 変数 → レジスタ番号。
                                   * char に収まる (置き場の
                                   * 節約。断片プロファイルの
                                   * 1MB 枠が逼迫している) */
-static char func_saved_regs[256]; /* 関数 → 割り付けた数
+static char func_saved_regs[288]; /* 関数 → 割り付けた数
                                   * (= 退避する s の本数。
                                   * 最大11なので char) */
-static char reg_plan_done[256];  /* 計画済みの印 */
+static char reg_plan_done[288];  /* 計画済みの印 */
 static char var_refcount[1280];  /* 計画専用の数え置き場。
                                   * 127 で飽和させる (順位付け
                                   * に要るのは大きな方の
@@ -412,6 +412,413 @@ static int reg_eligible(int v, int f) {
     return 1;
 }
 
+/* ================================================================
+ * ループ最適化の計画 (v57、設計は doc/loop-opt.md)
+ *
+ * ループの中で、帰納変数 (定数歩幅でだけ変わる
+ * スカラ変数) を添字にするアクセス a[i] / p[i] を
+ * 見つけ、ループ入口で「歩くポインタ」を作る計画を
+ * 立てる。ポインタは帰納変数の変更箇所で歩幅ぶん
+ * 進めるので、本体のアクセスはポインタ + 定数
+ * オフセットで済み、添字の拡大 (slli) と基底との
+ * 加算が消える。
+ *
+ * 計画は AST の純粋関数で、割り付け計画 (v56) の
+ * 末尾で作る。ポインタの置き場は s レジスタで、
+ * 割り付けが使わなかった分を、ループの入れ子の
+ * 深さに合わせて使う。退避本数は func_saved_regs へ
+ * 合算される (割り付け分より増えることがある)。
+ *
+ * 安全の要: 帰納変数の変更は、ループの部分木の中の
+ * 全部の箇所が「定数歩幅の代入と ++ / --」の形で
+ * あるときだけ計画する。1つでも違う形があれば、
+ * その変数は帰納変数にしない。変更箇所は
+ * (ノード・変数・変化量) の事実として記録し、
+ * 生成側は変更の生成直後にポインタを進める。
+ * 記録はループが無効になっても残す (事実としては
+ * 正しく、ポインタが無い変数では使われない)。
+ * ================================================================ */
+static int xform_loop_node[256];  /* ループのノード */
+static int xform_loop_first[256]; /* ポインタ表の先頭 */
+static char xform_loop_cnt[256];  /* ポインタの数 */
+static char xform_loop_slot[256]; /* 先頭の割り付け順 */
+static int xform_nloops;
+static int xform_ptr_base[512];   /* 基底 (配列番号か
+                                   * ポインタ変数の番号) */
+static char xform_ptr_kind[512];  /* 0 = 配列、1 = 変数 */
+static int xform_ptr_ind[512];    /* 帰納変数 */
+static char xform_ptr_esz[512];   /* 要素の大きさ */
+static int xform_nptrs;
+static int xform_mod_node[1024];  /* 変更箇所のノード */
+static int xform_mod_var[1024];   /* 帰納変数 */
+static int xform_mod_delta[1024]; /* 値の変化量 */
+static int xform_nmods;
+
+/* 要素の大きさ (本体は後ろにある) */
+static int elem_esize(int node);
+
+/* 調べ置き場 (候補ごとに使い回す) */
+static int scan_var;              /* 対象の帰納変数。
+                                   * -1 は候補集め */
+static int scan_bad;              /* 候補を落とす印 */
+static int scan_nmod;
+static int scan_mnode[128];
+static int scan_mdelta[128];
+static int scan_nbase;
+static char scan_bkind[8];
+static int scan_bid[8];
+static char scan_besz[8];
+static int scan_cand[24];
+static int scan_ncand;
+
+/* 変更される変数を候補として控える (取りこぼしは
+ * 安全側: 最適化を諦めるだけ) */
+static void scan_add_cand(int v) {
+    for (int i = 0; i < scan_ncand; i++) {
+        if (scan_cand[i] == v)
+            return;
+    }
+    if (scan_ncand >= 24)
+        return;
+    scan_cand[scan_ncand] = v;
+    scan_ncand = scan_ncand + 1;
+}
+
+/* 変更箇所をステージする。変化量が大きすぎる、
+ * または箇所が多すぎる候補は落とす */
+static void scan_add_mod(int node, int delta) {
+    if (delta > 268435456 || delta < -268435456) {
+        scan_bad = 1;
+        return;
+    }
+    if (scan_nmod >= 128) {
+        scan_bad = 1;
+        return;
+    }
+    scan_mnode[scan_nmod] = node;
+    scan_mdelta[scan_nmod] = delta;
+    scan_nmod = scan_nmod + 1;
+}
+
+/* 基底をステージする (重複は寄せない) */
+static void scan_add_base(int kind, int id, int esz) {
+    for (int i = 0; i < scan_nbase; i++) {
+        if (scan_bkind[i] == kind && scan_bid[i] == id)
+            return;
+    }
+    if (scan_nbase >= 8) {
+        scan_bad = 1;
+        return;
+    }
+    scan_bkind[scan_nbase] = kind;
+    scan_bid[scan_nbase] = id;
+    scan_besz[scan_nbase] = esz;
+    scan_nbase = scan_nbase + 1;
+}
+
+/* 添字の形が「帰納変数」「帰納変数 + 定数」
+ * 「帰納変数 - 定数」なら 1 を返し、定数の分を
+ * *off に入れる */
+static int scan_index_form(int idx, int *off) {
+    if (node_kind[idx] == NODE_VAR &&
+        node_val[idx] == scan_var) {
+        *off = 0;
+        return 1;
+    }
+    if (node_kind[idx] == NODE_ADD) {
+        int l = node_lhs[idx];
+        int r = node_rhs[idx];
+        if (node_kind[l] == NODE_VAR &&
+            node_val[l] == scan_var &&
+            node_kind[r] == NODE_NUM) {
+            *off = node_val[r];
+            return 1;
+        }
+        if (node_kind[r] == NODE_VAR &&
+            node_val[r] == scan_var &&
+            node_kind[l] == NODE_NUM) {
+            *off = node_val[l];
+            return 1;
+        }
+    }
+    if (node_kind[idx] == NODE_SUB) {
+        int l = node_lhs[idx];
+        if (node_kind[l] == NODE_VAR &&
+            node_val[l] == scan_var &&
+            node_kind[node_rhs[idx]] == NODE_NUM) {
+            *off = -node_val[node_rhs[idx]];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* NODE_ASSIGN の右辺が「帰納変数 ± 定数」の形か
+ * 見て、合えば変更箇所としてステージする。
+ * 合わなければ候補を落とす */
+static void scan_assign(int node) {
+    int rhs = node_lhs[node];
+    int k = node_kind[rhs];
+    if (k == NODE_ADD) {
+        int l = node_lhs[rhs];
+        int r = node_rhs[rhs];
+        if (node_kind[l] == NODE_VAR &&
+            node_val[l] == scan_var &&
+            node_kind[r] == NODE_NUM) {
+            scan_add_mod(node, node_val[r]);
+            return;
+        }
+        if (node_kind[r] == NODE_VAR &&
+            node_val[r] == scan_var &&
+            node_kind[l] == NODE_NUM) {
+            scan_add_mod(node, node_val[l]);
+            return;
+        }
+    }
+    if (k == NODE_SUB) {
+        int l = node_lhs[rhs];
+        if (node_kind[l] == NODE_VAR &&
+            node_val[l] == scan_var &&
+            node_kind[node_rhs[rhs]] == NODE_NUM) {
+            scan_add_mod(node, -node_val[node_rhs[rhs]]);
+            return;
+        }
+    }
+    scan_bad = 1;
+}
+
+/* ループの部分木を歩く。候補集め (scan_var = -1)
+ * では変更される変数を集め、候補が決まった後は
+ * 変更箇所の検証とステージ、基底集めを同時に行う。
+ * 辿る欄の規則は reg_walk と同じ (使わない欄の 0 を
+ * 辿ると、実在の葉であるノード0 に吸い寄せられる) */
+static void loop_scan(int node) {
+    if (node < 0)
+        return;
+    int k = node_kind[node];
+    if (k == NODE_ASSIGN) {
+        if (scan_var < 0)
+            scan_add_cand(node_val[node]);
+        else if (node_val[node] == scan_var)
+            scan_assign(node);
+    }
+    if (k == NODE_PREINC || k == NODE_POSTINC ||
+        k == NODE_PREDEC || k == NODE_POSTDEC) {
+        if (scan_var < 0)
+            scan_add_cand(node_val[node]);
+        else if (node_val[node] == scan_var) {
+            if (k == NODE_PREINC || k == NODE_POSTINC)
+                scan_add_mod(node, 1);
+            else
+                scan_add_mod(node, -1);
+        }
+    }
+    if (scan_var >= 0 && k == NODE_INDEX) {
+        int off = 0;
+        if (arr_cols[node_val[node]] == 0 &&
+            scan_index_form(node_rhs[node], &off))
+            scan_add_base(0, node_val[node],
+                          arr_esize[node_val[node]]);
+    }
+    if (scan_var >= 0 && k == NODE_PINDEX) {
+        int off = 0;
+        if (scan_index_form(node_rhs[node], &off))
+            scan_add_base(1, node_val[node],
+                          elem_esize(node));
+    }
+    if (scan_var >= 0 && k == NODE_INDEX_STORE) {
+        int off = 0;
+        if (arr_cols[node_val[node]] == 0 &&
+            scan_index_form(node_lhs[node], &off))
+            scan_add_base(0, node_val[node],
+                          arr_esize[node_val[node]]);
+    }
+    if (k == NODE_NUM || k == NODE_VAR || k == NODE_STR ||
+        k == NODE_ARRAY || k == NODE_FADDR ||
+        k == NODE_NUMFP || k == NODE_BREAK ||
+        k == NODE_CONTINUE || k == NODE_DECL ||
+        k == NODE_VDECL || k == NODE_PREINC ||
+        k == NODE_POSTINC || k == NODE_PREDEC ||
+        k == NODE_POSTDEC) {
+        /* 葉と宣言: 子の欄は使われていない */
+    } else if (k == NODE_DEREF || k == NODE_ASSIGN ||
+               k == NODE_PUTC || k == NODE_CALL ||
+               k == NODE_NOT || k == NODE_NEG ||
+               k == NODE_RETURN || k == NODE_ADDR ||
+               k == NODE_EPRE || k == NODE_EPOST ||
+               k == NODE_BITNOT || k == NODE_SYSCALL3 ||
+               k == NODE_CAST || k == NODE_MEMBER ||
+               k == NODE_CASE) {
+        loop_scan(node_lhs[node]);
+    } else if (k == NODE_INDEX || k == NODE_ROWADDR ||
+               k == NODE_PINDEX) {
+        loop_scan(node_rhs[node]);
+    } else if (k == NODE_FORSTEP) {
+        loop_scan(node_val[node]);
+    } else if (k == NODE_IF || k == NODE_FOR ||
+               k == NODE_COND) {
+        loop_scan(node_lhs[node]);
+        loop_scan(node_rhs[node]);
+        loop_scan(node_val[node]);
+    } else {
+        loop_scan(node_lhs[node]);
+        loop_scan(node_rhs[node]);
+    }
+    loop_scan(node_next[node]);
+}
+
+/* 変数 v が帰納変数の候補かどうか */
+static int loop_ind_eligible(int v, int f) {
+    if (var_owner[v] != f)
+        return 0;
+    if (var_plevel[v] != 0)
+        return 0;  /* ポインタ変数は ++ の歩幅が
+                    * 値の変化量と一致しない */
+    if (var_struct[v] > 0)
+        return 0;  /* 構造体の値 */
+    if (var_value_etype(v) & 64)
+        return 0;  /* double */
+    if (var_addrtaken[v])
+        return 0;
+    return 1;
+}
+
+/* ループ1つのポインタ表のステージ */
+static int st_np;
+static char st_pkind[24];
+static int st_pbase[24];
+static int st_pind[24];
+static char st_pesz[24];
+static int plan_f;
+
+/* ループ (node) を調べ、ポインタの組をステージに
+ * 寄せて数を返す。変更箇所の記録はその場で
+ * 全体表へ入れる */
+static int loop_plan_one(int node) {
+    st_np = 0;
+    scan_var = -1;
+    scan_ncand = 0;
+    loop_scan(node_lhs[node]);
+    loop_scan(node_rhs[node]);
+    for (int ci = 0; ci < scan_ncand; ci++) {
+        int v = scan_cand[ci];
+        if (!loop_ind_eligible(v, plan_f))
+            continue;
+        scan_var = v;
+        scan_bad = 0;
+        scan_nmod = 0;
+        scan_nbase = 0;
+        loop_scan(node_lhs[node]);
+        loop_scan(node_rhs[node]);
+        if (scan_bad || scan_nmod == 0 ||
+            scan_nbase == 0)
+            continue;
+        if (xform_nmods + scan_nmod > 1024)
+            continue;  /* 記録が入り切らない候補は
+                        * 諦める (安全側) */
+        for (int m = 0; m < scan_nmod; m++) {
+            int found = 0;
+            for (int e = 0; e < xform_nmods; e++) {
+                if (xform_mod_node[e] == scan_mnode[m] &&
+                    xform_mod_var[e] == v &&
+                    xform_mod_delta[e] == scan_mdelta[m])
+                    found = 1;
+            }
+            if (!found) {
+                xform_mod_node[xform_nmods] =
+                    scan_mnode[m];
+                xform_mod_var[xform_nmods] = v;
+                xform_mod_delta[xform_nmods] =
+                    scan_mdelta[m];
+                xform_nmods = xform_nmods + 1;
+            }
+        }
+        for (int b = 0; b < scan_nbase; b++) {
+            int found = 0;
+            for (int j = 0; j < st_np; j++) {
+                if (st_pkind[j] == scan_bkind[b] &&
+                    st_pbase[j] == scan_bid[b] &&
+                    st_pind[j] == v)
+                    found = 1;
+            }
+            if (!found && st_np < 24) {
+                st_pkind[st_np] = scan_bkind[b];
+                st_pbase[st_np] = scan_bid[b];
+                st_pind[st_np] = v;
+                st_pesz[st_np] = scan_besz[b];
+                st_np = st_np + 1;
+            }
+        }
+    }
+    return st_np;
+}
+
+/* 文の並びを歩いてループを探す。enclosing は
+ * 外側の有効なループが使っているポインタ数 */
+static int plan_assigned;
+static int plan_max_end;
+
+static void loop_plan_visit(int head, int enclosing) {
+    for (int s = head; s != -1; s = node_next[s]) {
+        int k = node_kind[s];
+        if (k == NODE_IF) {
+            loop_plan_visit(node_rhs[s], enclosing);
+            loop_plan_visit(node_val[s], enclosing);
+        } else if (k == NODE_SWITCH) {
+            for (int g = node_rhs[s]; g != -1;
+                 g = node_next[g])
+                loop_plan_visit(node_lhs[g], enclosing);
+        } else if (k == NODE_WHILE ||
+                   k == NODE_DOWHILE ||
+                   k == NODE_FOR) {
+            int np = loop_plan_one(s);
+            int add = 0;
+            if (np > 0 &&
+                plan_assigned + enclosing + np <= 11 &&
+                xform_nloops < 256 &&
+                xform_nptrs + np <= 512) {
+                int li = xform_nloops;
+                xform_nloops = xform_nloops + 1;
+                xform_loop_node[li] = s;
+                xform_loop_first[li] = xform_nptrs;
+                xform_loop_cnt[li] = np;
+                xform_loop_slot[li] =
+                    plan_assigned + enclosing;
+                for (int j = 0; j < np; j++) {
+                    xform_ptr_kind[xform_nptrs] =
+                        st_pkind[j];
+                    xform_ptr_base[xform_nptrs] =
+                        st_pbase[j];
+                    xform_ptr_ind[xform_nptrs] =
+                        st_pind[j];
+                    xform_ptr_esz[xform_nptrs] =
+                        st_pesz[j];
+                    xform_nptrs = xform_nptrs + 1;
+                }
+                if (plan_assigned + enclosing + np >
+                    plan_max_end)
+                    plan_max_end =
+                        plan_assigned + enclosing + np;
+                add = np;
+            }
+            loop_plan_visit(node_rhs[s],
+                            enclosing + add);
+        }
+    }
+}
+
+/* 関数 f のループ最適化の計画。割り付け (assigned 本)
+ * の後ろの s レジスタをポインタに使い、退避本数が
+ * 増えたら func_saved_regs へ反映する */
+static void loop_plan(int f, int assigned) {
+    plan_f = f;
+    plan_assigned = assigned;
+    plan_max_end = assigned;
+    loop_plan_visit(func_body[f], 0);
+    if (plan_max_end > assigned)
+        func_saved_regs[f] = plan_max_end;
+}
+
 /* 関数 f の割り付け計画 (一度だけ作り、使い回す) */
 static void func_reg_plan(int f) {
     if (f < 0 || reg_plan_done[f])
@@ -447,6 +854,9 @@ static void func_reg_plan(int f) {
         assigned = assigned + 1;
     }
     func_saved_regs[f] = assigned;
+    /* ループ最適化 (v57): 歩くポインタの計画。
+     * 退避本数が増えることがある */
+    loop_plan(f, assigned);
 }
 
 static int func_frame_size(int f) {
@@ -1145,6 +1555,10 @@ static void apply_patches(int head, int target);
 
 /* 要素の住所を作る道具 (v23)。gen_expr と相互に使う */
 static int gen_elem_addr(int node);
+
+/* ループ最適化 (v57): 帰納変数の変更の直後に
+ * ポインタを進める道具。本体は gen_elem_addr の前 */
+static void loop_xform_on_mod(int node);
 
 /* ポインタ演算のスケールの道具 (v49)。本体は
  * emit_scale の近くに置く (名前の登録順を変えない
@@ -1909,6 +2323,8 @@ static int gen_expr(int node) {
                 asm_push(OP_ADDI, sreg, REG_T1, 0, 0);
                 asm_push(OP_ADDI, REG_T1, REG_T2, 0, 0);
             }
+            /* ループ最適化 (v57): 歩くポインタを進める */
+            loop_xform_on_mod(node);
             return 1;
         }
         gen_var_addr(REG_T2, node_val[node]);
@@ -1943,6 +2359,8 @@ static int gen_expr(int node) {
             asm_push((vet & 32) ? mem_store_op(vet) : OP_SD,
                      0, REG_T2, REG_A0, 0);
         }
+        /* ループ最適化 (v57): 歩くポインタを進める */
+        loop_xform_on_mod(node);
         return 1;
     }
     if (node_kind[node] == NODE_EPRE ||
@@ -2384,7 +2802,160 @@ static int member_elem_size(int mi) {
     return smem_etype[mi] & 15;
 }
 
+/* ================================================================
+ * ループ最適化の生成側 (v57、計画は上の loop_plan)
+ *
+ * 生きている歩くポインタを表に持ち、ループの生成の
+ * 頭で初期値を作って積み、末尾で戻す。帰納変数の
+ * 変更の生成直後には loop_xform_on_mod が呼ばれ、
+ * 記録された変化量 × 要素の大きさだけポインタを
+ * 進める。要素の住所作り (gen_elem_addr) は、
+ * 生きているポインタに合う要素ならそちらを使う
+ * ================================================================ */
+static int xact_n;                /* 生きている数 */
+static char xact_kind[16];
+static int xact_base[16];
+static int xact_ind[16];
+static char xact_esz[16];
+static char xact_reg[16];
+
+/* 帰納変数の変更 (node) の生成直後に呼ばれ、
+ * 生きているポインタを歩幅ぶん進める */
+static void loop_xform_on_mod(int node) {
+    if (xact_n == 0)
+        return;
+    for (int m = 0; m < xform_nmods; m++) {
+        if (xform_mod_node[m] != node)
+            continue;
+        for (int i = 0; i < xact_n; i++) {
+            if (xact_ind[i] != xform_mod_var[m])
+                continue;
+            int step = xform_mod_delta[m] *
+                       xact_esz[i];
+            if (step == 0)
+                continue;
+            if (step >= -2048 && step <= 2047)
+                asm_push(OP_ADDI, xact_reg[i],
+                         xact_reg[i], 0, step);
+            else
+                emit_add_step(xact_reg[i],
+                              xact_reg[i], step);
+        }
+    }
+}
+
+/* ループの生成の頭で呼ばれ、ポインタの初期値を
+ * 作って生きている表へ積む。戻り値は積む前の深さ
+ * (loop_xform_end へ渡す) */
+static int loop_xform_begin(int node) {
+    int mark = xact_n;
+    int li = -1;
+    for (int i = 0; i < xform_nloops; i++) {
+        if (xform_loop_node[i] == node)
+            li = i;
+    }
+    if (li < 0)
+        return mark;
+    for (int j = 0; j < xform_loop_cnt[li]; j++) {
+        int e = xform_loop_first[li] + j;
+        int reg = saved_reg_no(xform_loop_slot[li] + j);
+        if (xform_ptr_kind[e] == 0)
+            gen_load_arr_base(reg, xform_ptr_base[e]);
+        else
+            gen_load_var(reg, xform_ptr_base[e]);
+        gen_load_var(REG_T1, xform_ptr_ind[e]);
+        emit_scale_r(REG_T1, xform_ptr_esz[e]);
+        asm_push(OP_ADD, reg, reg, REG_T1, 0);
+        xact_kind[xact_n] = xform_ptr_kind[e];
+        xact_base[xact_n] = xform_ptr_base[e];
+        xact_ind[xact_n] = xform_ptr_ind[e];
+        xact_esz[xact_n] = xform_ptr_esz[e];
+        xact_reg[xact_n] = reg;
+        xact_n = xact_n + 1;
+    }
+    return mark;
+}
+
+/* ループの生成の末尾: 生きている表を戻す */
+static void loop_xform_end(int mark) {
+    xact_n = mark;
+}
+
+/* 要素ノードの住所を、生きている歩くポインタで
+ * 作れるか試す。作れたら t2 に入れて 1 を返す。
+ * 添字の形が合わない・オフセットが即値に収まら
+ * ない要素は 0 を返し、従来の住所作りに任せる */
+static int xform_try_addr(int node) {
+    int k = node_kind[node];
+    if (k != NODE_INDEX && k != NODE_PINDEX &&
+        k != NODE_INDEX_STORE)
+        return 0;
+    if (xact_n == 0)
+        return 0;
+    int idx = (k == NODE_INDEX_STORE) ? node_lhs[node]
+                                      : node_rhs[node];
+    int v = -1;
+    int off = 0;
+    if (node_kind[idx] == NODE_VAR) {
+        v = node_val[idx];
+    } else if (node_kind[idx] == NODE_ADD) {
+        int l = node_lhs[idx];
+        int r = node_rhs[idx];
+        if (node_kind[l] == NODE_VAR &&
+            node_kind[r] == NODE_NUM) {
+            v = node_val[l];
+            off = node_val[r];
+        } else if (node_kind[r] == NODE_VAR &&
+                   node_kind[l] == NODE_NUM) {
+            v = node_val[r];
+            off = node_val[l];
+        } else
+            return 0;
+    } else if (node_kind[idx] == NODE_SUB) {
+        int l = node_lhs[idx];
+        if (node_kind[l] == NODE_VAR &&
+            node_kind[node_rhs[idx]] == NODE_NUM) {
+            v = node_val[l];
+            off = -node_val[node_rhs[idx]];
+        } else
+            return 0;
+    } else
+        return 0;
+    int esz = elem_esize(node);
+    if (off > 262143 || off < -262143)
+        return 0;  /* 次の掛け算の溢れ避け */
+    int boff = off * esz;
+    if (boff < -2048 || boff > 2047)
+        return 0;
+    for (int i = 0; i < xact_n; i++) {
+        if (xact_ind[i] != v)
+            continue;
+        if (xact_esz[i] != esz)
+            continue;
+        if (k == NODE_PINDEX) {
+            if (xact_kind[i] != 1 ||
+                xact_base[i] != node_val[node])
+                continue;
+        } else {
+            if (xact_kind[i] != 0 ||
+                xact_base[i] != node_val[node])
+                continue;
+        }
+        if (boff == 0)
+            asm_push(OP_ADDI, REG_T2, xact_reg[i], 0, 0);
+        else
+            asm_push(OP_ADDI, REG_T2, xact_reg[i], 0,
+                     boff);
+        return 1;
+    }
+    return 0;
+}
+
 static int gen_elem_addr(int node) {
+    /* ループ最適化 (v57): 歩くポインタで住所が
+     * 作れる要素は、そちらで作る */
+    if (xform_try_addr(node))
+        return 1;
     int k = node_kind[node];
     if (k == NODE_MEMBER) {
         /* メンバの住所 (v37): . なら基底の住所、-> なら

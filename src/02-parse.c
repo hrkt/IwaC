@@ -223,7 +223,7 @@ static int has_var_inits;  /* 初期値つきグローバルがあるか */
 static int nvar;       /* 登録された変数の数 (全スコープ合計) */
 static int var_nglobal;  /* グローバル変数の数 (静的領域の枠数) */
 static int parse_cur_func;  /* 解析中の関数 (-1 はトップレベル) */
-static int func_nlocals[256];  /* 関数ごとのフレーム枠数。
+static int func_nlocals[288];  /* 関数ごとのフレーム枠数。
                              * 本体は関数の名簿の節で説明する */
 
 /* typedef の名簿 (v36): 型への別名。
@@ -396,28 +396,30 @@ static int prog_main;
  *   func_body[i]      : 本体の文の並びの先頭ノード
  *   func_entry[i]     : 命令列の中での入口の命令番号
  *                       (第2層が生成のたびに決める)
- * 関数は最大256個まで (v46 で 224 → 256:
- * 浮動小数点の補助関数が増えて 224 を超えた) */
-static char func_names[256][32];
-static int func_name_len[256];
-static int func_nparams[256];
-static int func_param_var[256][8];
-static int func_ret_etype[256]; /* 戻り値の型タグ (v35) */
-static char func_ret_struct[256]; /* 戻り値の構造体番号 + 1 (v37、
+ * 関数は最大288個まで (v46 で 224 → 256:
+ * 浮動小数点の補助関数が増えて 224 を超えた。
+ * v57 で 256 → 288: ループ最適化の補助関数が
+ * 増えて、03-gen の TU が 264 個に達した) */
+static char func_names[288][32];
+static int func_name_len[288];
+static int func_nparams[288];
+static int func_param_var[288][8];
+static int func_ret_etype[288]; /* 戻り値の型タグ (v35) */
+static char func_ret_struct[288]; /* 戻り値の構造体番号 + 1 (v37、
                              * 0 = なし。構造体を返す関数はポインタ
                              * でだけ返せるので、0 でなければ
                              * 「その構造体へのポインタを返す」) */
-static int func_body[256];
-static int func_entry[256];
+static int func_body[288];
+static int func_entry[288];
 /* プロトタイプ (v24): 宣言だけ先に書いて本体を後に置ける。
  *   func_has_body[i]: 本体まで読めたら 1
  *   func_called[i]  : 呼び出しが現れたら 1。最後まで
  *                     本体が無い関数が呼ばれていたら、
  *                     生成の入口でエラーにする */
-static int func_has_body[256];
-static int func_called[256];
-static int func_sig[256];     /* その関数の署名番号 (v44) */
-/* func_nlocals[256] : フレームの枠数 (引数を含む、v21)。
+static int func_has_body[288];
+static int func_called[288];
+static int func_sig[288];     /* その関数の署名番号 (v44) */
+/* func_nlocals[288] : フレームの枠数 (引数を含む、v21)。
  * 変数の名簿の節で宣言してある (define_var が使うため) */
 static int nfunc;
 
@@ -573,7 +575,7 @@ static int fref_at(int pool_idx) {
 /* func_arr_bytes[f]: 関数 f のフレームに入るローカル
  * 配列の合計バイト数 (v26)。フレーム長の計算 (第2層の
  * func_frame_size) が使う */
-static int func_arr_bytes[256];
+static int func_arr_bytes[288];
 
 /* 名前の一致だけを見る小物 (変数の var_name_eq と同じ) */
 static int arr_name_eq(int i, char *name, int len) {
@@ -2916,8 +2918,8 @@ static int parse_funcdef(void) {
     int f = find_func(name_buf, name_len);
     int is_new = 0;
     if (f < 0) {
-        if (nfunc >= 256) {
-            errmsg = "関数は256個までです";
+        if (nfunc >= 288) {
+            errmsg = "関数は288個までです";
             return 0;
         }
         f = nfunc++;

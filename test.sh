@@ -2842,6 +2842,201 @@ EOF
 "$IWAC" "$TMP/v56c.c" > "$TMP/v56c.bin"
 check_tail "$TMP/v56c.bin" "610 4950 90 44 394" "v56: レジスタ割り付けの機能一式"
 
+# --- v57: ループ最適化 (設計は doc/loop-opt.md) ---
+# 帰納変数を添字にするアクセスが歩くポインタに
+# 替わること (slli が初期化の1回だけになる) と、
+# 対象外のループでは従来の生成が残ることを見る
+cat > "$TMP/v57a.c" <<'EOF'
+int g[8];
+int sum8(void) {
+    int s = 0;
+    int i = 0;
+    while (i < 8) {
+        s = s + g[i];
+        i++;
+    }
+    return s;
+}
+int ctrl(void) {
+    int s = 0;
+    int i = 0;
+    int j = 3;
+    while (i < 8) {
+        s = s + g[j];
+        i++;
+    }
+    return s;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v57a.c" > "$TMP/v57a.txt"
+slli57=$(grep -c '^i slli' "$TMP/v57a.txt" || true)
+if [ "$slli57" -eq 2 ]; then
+    echo "ok: v57: slli は初期化と対象外ループの2か所だけ"
+else
+    echo "FAIL: v57: slli が $slli57 か所 (2のはず)"
+    NG=1
+fi
+# 機能面: for / while / do-while、ポインタ基底、
+# 負の歩幅、定数オフセット、入れ子、条件の中の
+# ++、分岐の中の変更、対象外の添字、char 配列、
+# 書き込みを混ぜる (nested の期待値は 24 + 9 = 33)
+cat > "$TMP/v57c.c" <<'EOF'
+int g[8] = {3, 1, 4, 1, 5, 9, 2, 6};
+int h[3] = {1, 2, 3};
+char ca[5] = {65, 66, 67, 68, 69};
+void print_int(int v) {
+    int d[8];
+    int n = 0;
+    if (v == 0) {
+        putc('0');
+        return;
+    }
+    while (v > 0) {
+        d[n] = v % 10;
+        n++;
+        v = v / 10;
+    }
+    while (n > 0) {
+        n--;
+        putc('0' + d[n]);
+    }
+}
+int fwd(void) {
+    int s = 0;
+    int i = 0;
+    for (i = 0; i < 8; i++)
+        s = s + g[i];
+    return s;
+}
+int ptrsum(void) {
+    int a[6];
+    int i = 0;
+    int s = 0;
+    int *p = a;
+    for (i = 0; i < 6; i++)
+        a[i] = i * i;
+    for (i = 0; i < 6; i++)
+        s = s + p[i];
+    return s;
+}
+int back(void) {
+    int s = 0;
+    int i = 0;
+    for (i = 7; i >= 0; i--)
+        s = s + g[i];
+    return s;
+}
+int offset(void) {
+    int s = 0;
+    int i = 0;
+    while (i < 7) {
+        s = s + g[i + 1];
+        i++;
+    }
+    return s;
+}
+int nested(void) {
+    int s = 0;
+    int i = 0;
+    int j = 0;
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 3; j++)
+            s = s + h[j];
+        s = s + g[i];
+    }
+    return s;
+}
+int condmod(void) {
+    int s = 0;
+    int i = 0;
+    while (i++ < 5)
+        s = s + g[i];
+    return s;
+}
+int branchmod(void) {
+    int s = 0;
+    int i = 0;
+    while (i < 8) {
+        s = s + g[i];
+        if (i == 2)
+            i++;
+        i++;
+    }
+    return s;
+}
+int fallback(void) {
+    int s = 0;
+    int i = 0;
+    while (i < 7) {
+        s = s + g[i + (i % 2)];
+        i++;
+    }
+    return s;
+}
+int dowhile(void) {
+    int s = 0;
+    int i = 0;
+    do {
+        s = s + g[i];
+        i++;
+    } while (i < 4);
+    return s;
+}
+int bigstep(void) {
+    int s = 0;
+    int i = 0;
+    for (i = 0; i < 8; i = i + 2)
+        s = s + g[i];
+    return s;
+}
+int charsum(void) {
+    int s = 0;
+    int i = 0;
+    for (i = 0; i < 5; i++)
+        s = s + ca[i];
+    return s;
+}
+int writeread(void) {
+    int a[8];
+    int *p = a;
+    int i = 0;
+    int s = 0;
+    for (i = 0; i < 8; i++)
+        p[i] = i * 3;
+    for (i = 0; i < 8; i++)
+        s = s + a[i];
+    return s;
+}
+int main(void) {
+    print_int(fwd());
+    putc(' ');
+    print_int(ptrsum());
+    putc(' ');
+    print_int(back());
+    putc(' ');
+    print_int(offset());
+    putc(' ');
+    print_int(nested());
+    putc(' ');
+    print_int(condmod());
+    putc(' ');
+    print_int(branchmod());
+    putc(' ');
+    print_int(fallback());
+    putc(' ');
+    print_int(dowhile());
+    putc(' ');
+    print_int(bigstep());
+    putc(' ');
+    print_int(charsum());
+    putc(' ');
+    print_int(writeread());
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v57c.c" > "$TMP/v57c.bin"
+check_tail "$TMP/v57c.bin" "31 55 31 28 33 20 30 25 9 14 335 84" "v57: ループ最適化の機能一式"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに

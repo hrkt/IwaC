@@ -296,6 +296,9 @@ static int gen_stmt(int node) {
          * 割り付けの書き込みで正規化を省く判断に使う) */
         gen_store_var(node_val[node], REG_T1,
                       node_etype[node_lhs[node]]);
+        /* ループ最適化 (v57): 帰納変数への代入なら、
+         * 歩くポインタを進める */
+        loop_xform_on_mod(node);
         return 1;
     }
     if (kind == NODE_PUTC) {
@@ -413,6 +416,9 @@ static int gen_stmt(int node) {
         return 1;
     }
     if (kind == NODE_WHILE) {
+        /* ループ最適化 (v57): 歩くポインタの初期値を
+         * 条件判定の前に作る */
+        int xmark = loop_xform_begin(node);
         int l_cond = nasm;  /* 条件判定の命令番号 */
         /* 条件を分岐として生成 (偽なら L_end、v53)。
          * 飛び先は末尾で書き直す */
@@ -445,9 +451,13 @@ static int gen_stmt(int node) {
         apply_patches(loop_break_head[loop_depth], nasm);
         ctrl_depth--;
         loop_depth--;
+        loop_xform_end(xmark);
         return 1;
     }
     if (kind == NODE_DOWHILE) {
+        /* ループ最適化 (v57): 歩くポインタの初期値を
+         * 本体の前に作る */
+        int xmark = loop_xform_begin(node);
         /* do-while (v48): 本体を先に置き、条件は後ろ。
          * 「真なら戻る」は「偽なら落ちる + jal で戻る」
          * に分解する (条件の分岐の飛び先は前にしか
@@ -480,6 +490,7 @@ static int gen_stmt(int node) {
         apply_patches(loop_break_head[loop_depth], nasm);
         ctrl_depth--;
         loop_depth--;
+        loop_xform_end(xmark);
         return 1;
     }
     if (kind == NODE_FOR) {
@@ -501,6 +512,9 @@ static int gen_stmt(int node) {
                     return 0;
             }
         }
+        /* ループ最適化 (v57): 初期化が済んだ所で、
+         * 歩くポインタの初期値を条件判定の前に作る */
+        int xmark = loop_xform_begin(node);
         int l_cond = nasm;
         int c_head = -1;
         if (!gen_cond_branch(node_lhs[node], &c_head, 0))
@@ -535,6 +549,7 @@ static int gen_stmt(int node) {
         apply_patches(loop_break_head[loop_depth], nasm);
         ctrl_depth--;
         loop_depth--;
+        loop_xform_end(xmark);
         return 1;
     }
     if (kind == NODE_SWITCH) {

@@ -6,8 +6,10 @@
 # と対で、KosabaOS の 1MB 級データ領域でも
 # Misoni のチェーン全体が回るようにする。
 #
-# 実測のピーク (2026-11-23、v52、iwac 自身のリンク):
-#   最大のオブジェクト 223,656 バイト (02-parse.eo)
+# 実測のピーク (2026-11-23、v57、iwac 自身のリンク):
+#   最大のオブジェクト 264,208 バイト (03-gen.eo。
+#   v57 でループ最適化の表と関数が増えて
+#   02-parse.eo を抜いた)
 #   名前 611 (登録順の控え 2,627) / 名前プール
 #   7,007 バイト / オブジェクト1つのシンボル表は
 #   最大 2,088 件 (02-parse.eo)
@@ -16,16 +18,17 @@
 # ストリーミング化 (doc/nori-streaming.md) で、
 # コード置き場・文字列置き場・再配置表は消えた。
 # 残る容量プロファイル (標準 → 断片):
-#   名前表         4096 → 704 (配列 17 本とも。
-#     v56 で 640 から引き上げ: 名前の数が 643 に
-#     なり上限を超えた)
-#   登録順         4096 → 2816 (v56 で 2688 から
-#     引き上げ: 関数が増えて登録が溢れた)
-#   シンボル表の鏡 8192 → 2368 (esym。実測 2,257
-#     は 03-gen で、v56 でレジスタ割り付けの
-#     名前が増えて 02-parse を抜いた)
-#   共有バッファ   384KB → 224KB (最大の入力
-#     オブジェクト1つの全文が入れば足りる)
+#   名前表         4096 → 768 (配列 17 本とも。
+#     v56 で 640 → 704、v57 で 768: 名前の数が
+#     697 になり上限に近づいた)
+#   登録順         4096 → 3072 (v56 で 2688 →
+#     2816、v57 で 3072: 関数が増えて登録が増えた)
+#   シンボル表の鏡 8192 → 2816 (esym。実測 2,689
+#     は 03-gen で、v57 でループ最適化の名前と
+#     関数が増えて 02-parse を大きく抜いた)
+#   共有バッファ   384KB → 264KB (最大の入力
+#     オブジェクト1つの全文が入れば足りる。
+#     v57 で 224KB から引き上げ)
 #   名前プール     64KB → 8KB (実測 7,236、
 #     v55 で測定。v52 の 7,007 から、v53・v55 で
 #     増えた OP 名・関数名・レジスタ名の分だけ
@@ -74,18 +77,18 @@ apply() {
 }
 
 # 名前表: まず登録順 (seq) を名指しで替えてから残りを一括
-apply nori.c 'seq_sym[4096]' 'seq_sym[2816]' 1
-apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 2816' 1
-apply nori.c '[4096]' '[704]' 17
-apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 704' 1
+apply nori.c 'seq_sym[4096]' 'seq_sym[3072]' 1
+apply nori.c 'MAX_SEQ = 4096' 'MAX_SEQ = 3072' 1
+apply nori.c '[4096]' '[768]' 17
+apply nori.c 'MAX_SYM = 4096' 'MAX_SYM = 768' 1
 # オブジェクト1つのシンボル表の鏡 (esym、v46 で穴の表と分離)
-apply nori.c 'esym_tag[8192]' 'esym_tag[2368]' 1
-apply nori.c 'esym_sym[8192]' 'esym_sym[2368]' 1
-apply nori.c 'nsym_e > 8192' 'nsym_e > 2368' 2
+apply nori.c 'esym_tag[8192]' 'esym_tag[2816]' 1
+apply nori.c 'esym_sym[8192]' 'esym_sym[2816]' 1
+apply nori.c 'nsym_e > 8192' 'nsym_e > 2816' 2
 # 共有バッファ (オブジェクト1つの全文) と読みのガード
-apply nori.c 'share_buf[393216]' 'share_buf[229376]' 1
-apply nori.c '393216 - in_len' '229376 - in_len' 1
-apply nori.c 'in_len >= 393216' 'in_len >= 229376' 1
+apply nori.c 'share_buf[393216]' 'share_buf[270336]' 1
+apply nori.c '393216 - in_len' '270336 - in_len' 1
+apply nori.c 'in_len >= 393216' 'in_len >= 270336' 1
 # 配列の初期値の置き場 (v40) と、その穴埋めの控え (afix)
 apply nori.c 'ainit_buf[262144]' 'ainit_buf[128]' 1
 apply nori.c 'MAX_AINIT = 262144' 'MAX_AINIT = 128' 1
