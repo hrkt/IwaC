@@ -21,7 +21,11 @@
 #   シンボル表の鏡 8192 → 2176 (esym。実測 2,088)
 #   共有バッファ   384KB → 224KB (最大の入力
 #     オブジェクト1つの全文が入れば足りる)
-#   名前プール     64KB → 7KB (実測 7,007)
+#   名前プール     64KB → 8KB (実測 7,236、
+#     v55 で測定。v52 の 7,007 から、v53・v55 で
+#     増えた OP 名・関数名・レジスタ名の分だけ
+#     伸びた。名前の数も 611 → 632 で、名前表の
+#     上限 640 まで残り 8 と近づいている)
 #   配列初期値    256KB → 128B (断片プロファイルの
 #     仕事は iwac 自身のリンクで、初期値は現れない)
 #   afix の控え   1024 → 32 (実測 0 件)
@@ -93,8 +97,8 @@ apply nori.c 'edata_val[256]' 'edata_val[80]' 1
 apply nori.c 'edata_hit[256]' 'edata_hit[80]' 1
 apply nori.c 'nedata >= 256' 'nedata >= 80' 1
 # 名前プール (文字列置き場はストリーミング化で消えた)
-apply nori.c 'name_pool[65536]' 'name_pool[7168]' 1
-apply nori.c 'name_used >= 65536' 'name_used >= 7168' 1
+apply nori.c 'name_pool[65536]' 'name_pool[8192]' 1
+apply nori.c 'name_used >= 65536' 'name_used >= 8192' 1
 
 # 標準の iwac (ホスト版) でオブジェクト一式を用意する
 cat ../src/0*.c > "$WORK/iwac_all.c"

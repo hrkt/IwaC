@@ -107,10 +107,13 @@ static int OP_BLT = 58;
 static int OP_BGE = 59;
 static int OP_BLTU = 60;
 static int OP_BGEU = 61;
+static int OP_ANDI = 62;
+static int OP_ORI = 63;
+static int OP_SLTI = 64;
 
 /* op の名前 → 番号。名前の表は iwac 本体の
  * op_name (src/04-encode.c) と対になる */
-static char *op_names[64];  /* OP の最大 (61 = OP_BGEU) + 余り */
+static char *op_names[72];  /* OP の最大 (64 = OP_SLTI) + 余り */
 static int op_inited;
 static void op_init(void) {
     op_names[OP_LUI] = "lui";
@@ -175,11 +178,14 @@ static void op_init(void) {
     op_names[OP_BGE] = "bge";
     op_names[OP_BLTU] = "bltu";
     op_names[OP_BGEU] = "bgeu";
+    op_names[OP_ANDI] = "andi";
+    op_names[OP_ORI] = "ori";
+    op_names[OP_SLTI] = "slti";
     op_inited = 1;
 }
 
 static int op_lookup(char *name) {
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < 72; i++)
         if (ds_streq(op_names[i], name))
             return i;
     return -1;
@@ -664,6 +670,15 @@ static long encode_inst(int i) {
             (rd << 7) | 0x13;
     } else if (op == OP_SLTIU) {
         w = (imm << 20) | (rs1 << 15) | (3 << 12) |
+            (rd << 7) | 0x13;
+    } else if (op == OP_ANDI) {
+        w = (imm << 20) | (rs1 << 15) | (7 << 12) |
+            (rd << 7) | 0x13;
+    } else if (op == OP_ORI) {
+        w = (imm << 20) | (rs1 << 15) | (6 << 12) |
+            (rd << 7) | 0x13;
+    } else if (op == OP_SLTI) {
+        w = (imm << 20) | (rs1 << 15) | (2 << 12) |
             (rd << 7) | 0x13;
     } else if (op == OP_SB) {
         w = ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) |

@@ -100,7 +100,8 @@ check_run "$TMP/a.bin" A "v0: 'A'"
 # --- v1: 式の確認 ---
 "$IWAC" '65+1' > "$TMP/expr.bin"
 size=$(wc -c < "$TMP/expr.bin")
-[ "$size" -eq 24 ] || fail "65+1 のバイナリは ${size} バイト (24のはず)"
+# v55 で即値形 (addi) になり1命令減って 20 バイト
+[ "$size" -eq 20 ] || fail "65+1 のバイナリは ${size} バイト (20のはず)"
 check_run "$TMP/expr.bin" B "v1: '65+1'"
 
 "$IWAC" '66-1' > "$TMP/expr2.bin"
@@ -2671,6 +2672,56 @@ putc(65 + (r - 3));
 EOF
 "$IWAC" "$TMP/v54b.c" > "$TMP/v54b.bin"
 check_run "$TMP/v54b.bin" A "v54: typedef・unsigned char・unsigned int でも符号なし"
+
+# --- v55: 式評価の改善 (保持レジスタと即値形) ---
+# 入れ子の二項演算で左の結果を t3 に保持する
+# (スタック往復にしない) こと、定数相手は即値
+# 命令になること、呼び出しを含む右辺では従来の
+# スタック退避に落ちることを、命令列で確かめる
+cat > "$TMP/v55a.c" <<'EOF'
+int calc(int a, int b) {
+    int r;
+    r = (a + b) * (a - b);
+    r = r + a * 8 + (a & 12) + (b | 3) + (a < 20);
+    return r;
+}
+int withcall(int a, int b) {
+    return (a + b) * calc(a, b);
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v55a.c" > "$TMP/v55a.txt"
+hold55=$(grep -c '^i addi 28 6 0 0' "$TMP/v55a.txt" || true)
+spill55=$(grep -c '^i sd 0 2 6 0' "$TMP/v55a.txt" || true)
+andi55=$(grep -c '^i andi' "$TMP/v55a.txt" || true)
+ori55=$(grep -c '^i ori' "$TMP/v55a.txt" || true)
+slti55=$(grep -c '^i slti' "$TMP/v55a.txt" || true)
+if [ "$hold55" -ge 1 ] && [ "$spill55" -ge 1 ] && [ "$andi55" -ge 1 ] && [ "$ori55" -ge 1 ] && [ "$slti55" -ge 1 ]; then
+    echo "ok: v55: 保持レジスタ $hold55 か所・退避 $spill55 か所・即値形 andi $andi55 / ori $ori55 / slti $slti55"
+else
+    echo "FAIL: v55: 保持 $hold55・退避 $spill55・andi $andi55・ori $ori55・slti $slti55"
+    NG=1
+fi
+# 機能面: 入れ子・即値形・三項・呼び出しを混ぜた式
+cat > "$TMP/v55b.c" <<'EOF'
+int f(int x) { return x * 3 + 1; }
+int a;
+int b;
+int r;
+a = 10;
+b = 4;
+r = (a + b) * (a - b);
+r = r + ((a + 2) * (b + 3));
+r = r + f(a + b);
+r = r + (a > 5 ? (a + b) * 2 : 0);
+r = r + a * 8 + b * 1 + a * 0;
+r = r + (a << 3) + (b >> 1) + (a & 12) + (b | 3) + (a ^ 5);
+r = r + (a < 20) + (a < 5);
+putc('0' + (r / 100) % 10);
+putc('0' + (r / 10) % 10);
+putc('0' + r % 10);
+EOF
+"$IWAC" "$TMP/v55b.c" > "$TMP/v55b.bin"
+check_run "$TMP/v55b.bin" 6 "v55: 式評価の混ぜ合わせ (末尾の桁、答えは 436)"
 
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と

@@ -135,6 +135,12 @@ static int OP_BLTU = 60;      /* bltu (v53): 符号なしの < 。
                                * funct3 は 6 */
 static int OP_BGEU = 61;      /* bgeu (v53): 符号なしの >= 。
                                * funct3 は 7 */
+static int OP_ANDI = 62;      /* andi (v55): 即値との AND。
+                               * I 形式、funct3 は 7 */
+static int OP_ORI = 63;       /* ori (v55): 即値との OR。
+                               * funct3 は 6 */
+static int OP_SLTI = 64;      /* slti (v55): 即値との符号付き
+                               * 比較。funct3 は 2 */
 
 /* 命令表の上限は 24576 (v39 で 40960 → 49152、
  * v44 で → 57344、v45 で → 59392 と増量し、
@@ -927,6 +933,7 @@ static int gen_fp_binop(int node);
 /* 二項演算の両辺を t1 / t2 に揃える道具 (v53)。
  * gen_expr と相互に使う */
 static int gen_binop_operands(int node);
+static int gen_imm_binop(int node);
 
 /* 条件を分岐として生成する道具 (v53)。本体は
  * src/03-genstmt.c の gen_cond_expr の隣にある */
@@ -1768,7 +1775,13 @@ static int gen_expr(int node) {
     if ((node_etype[node_lhs[node]] & 64) ||
         (node_etype[node_rhs[node]] & 64))
         return gen_fp_binop(node);
-    /* 二項演算: 両辺を t1 (左) と t2 (右) に揃える */
+    /* 二項演算: 右辺が定数なら即値形を先に試す (v55) */
+    int im = gen_imm_binop(node);
+    if (im < 0)
+        return 0;
+    if (im)
+        return 1;
+    /* 両辺を t1 (左) と t2 (右) に揃える */
     if (!gen_binop_operands(node))
         return 0;
     int rhs = node_rhs[node];
@@ -1897,6 +1910,45 @@ static int gen_expr(int node) {
  * 退避してから右を計算する。gen_expr の二項演算と、
  * 条件分岐の融合 (gen_cond_branch、03-genstmt.c)
  * で共用する (v53) */
+/* 式の部分木に呼び出しが含まれるか (v55)。
+ * lhs / rhs / next をたどり、三項演算子の枝は
+ * node_val も見る。数え落とすより余分に拾う側へ
+ * 倒す (迷ったら呼び出しありと見る)。
+ * リンクの終端は -1 だけでなく 0 のこともある:
+ * 使わないリンクを 0 で埋める作り方が混ざって
+ * いるため。0 番のノードは最初に作られる葉
+ * (子は自分より前に作られる作法なので、0 番が
+ * 呼び出しや式の親になることはない) なので、
+ * 0 以下は「ここまで」として安全に止まれる */
+static int subtree_has_call(int node) {
+    if (node <= 0)
+        return 0;
+    int k = node_kind[node];
+    if (k == NODE_CALL || k == NODE_ICALL)
+        return 1;
+    if (subtree_has_call(node_lhs[node]))
+        return 1;
+    if (subtree_has_call(node_rhs[node]))
+        return 1;
+    if (k == NODE_COND && subtree_has_call(node_val[node]))
+        return 1;
+    if (subtree_has_call(node_next[node]))
+        return 1;
+    return 0;
+}
+
+/* 二項演算で左の結果を退避する保持レジスタ (v55)。
+ * 深さごとに t3, t4, t5, t6 を使う。呼び出しで
+ * 壊れるレジスタなので、呼び出しを跨ぐ退避には
+ * 使わない (subtree_has_call で振り分ける) */
+static int hold_depth;
+static int hold_reg(int i) {
+    if (i == 0) return REG_T3;
+    if (i == 1) return REG_T4;
+    if (i == 2) return REG_T5;
+    return REG_T6;
+}
+
 static int gen_binop_operands(int node) {
     if (!gen_expr(node_lhs[node]))
         return 0;
@@ -1906,8 +1958,23 @@ static int gen_binop_operands(int node) {
         gen_load_leaf(REG_T2, rhs);
         return 1;
     }
-    /* 右も式: 左の結果 (t1) をスタックへ退避し、右を
-     * 計算して t2 へ写し、左を t1 へ戻す */
+    /* 右も式: 左の結果 (t1) を退避して右を計算し、
+     * t2 へ写して左を戻す。退避先はまず保持
+     * レジスタ (v55)。右の部分木に呼び出しが
+     * あるときと、保持が4段を超えるときは
+     * 従来のスタック退避にする */
+    if (hold_depth < 4 && !subtree_has_call(rhs)) {
+        int hr = hold_reg(hold_depth);
+        hold_depth++;
+        asm_push(OP_ADDI, hr, REG_T1, 0, 0);
+        int ok = gen_expr(rhs);
+        hold_depth--;
+        if (!ok)
+            return 0;
+        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        asm_push(OP_ADDI, REG_T1, hr, 0, 0);
+        return 1;
+    }
     asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
     asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
     if (!gen_expr(rhs))
@@ -1915,6 +1982,76 @@ static int gen_binop_operands(int node) {
     asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
     asm_push(OP_LD, REG_T1, REG_SP, 0, 0);
     asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+    return 1;
+}
+
+/* 定数相手の二項演算を即値形で出す (v55、設計は
+ * doc/expr-eval.md)。右辺が数リテラルで即値命令に
+ * 収まる形なら、左辺を t1 に作って即値命令で演算
+ * する。出したら 1、対象でなければ 0、左辺の生成に
+ * 失敗したら -1 を返す。ポインタ演算はスケールの
+ * 経路 (v49) を迂回しないので対象外 */
+static int gen_imm_binop(int node) {
+    int k = node_kind[node];
+    if (k != NODE_ADD && k != NODE_SUB && k != NODE_AND &&
+        k != NODE_OR && k != NODE_XOR && k != NODE_SHL &&
+        k != NODE_SHR && k != NODE_LT && k != NODE_MUL)
+        return 0;
+    int rhs = node_rhs[node];
+    if (node_kind[rhs] != NODE_NUM)
+        return 0;
+    if (ptr_elem_size(node_lhs[node]) > 0 ||
+        ptr_elem_size(rhs) > 0)
+        return 0;
+    /* 定数の値: node_val は int のビットパターン。
+     * 葉の読み込み (gen_load_leaf) と同じく、負の
+     * パターンは 32 ビットを 0 埋めで広げた値と見る */
+    int v = node_val[rhs];
+    long c = (v >= 0) ? (long)v : (long)(unsigned int)v;
+    int op = 0;
+    int imm = 0;
+    int canon = 1;
+    int mode = 0;  /* 0 = t1 への即値命令、1 = 0 を置く、
+                    * 2 = 演算なし (1 倍) */
+    if (k == NODE_ADD && c <= 2047) {
+        op = OP_ADDI; imm = (int)c;
+    } else if (k == NODE_SUB && c <= 2048) {
+        op = OP_ADDI; imm = (int)-c;
+    } else if (k == NODE_AND && c <= 2047) {
+        op = OP_ANDI; imm = (int)c;
+    } else if (k == NODE_OR && c <= 2047) {
+        op = OP_ORI; imm = (int)c;
+    } else if (k == NODE_XOR && c <= 2047) {
+        op = OP_XORI; imm = (int)c;
+    } else if (k == NODE_SHL && c <= 63) {
+        op = OP_SLLI; imm = (int)c;
+    } else if (k == NODE_SHR && c <= 63) {
+        op = ((node_etype[node] & 48) == 48) ? OP_SRLI : OP_SRAI;
+        imm = (int)c; canon = 0;
+    } else if (k == NODE_LT && c <= 2047) {
+        int ucmp = (node_etype[node_lhs[node]] == (8 + 16 + 32)) ||
+                   (node_etype[rhs] == (8 + 16 + 32));
+        op = ucmp ? OP_SLTIU : OP_SLTI;
+        imm = (int)c; canon = 0;
+    } else if (k == NODE_MUL && c == 0) {
+        mode = 1;
+    } else if (k == NODE_MUL && c == 1) {
+        mode = 2;
+    } else if (k == NODE_MUL && c > 1 && (c & (c - 1)) == 0) {
+        op = OP_SLLI; imm = 0;
+        while ((1L << imm) < c)
+            imm++;
+    } else {
+        return 0;
+    }
+    if (!gen_expr(node_lhs[node]))
+        return -1;
+    if (mode == 1)
+        asm_push(OP_ADDI, REG_T1, REG_ZERO, 0, 0);
+    else if (mode == 0)
+        asm_push(op, REG_T1, REG_T1, 0, imm);
+    if (canon)
+        emit_canon(node_etype[node]);
     return 1;
 }
 

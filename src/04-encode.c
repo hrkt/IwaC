@@ -224,6 +224,21 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                (3u << 12) | ((unsigned int)rd << 7) | 0x13u;
     }
+    if (op == OP_ANDI) {
+        /* andi rd, rs1, imm -- I 形式。funct3 が 7 */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (7u << 12) | ((unsigned int)rd << 7) | 0x13u;
+    }
+    if (op == OP_ORI) {
+        /* ori rd, rs1, imm -- I 形式。funct3 が 6 */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (6u << 12) | ((unsigned int)rd << 7) | 0x13u;
+    }
+    if (op == OP_SLTI) {
+        /* slti rd, rs1, imm -- I 形式。funct3 が 2 */
+        return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
+               (2u << 12) | ((unsigned int)rd << 7) | 0x13u;
+    }
     if (is_cbranch(op)) {
         /* beq / bne / blt / bge / bltu / bgeu rs1, rs2,
          * offset -- B 形式 (分岐)。
@@ -722,6 +737,9 @@ static char *op_name(int op) {
     if (op == OP_BGE) return "bge";
     if (op == OP_BLTU) return "bltu";
     if (op == OP_BGEU) return "bgeu";
+    if (op == OP_ANDI) return "andi";
+    if (op == OP_ORI) return "ori";
+    if (op == OP_SLTI) return "slti";
     return "?";
 }
 

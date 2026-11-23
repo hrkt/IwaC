@@ -403,6 +403,13 @@
  * 名簿はデータ予算の都合で char に +1 符号化で
  * 詰めてある (タグ32個・メンバ合計160まで)
  *
+ * v55 は式評価の改善 (設計と結果は
+ * doc/expr-eval.md)。二項演算の左の結果の退避を
+ * 保持レジスタ t3〜t6 にし (右の部分木に呼び
+ * 出しがあるときは従来のスタック退避)、右辺が
+ * 定数のときは即値命令で演算する (andi / ori /
+ * slti を新設)。nami で命令数 約4.2%減
+ *
  * v54 は古典スペルの unsigned の修正 (記録は
  * doc/unsigned.md): 型の言葉を読み捨てるモデルで
  * unsigned の印が落ちており、unsigned long 等が
@@ -1042,6 +1049,12 @@ static int REG_ZERO = 0;
 static int REG_T0 = 5;  /* UART ベースアドレス専用 */
 static int REG_T1 = 6;  /* 今の値 */
 static int REG_T2 = 7;  /* 次の項 */
+static int REG_T3 = 28; /* 式評価の保持レジスタ (v55)。
+                         * t3〜t6 は呼び出しで壊れる前提で、
+                         * 呼び出しを跨がない範囲でのみ使う */
+static int REG_T4 = 29;
+static int REG_T5 = 30;
+static int REG_T6 = 31;
 static int REG_RA = 1;  /* 戻り先の住所 (関数の呼び出し用) */
 static int REG_SP = 2;  /* スタックポインタ (コンパイラが用意) */
 static int REG_A0 = 10; /* 引数と戻り値のレジスタ (呼び出し
