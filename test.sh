@@ -2579,6 +2579,59 @@ ld52=$(grep -c '^i \(ld\|lw\) ' "$TMP/v52b.asm")
 [ "$ld52" -le 9 ] || fail "v52: peephole の転送が効いていない (ロード $ld52、最適化前は 12)"
 echo "ok: v52: peephole が効いている (命令数 $n52、ロード $ld52)"
 
+# --- v53: 条件分岐の融合 (設計は doc/branch-fusion.md) ---
+# 比較・&& || !・三項・do-while・uint64 の符号なし比較を
+# 混ぜたプログラムの出力が不変なことと、条件の位置で
+# slt 系が出ず分岐に直ることを見る
+cat > "$TMP/v53a.c" <<'EOF'
+int check(int a, int b) {
+    int r = 0;
+    if (a < b) r = r + 1;
+    if (a <= b) r = r + 2;
+    if (a > b) r = r + 4;
+    if (a >= b) r = r + 8;
+    if (a == b) r = r + 16;
+    if (a != b) r = r + 32;
+    return r;
+}
+int s;
+int i;
+uint64 u;
+s = check(3, 5) + check(5, 5) + check(7, 5);
+i = 0;
+do { i = i + 1; } while (i < 3 && s > 100);
+s = s + i;
+s = (s >= 108 && !(s == 109)) ? s + 1 : 0;
+u = 0 - 1;
+if (u > 1) s = s + 1;
+if (u < 1) s = s + 50;
+putc(65 + (s - 110));
+EOF
+"$IWAC" "$TMP/v53a.c" > "$TMP/v53a.bin"
+check_run "$TMP/v53a.bin" A "v53: 融合後も条件まわりの出力は不変"
+cat > "$TMP/v53b.c" <<'EOF'
+int a;
+int b;
+int s;
+a = 3;
+b = 5;
+s = 0;
+if (a < b) s = s + 1;
+if (a <= b) s = s + 1;
+if (a > b) s = s + 1;
+if (a >= b) s = s + 1;
+if (a == b) s = s + 1;
+if (a != b) s = s + 1;
+while (s < 100) s = s + 10;
+putc(65 + (s - 103));
+EOF
+"$IWAC" --kosaba --asari "$TMP/v53b.c" > "$TMP/v53b.asm"
+n53=$(grep -c '^i ' "$TMP/v53b.asm")
+[ "$n53" -le 134 ] || fail "v53: 命令数が増えている ($n53、融合前は 145)"
+slt53=$(grep -c '^i \(slt\|sltu\|sltiu\) ' "$TMP/v53b.asm")
+[ "$slt53" -eq 0 ] || fail "v53: 条件の位置に slt 系が残っている ($slt53、融合前は 7)"
+echo "ok: v53: 分岐の融合が効いている (命令数 $n53、slt 系 $slt53)"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに

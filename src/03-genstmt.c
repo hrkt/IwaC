@@ -73,6 +73,104 @@ static int gen_cond_expr(int node) {
     return 1;
 }
 
+/* 条件分岐を置き、飛び先のパッチリストに繋ぐ */
+static void emit_patch_branch(int op, int rs1, int rs2,
+                              int *head) {
+    int i = emit_branch(op, rs1, rs2);
+    patch_next[i] = *head;
+    *head = i;
+}
+
+/* 条件を「分岐」として生成する (v53、設計は
+ * doc/branch-fusion.md)。sense が 0 なら「偽なら
+ * 飛ぶ」、1 なら「真なら飛ぶ」分岐を、head の
+ * リストに繋ぐ (飛び先は呼び出し側が apply_patches
+ * で確定させる)。比較は 0/1 を作らず大小分岐に
+ * 直し、&& || ! は短絡のまま再帰する。それ以外
+ * (double が絡むもの、呼び出し、素の値) は
+ * gen_cond_expr で 0/1 を作る従来形に落とす */
+static int gen_cond_branch(int node, int *head, int sense) {
+    int k = node_kind[node];
+    if (k == NODE_LAND) {
+        if (!sense) {
+            /* 偽なら飛ぶ: どちらかが偽なら飛ぶ */
+            if (!gen_cond_branch(node_lhs[node], head, 0))
+                return 0;
+            return gen_cond_branch(node_rhs[node], head, 0);
+        }
+        /* 真なら飛ぶ: 左が偽なら右の判定へ落ちる */
+        int skip = -1;
+        if (!gen_cond_branch(node_lhs[node], &skip, 0))
+            return 0;
+        if (!gen_cond_branch(node_rhs[node], head, 1))
+            return 0;
+        apply_patches(skip, nasm);
+        return 1;
+    }
+    if (k == NODE_LOR) {
+        if (sense) {
+            /* 真なら飛ぶ: どちらかが真なら飛ぶ */
+            if (!gen_cond_branch(node_lhs[node], head, 1))
+                return 0;
+            return gen_cond_branch(node_rhs[node], head, 1);
+        }
+        /* 偽なら飛ぶ: 左が真なら右の判定へ落ちる */
+        int skip = -1;
+        if (!gen_cond_branch(node_lhs[node], &skip, 1))
+            return 0;
+        if (!gen_cond_branch(node_rhs[node], head, 0))
+            return 0;
+        apply_patches(skip, nasm);
+        return 1;
+    }
+    if (k == NODE_NOT)
+        /* ! は向きを反転して再帰 */
+        return gen_cond_branch(node_lhs[node], head, !sense);
+    if ((k == NODE_EQ || k == NODE_NE || k == NODE_LT ||
+         k == NODE_GT || k == NODE_LE || k == NODE_GE) &&
+        !(node_etype[node_lhs[node]] & 64) &&
+        !(node_etype[node_rhs[node]] & 64)) {
+        /* 比較の融合: 両辺を t1 / t2 に揃え、0/1 を
+         * 作らずに分岐する。まず「偽なら飛ぶ」命令を
+         * 選び、真向きは反対の命令にする。符号なしは
+         * どちらかが uint64 のとき (gen_expr の比較と
+         * 同じ判定) */
+        if (!gen_binop_operands(node))
+            return 0;
+        int ucmp = (node_etype[node_lhs[node]] == (8 + 16 + 32)) ||
+                   (node_etype[node_rhs[node]] == (8 + 16 + 32));
+        int op;
+        int rs1 = REG_T1;
+        int rs2 = REG_T2;
+        if (k == NODE_LT)
+            op = ucmp ? OP_BGEU : OP_BGE;
+        else if (k == NODE_GT) {
+            op = ucmp ? OP_BGEU : OP_BGE;
+            rs1 = REG_T2;
+            rs2 = REG_T1;
+        } else if (k == NODE_LE) {
+            op = ucmp ? OP_BLTU : OP_BLT;
+            rs1 = REG_T2;
+            rs2 = REG_T1;
+        } else if (k == NODE_GE)
+            op = ucmp ? OP_BLTU : OP_BLT;
+        else if (k == NODE_EQ)
+            op = OP_BNE;
+        else
+            op = OP_BEQ;
+        if (sense)
+            op = branch_inv(op);
+        emit_patch_branch(op, rs1, rs2, head);
+        return 1;
+    }
+    /* 落とし先: 従来形 (0/1 を作って beq / bne) */
+    if (!gen_cond_expr(node))
+        return 0;
+    emit_patch_branch(sense ? OP_BNE : OP_BEQ,
+                      REG_T1, REG_ZERO, head);
+    return 1;
+}
+
 static int gen_stmt(int node) {
     int kind = node_kind[node];
     if (kind == NODE_PREINC || kind == NODE_POSTINC ||
@@ -277,17 +375,17 @@ static int gen_stmt(int node) {
     }
     if (kind == NODE_IF) {
         /* if の作り方:
-         *   条件を計算 (結果は t1)
-         *   beq t1, zero, L_else (または L_end)  (0 なら飛ぶ)
+         *   条件を分岐として生成 (偽なら L_else
+         *   または L_end へ、v53)
          *   成り立つときの文...
          *   (else がある場合) jal zero, L_end
          * L_else:
          *   else の文...
          * L_end:
          * 飛び先の書き直しは while と同じやり方 */
-        if (!gen_cond_expr(node_lhs[node]))
+        int c_head = -1;
+        if (!gen_cond_branch(node_lhs[node], &c_head, 0))
             return 0;
-        int beq_index = emit_beq_t1z();
         int then_body = node_rhs[node];
         for (int s = then_body; s != -1; s = node_next[s]) {
             if (!gen_stmt(s))
@@ -296,14 +394,14 @@ static int gen_stmt(int node) {
         int else_body = node_val[node];
         if (else_body < 0) {
             /* else 無し: ここが L_end */
-            asm_imm[beq_index] = nasm;
+            apply_patches(c_head, nasm);
             return 1;
         }
         /* else あり: 本体を飛び越えるジャンプを置き、
-         * beq の飛び先 (else の頭) を確定させる */
+         * 条件の飛び先 (else の頭) を確定させる */
         int jal_index = nasm;
         asm_push(OP_JAL, 0, 0, 0, 0);
-        asm_imm[beq_index] = nasm;
+        apply_patches(c_head, nasm);
         for (int s = else_body; s != -1; s = node_next[s]) {
             if (!gen_stmt(s))
                 return 0;
@@ -313,11 +411,11 @@ static int gen_stmt(int node) {
     }
     if (kind == NODE_WHILE) {
         int l_cond = nasm;  /* 条件判定の命令番号 */
-        if (!gen_cond_expr(node_lhs[node]))
+        /* 条件を分岐として生成 (偽なら L_end、v53)。
+         * 飛び先は末尾で書き直す */
+        int c_head = -1;
+        if (!gen_cond_branch(node_lhs[node], &c_head, 0))
             return 0;
-        /* beq t1, zero, L_end -- 飛び先はまだ分からないので
-         * 仮に 0 を入れておき、下で書き直す */
-        int beq_index = emit_beq_t1z();
         if (loop_depth >= 32) {
             errmsg = "ループの入れ子が深すぎます";
             return 0;
@@ -338,9 +436,9 @@ static int gen_stmt(int node) {
         apply_patches(loop_cont_head[loop_depth], l_cond);
         /* jal zero, L_cond -- 条件の判定に戻る */
         asm_push(OP_JAL, 0, 0, 0, l_cond);
-        /* ここ (末尾) が L_end。beq と break の飛び先を
+        /* ここ (末尾) が L_end。条件と break の飛び先を
          * 書き直す */
-        asm_imm[beq_index] = nasm;
+        apply_patches(c_head, nasm);
         apply_patches(loop_break_head[loop_depth], nasm);
         ctrl_depth--;
         loop_depth--;
@@ -348,9 +446,9 @@ static int gen_stmt(int node) {
     }
     if (kind == NODE_DOWHILE) {
         /* do-while (v48): 本体を先に置き、条件は後ろ。
-         * 「真なら戻る」は分岐の道具 (emit_beq_t1z) の
-         * 形に合わせ、「偽なら落ちる + jal で戻る」に
-         * 分解する (新しい分岐種を relax に足さない) */
+         * 「真なら戻る」は「偽なら落ちる + jal で戻る」
+         * に分解する (条件の分岐の飛び先は前にしか
+         * 向けないので、この形が素直) */
         int l_top = nasm;  /* 本体の先頭の命令番号 */
         if (loop_depth >= 32) {
             errmsg = "ループの入れ子が深すぎます";
@@ -368,14 +466,14 @@ static int gen_stmt(int node) {
         }
         /* continue の飛び先は条件判定 (本体の直後) */
         apply_patches(loop_cont_head[loop_depth], nasm);
-        if (!gen_cond_expr(node_lhs[node]))
+        /* 条件を分岐として生成 (偽なら L_end、v53) */
+        int c_head = -1;
+        if (!gen_cond_branch(node_lhs[node], &c_head, 0))
             return 0;
-        /* beq t1, zero, L_end -- 飛び先は下で書き直す */
-        int beq_index = emit_beq_t1z();
         /* jal zero, L_top -- 条件が真なら本体へ戻る */
         asm_push(OP_JAL, 0, 0, 0, l_top);
-        /* ここ (末尾) が L_end。beq と break の飛び先 */
-        asm_imm[beq_index] = nasm;
+        /* ここ (末尾) が L_end。条件と break の飛び先 */
+        apply_patches(c_head, nasm);
         apply_patches(loop_break_head[loop_depth], nasm);
         ctrl_depth--;
         loop_depth--;
@@ -384,8 +482,7 @@ static int gen_stmt(int node) {
     if (kind == NODE_FOR) {
         /* for の作り方 (while への読み替え):
          *   初期化の文 (あれば)
-         * L_cond: 条件を計算 (t1)
-         *         beq t1, zero, L_end
+         * L_cond: 条件を分岐として生成 (偽なら L_end)
          *         本体の文...
          * L_step: 更新の文 (あれば。本体の並びの最後に
          *         NODE_FORSTEP で包んで繋いである)
@@ -402,9 +499,9 @@ static int gen_stmt(int node) {
             }
         }
         int l_cond = nasm;
-        if (!gen_cond_expr(node_lhs[node]))
+        int c_head = -1;
+        if (!gen_cond_branch(node_lhs[node], &c_head, 0))
             return 0;
-        int beq_index = emit_beq_t1z();
         if (loop_depth >= 32) {
             errmsg = "ループの入れ子が深すぎます";
             return 0;
@@ -431,7 +528,7 @@ static int gen_stmt(int node) {
             /* 更新が無い for: continue は条件判定へ直行 */
             apply_patches(loop_cont_head[loop_depth], l_cond);
         asm_push(OP_JAL, 0, 0, 0, l_cond);
-        asm_imm[beq_index] = nasm;
+        apply_patches(c_head, nasm);
         apply_patches(loop_break_head[loop_depth], nasm);
         ctrl_depth--;
         loop_depth--;
@@ -1006,7 +1103,9 @@ static int peep_writes(int i, int r) {
     int op = asm_op[i];
     if (op == OP_SD || op == OP_SW || op == OP_SB ||
         op == OP_SH || op == OP_FSD || op == OP_BEQ ||
-        op == OP_BNE || op == OP_ECALL || op == OP_WFI)
+        op == OP_BNE || op == OP_BLT || op == OP_BGE ||
+        op == OP_BLTU || op == OP_BGEU ||
+        op == OP_ECALL || op == OP_WFI)
         return 0;
     return asm_rd[i] == r;
 }
@@ -1048,7 +1147,7 @@ static void peep_run(void) {
     peep_settgt(0);  /* 入口は落とさない */
     for (i = 0; i < nasm; i++) {
         int op = asm_op[i];
-        if ((op == OP_BEQ || op == OP_BNE || op == OP_JAL) &&
+        if ((is_cbranch(op) || op == OP_JAL) &&
             asm_imm[i] >= 0 && asm_imm[i] < nasm)
             peep_settgt(asm_imm[i]);
     }
@@ -1149,7 +1248,7 @@ static void peep_run(void) {
     /* 3. 命令番号の付け替えと圧縮 */
     for (i = 0; i < nasm; i++) {
         int op = asm_op[i];
-        if ((op == OP_BEQ || op == OP_BNE || op == OP_JAL) &&
+        if ((is_cbranch(op) || op == OP_JAL) &&
             asm_imm[i] >= 0)
             asm_imm[i] = asm_imm[i] -
                          peep_deleted_before(asm_imm[i]);

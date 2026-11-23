@@ -103,10 +103,14 @@ static int OP_FCVT_LU_D = 54;
 static int OP_FNEG_D = 55;
 static int OP_FMV_D = 56;
 static int OP_CSRS = 57;
+static int OP_BLT = 58;
+static int OP_BGE = 59;
+static int OP_BLTU = 60;
+static int OP_BGEU = 61;
 
 /* op の名前 → 番号。名前の表は iwac 本体の
  * op_name (src/04-encode.c) と対になる */
-static char *op_names[58];
+static char *op_names[64];  /* OP の最大 (61 = OP_BGEU) + 余り */
 static int op_inited;
 static void op_init(void) {
     op_names[OP_LUI] = "lui";
@@ -167,11 +171,15 @@ static void op_init(void) {
     op_names[OP_FNEG_D] = "fneg.d";
     op_names[OP_FMV_D] = "fmv.d";
     op_names[OP_CSRS] = "csrs";
+    op_names[OP_BLT] = "blt";
+    op_names[OP_BGE] = "bge";
+    op_names[OP_BLTU] = "bltu";
+    op_names[OP_BGEU] = "bgeu";
     op_inited = 1;
 }
 
 static int op_lookup(char *name) {
-    for (int i = 0; i < 58; i++)
+    for (int i = 0; i < 64; i++)
         if (ds_streq(op_names[i], name))
             return i;
     return -1;
@@ -683,9 +691,20 @@ static long encode_inst(int i) {
         w = (imm << 12) | (rd << 7) | 0x17;
     } else if (op == OP_JALR) {
         w = (imm << 20) | (rs1 << 15) | (rd << 7) | 0x67;
-    } else if (op == OP_BEQ || op == OP_BNE) {
+    } else if (op == OP_BEQ || op == OP_BNE || op == OP_BLT ||
+               op == OP_BGE || op == OP_BLTU || op == OP_BGEU) {
         long off = (imm - i) * 4;
-        long f3 = op == OP_BNE ? 1 : 0;
+        long f3 = 0;
+        if (op == OP_BNE)
+            f3 = 1;
+        else if (op == OP_BLT)
+            f3 = 4;
+        else if (op == OP_BGE)
+            f3 = 5;
+        else if (op == OP_BLTU)
+            f3 = 6;
+        else if (op == OP_BGEU)
+            f3 = 7;
         w = (((off >> 12) & 1) << 31) | (((off >> 5) & 0x3f) << 25) |
             (rs2 << 20) | (rs1 << 15) | (f3 << 12) |
             (((off >> 1) & 0xf) << 8) | (((off >> 11) & 1) << 7) |

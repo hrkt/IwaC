@@ -224,8 +224,9 @@ static unsigned int encode_inst(int i) {
         return ((unsigned int)imm << 20) | ((unsigned int)rs1 << 15) |
                (3u << 12) | ((unsigned int)rd << 7) | 0x13u;
     }
-    if (op == OP_BEQ || op == OP_BNE) {
-        /* beq / bne rs1, rs2, offset -- B 形式 (分岐)。
+    if (is_cbranch(op)) {
+        /* beq / bne / blt / bge / bltu / bgeu rs1, rs2,
+         * offset -- B 形式 (分岐)。
          * 命令列での飛び先は「命令番号」なので、まず
          * バイト単位の相対オフセットに直す:
          *   offset = (飛び先番号 - 自分の番号) x 4
@@ -236,11 +237,22 @@ static unsigned int encode_inst(int i) {
          *   | imm[11] << 7 | opcode 0x63 ]
          * オフセットの下1ビットは常に 0 (命令は4バイト単位)
          * なので格納されない。届く範囲は 前後 約4KB。
-         * beq は funct3 が 0、bne (等しくなければ飛ぶ) は 1。
-         * bne は v27 で導入: 届かない条件分岐を「反転した
-         * 分岐 + jal」に伸ばすときの反転側に使う */
+         * funct3 は beq が 0、bne が 1、blt が 4、bge が 5、
+         * bltu が 6、bgeu が 7。bne は v27 で導入: 届かない
+         * 条件分岐を「反転した分岐 + jal」に伸ばすときの
+         * 反転側に使う。大小分岐は v53 (条件分岐の融合) */
         int off = (imm - i) * 4;
-        unsigned int f3 = (op == OP_BNE) ? 1u : 0u;
+        unsigned int f3 = 0u;
+        if (op == OP_BNE)
+            f3 = 1u;
+        else if (op == OP_BLT)
+            f3 = 4u;
+        else if (op == OP_BGE)
+            f3 = 5u;
+        else if (op == OP_BLTU)
+            f3 = 6u;
+        else if (op == OP_BGEU)
+            f3 = 7u;
         return ((unsigned int)((off >> 12) & 1) << 31) |
                ((unsigned int)((off >> 5) & 0x3f) << 25) |
                ((unsigned int)rs2 << 20) |
@@ -706,6 +718,10 @@ static char *op_name(int op) {
     if (op == OP_FNEG_D) return "fneg.d";
     if (op == OP_FMV_D) return "fmv.d";
     if (op == OP_CSRS) return "csrs";
+    if (op == OP_BLT) return "blt";
+    if (op == OP_BGE) return "bge";
+    if (op == OP_BLTU) return "bltu";
+    if (op == OP_BGEU) return "bgeu";
     return "?";
 }
 

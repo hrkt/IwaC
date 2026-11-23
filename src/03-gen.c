@@ -127,6 +127,14 @@ static int OP_CSRS = 57;      /* csrs (v46): CSR にビットを
                                * CSR 番号。ベアメタルの入口で
                                * sstatus の FS (FPU 有効) を
                                * 立てるためだけに使う */
+static int OP_BLT = 58;       /* blt (v53): rs1 < rs2 (符号付き)
+                               * なら飛ぶ。B 形式、funct3 は 4 */
+static int OP_BGE = 59;       /* bge (v53): rs1 >= rs2 (符号
+                               * 付き) なら飛ぶ。funct3 は 5 */
+static int OP_BLTU = 60;      /* bltu (v53): 符号なしの < 。
+                               * funct3 は 6 */
+static int OP_BGEU = 61;      /* bgeu (v53): 符号なしの >= 。
+                               * funct3 は 7 */
 
 /* 命令表の上限は 24576 (v39 で 40960 → 49152、
  * v44 で → 57344、v45 で → 59392 と増量し、
@@ -181,35 +189,65 @@ static void asm_push(int op, int rd, int rs1, int rs2, int imm) {
 static int branch_ord;         /* 条件分岐の通し番号 */
 static char branch_long[24576]; /* 伸ばす分岐の印 */
 
-/* 「t1 が 0 なら飛ぶ」条件分岐を置く。戻り値は、飛び先
- * (命令番号) を asm_imm に書き込むべき命令の番号:
- * 短い形なら beq 自身、長い形なら後ろの jal の方 */
-static int emit_beq_t1z(void) {
+/* 条件分岐の命令か (飛び先は asm_imm の命令番号) */
+static int is_cbranch(int op) {
+    return op == OP_BEQ || op == OP_BNE || op == OP_BLT ||
+           op == OP_BGE || op == OP_BLTU || op == OP_BGEU;
+}
+
+/* 分岐の反対 (長い形で jal を飛び越える側に使う) */
+static int branch_inv(int op) {
+    if (op == OP_BEQ)
+        return OP_BNE;
+    if (op == OP_BNE)
+        return OP_BEQ;
+    if (op == OP_BLT)
+        return OP_BGE;
+    if (op == OP_BGE)
+        return OP_BLT;
+    if (op == OP_BLTU)
+        return OP_BGEU;
+    return OP_BLTU;
+}
+
+/* 条件分岐を置く。戻り値は、飛び先 (命令番号) を
+ * asm_imm に書き込むべき命令の番号: 短い形なら
+ * 分岐自身、長い形なら後ろの jal の方 */
+static int emit_branch(int op, int rs1, int rs2) {
     int ord = branch_ord++;
     if (branch_long[ord]) {
-        asm_push(OP_BNE, 0, REG_T1, REG_ZERO, nasm + 2);
+        asm_push(branch_inv(op), 0, rs1, rs2, nasm + 2);
         int j = nasm;
         asm_push(OP_JAL, 0, 0, 0, 0);
         return j;
     }
     int b = nasm;
-    asm_push(OP_BEQ, 0, REG_T1, REG_ZERO, 0);
+    asm_push(op, 0, rs1, rs2, 0);
     return b;
+}
+
+/* 「t1 が 0 なら飛ぶ」条件分岐を置く (emit_branch の
+ * 特殊形。戻り値の意味は同じ) */
+static int emit_beq_t1z(void) {
+    return emit_branch(OP_BEQ, REG_T1, REG_ZERO);
 }
 
 /* 生成し終えた命令列を眺め、範囲 (±4KB) の外へ飛ぶ
  * 条件分岐があれば branch_long に印を付ける。
- * 新しい印が付いたら 1 を返す */
+ * 新しい印が付いたら 1 を返す。長い形かどうかは
+ * branch_long の印で知る (v53 で一般化: 以前は
+ * 「OP_BNE なら長い形の相方」という決め打ちだった) */
 static int relax_scan(void) {
     int ord = 0;
     int changed = 0;
     for (int i = 0; i < nasm; i++) {
-        if (asm_op[i] == OP_BNE) {
-            ord++;  /* 長い形の分岐 (相方は jal) */
+        if (!is_cbranch(asm_op[i]))
+            continue;
+        if (branch_long[ord]) {
+            i++;  /* 長い形: 相方の jal も読み飛ばす */
+            ord++;
             continue;
         }
-        if (asm_op[i] != OP_BEQ)
-            continue;
         int off = (asm_imm[i] - i) * 4;
         if ((off < -4096 || off > 4092) && !branch_long[ord]) {
             branch_long[ord] = 1;
@@ -886,6 +924,18 @@ static int gen_value_as(int node, int dst);
 /* 浮動小数点の二項演算の生成 (v46)。gen_expr と相互に使う */
 static int gen_fp_binop(int node);
 
+/* 二項演算の両辺を t1 / t2 に揃える道具 (v53)。
+ * gen_expr と相互に使う */
+static int gen_binop_operands(int node);
+
+/* 条件を分岐として生成する道具 (v53)。本体は
+ * src/03-genstmt.c の gen_cond_expr の隣にある */
+static int gen_cond_branch(int node, int *head, int sense);
+
+/* 飛び先のパッチリストを確定させる道具。本体は
+ * src/03-genstmt.c (v53 で三項演算子からも使う) */
+static void apply_patches(int head, int target);
+
 /* 要素の住所を作る道具 (v23)。gen_expr と相互に使う */
 static int gen_elem_addr(int node);
 
@@ -1555,18 +1605,17 @@ static int gen_expr(int node) {
     if (node_kind[node] == NODE_COND) {
         /* 三項演算子 (v25): 短絡評価。&& と同じく、
          * 条件の値で飛び先を分ける:
-         *   条件を計算 (t1)
-         *   beq t1, zero, L_false
+         *   条件を分岐として生成 (偽なら L_false)
          *   真の式を計算 (t1)
          *   jal zero, L_end
          * L_false: 偽の式を計算 (t1)
          * L_end:
          * 条件の値は分岐で消費されるので退避は不要 */
-        if (!gen_expr(node_lhs[node]))
+        /* 条件は分岐として生成する (v53): 偽なら
+         * L_false へ。飛び先はリストで受ける */
+        int f_head = -1;
+        if (!gen_cond_branch(node_lhs[node], &f_head, 0))
             return 0;
-        if (node_etype[node_lhs[node]] & 64)
-            emit_fp_bool();  /* double の条件 (v46) */
-        int f_jump = emit_beq_t1z();
         if (!gen_expr(node_val[node]))
             return 0;
         if ((node_etype[node] & 64) &&
@@ -1576,7 +1625,7 @@ static int gen_expr(int node) {
             emit_cvt_d(REG_FT0, REG_T1, node_etype[node_val[node]]);
         int e_jump = nasm;
         asm_push(OP_JAL, 0, 0, 0, 0);
-        asm_imm[f_jump] = nasm;
+        apply_patches(f_head, nasm);
         if (!gen_expr(node_rhs[node]))
             return 0;
         if ((node_etype[node] & 64) &&
@@ -1719,24 +1768,10 @@ static int gen_expr(int node) {
     if ((node_etype[node_lhs[node]] & 64) ||
         (node_etype[node_rhs[node]] & 64))
         return gen_fp_binop(node);
-    /* 二項演算: まず左を t1 に */
-    if (!gen_expr(node_lhs[node]))
+    /* 二項演算: 両辺を t1 (左) と t2 (右) に揃える */
+    if (!gen_binop_operands(node))
         return 0;
     int rhs = node_rhs[node];
-    if (is_leaf(rhs)) {
-        /* 右が葉: そのまま t2 に入れる */
-        gen_load_leaf(REG_T2, rhs);
-    } else {
-        /* 右も式: 左の結果 (t1) をスタックへ退避し、右を
-         * 計算して t2 へ写し、左を t1 へ戻す */
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
-        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
-        if (!gen_expr(rhs))
-            return 0;
-        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
-        asm_push(OP_LD, REG_T1, REG_SP, 0, 0);
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
-    }
     /* ポインタ演算のスケール (v49): + / - の相手の
      * 片方がポインタなら、整数側を指す先の大きさ倍
      * してから合わせる。ポインタ同士の引き算は、
@@ -1854,6 +1889,32 @@ static int gen_expr(int node) {
         else
             asm_push(OP_SLTIU, REG_T1, REG_T1, 0, 1);
     }
+    return 1;
+}
+
+/* 二項演算の両辺を、左は t1、右は t2 に揃える。
+ * 右が葉ならそのまま t2 へ、式なら左をスタックへ
+ * 退避してから右を計算する。gen_expr の二項演算と、
+ * 条件分岐の融合 (gen_cond_branch、03-genstmt.c)
+ * で共用する (v53) */
+static int gen_binop_operands(int node) {
+    if (!gen_expr(node_lhs[node]))
+        return 0;
+    int rhs = node_rhs[node];
+    if (is_leaf(rhs)) {
+        /* 右が葉: そのまま t2 に入れる */
+        gen_load_leaf(REG_T2, rhs);
+        return 1;
+    }
+    /* 右も式: 左の結果 (t1) をスタックへ退避し、右を
+     * 計算して t2 へ写し、左を t1 へ戻す */
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+    asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+    if (!gen_expr(rhs))
+        return 0;
+    asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+    asm_push(OP_LD, REG_T1, REG_SP, 0, 0);
+    asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
     return 1;
 }
 
