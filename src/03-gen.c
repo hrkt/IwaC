@@ -273,12 +273,186 @@ static int relax_scan(void) {
  *   枠 k の住所は sp(引き後) + 8k = fp - フレーム長 + 8k。
  *   ローカル配列 (v26) は枠の並びの上 (fp-16 の下) に
  *   置く: 先頭は sp(引き後) + 枠数 x 8 + arr_foff。
- * フレーム長は「16 + 枠数 x 8 + ローカル配列の合計」を
- * 16バイト単位に切り上げたもの */
+ * フレーム長は「16 + 退避する s の本数 x 8 (v56) + 枠数 x 8
+ * + ローカル配列の合計」を16バイト単位に切り上げたもの。
+ * s の退避場所は fp-24 から下向きで、枠のずれは全部
+ * フレーム長から計算されるので自動で揃う */
 static unsigned int globals_base;  /* gen_program が確定させる */
 
+static int var_value_etype(int var);  /* 定義は下 (v56 の
+                                       * 計画が先に使う) */
+
+/* ================================================================
+ * レジスタ割り付け (v56、設計は doc/regalloc.md)
+ *
+ * 参照の多いスカラのローカル変数と引数を、callee-saved の
+ * s レジスタに割り付ける。割り付けた変数はフレームでなく
+ * レジスタが住み家になり、gen_load_var / gen_store_var が
+ * ld / sd の代わりに move を出す。フレームの枠は従来どおり
+ * 確保したままにする (住所を取る変数は割り付けないので、
+ * 枠が表に出ることはない)。
+ *
+ * 対象外 (安全側の割り切り):
+ *   住所を取られる変数 (&var が関数内にあれば丸ごと外す。
+ *   ポインタ越しの読み書きと競合させないため)
+ *   構造体の値そのものの変数、double の変数
+ *   参照が 4 回に満たない変数 (退避・復帰と相殺される)
+ * 選び方は参照回数の多い順、同数なら変数番号の小さい順で
+ * 最大11個。割り付けは AST の純粋関数なので、生成の
+ * 2パスと relax の再生成で結果がブレない。
+ * フレームは退避する s レジスタの分だけ広がり、退避場所は
+ * fp-24 から下向き (ra と fp の退避場所の下)。
+ * ================================================================ */
+static char var_reg[1280];       /* 変数 → レジスタ番号。
+                                  * 0 は割り付けなし。
+                                  * 番号は 27 までなので
+                                  * char に収まる (置き場の
+                                  * 節約。断片プロファイルの
+                                  * 1MB 枠が逼迫している) */
+static char func_saved_regs[256]; /* 関数 → 割り付けた数
+                                  * (= 退避する s の本数。
+                                  * 最大11なので char) */
+static char reg_plan_done[256];  /* 計画済みの印 */
+static char var_refcount[1280];  /* 計画専用の数え置き場。
+                                  * 127 で飽和させる (順位付け
+                                  * に要るのは大きな方の
+                                  * 桁だけなので、char で足りる) */
+static char var_addrtaken[1280]; /* 計画専用: & を取られた印 */
+
+/* 割り付け順 i (0〜10) に対応するレジスタ番号:
+ * s1 (x9)、s2〜s11 (x18〜x27) */
+static int saved_reg_no(int i) {
+    if (i == 0)
+        return REG_S1;
+    return 17 + i;
+}
+
+/* 参照回数を1つ増やす (127 で飽和。var_refcount が
+ * char のため) */
+static void reg_count_up(int v) {
+    if (var_refcount[v] < 127)
+        var_refcount[v] = var_refcount[v] + 1;
+}
+
+/* 本体の AST を歩き、変数の参照回数と「住所を取られた」
+ * 印を集める。辿る欄は種類ごとに決める (使わない欄には
+ * 0 が入っていて、辿ると実在の葉であるノード0 に
+ * 吸い寄せられ、数えすぎる)。文と引数の並びは
+ * node_next で繋がっているので、最後に必ず辿る */
+static void reg_walk(int node) {
+    if (node < 0)
+        return;
+    int k = node_kind[node];
+    if (k == NODE_VAR || k == NODE_PINDEX)
+        /* PINDEX はポインタ変数が val に入る形で、
+         * その読みも参照として数える */
+        reg_count_up(node_val[node]);
+    if (k == NODE_ASSIGN || k == NODE_PREINC ||
+        k == NODE_POSTINC || k == NODE_PREDEC ||
+        k == NODE_POSTDEC)
+        /* 代入先と ++ / -- の相手はノードの val に
+         * 変数が入る形で、NODE_VAR の子にはならない。
+         * 書き込みも参照として数える */
+        reg_count_up(node_val[node]);
+    if (k == NODE_ADDR) {
+        int operand = node_lhs[node];
+        if (operand >= 0 && node_kind[operand] == NODE_VAR)
+            var_addrtaken[node_val[operand]] = 1;
+    }
+    if (k == NODE_NUM || k == NODE_VAR || k == NODE_STR ||
+        k == NODE_ARRAY || k == NODE_FADDR ||
+        k == NODE_NUMFP || k == NODE_BREAK ||
+        k == NODE_CONTINUE || k == NODE_DECL ||
+        k == NODE_VDECL || k == NODE_PREINC ||
+        k == NODE_POSTINC || k == NODE_PREDEC ||
+        k == NODE_POSTDEC) {
+        /* 葉と宣言: 子の欄は使われていない */
+    } else if (k == NODE_DEREF || k == NODE_ASSIGN ||
+               k == NODE_PUTC || k == NODE_CALL ||
+               k == NODE_NOT || k == NODE_NEG ||
+               k == NODE_RETURN || k == NODE_ADDR ||
+               k == NODE_EPRE || k == NODE_EPOST ||
+               k == NODE_BITNOT || k == NODE_SYSCALL3 ||
+               k == NODE_CAST || k == NODE_MEMBER ||
+               k == NODE_CASE) {
+        reg_walk(node_lhs[node]);
+    } else if (k == NODE_INDEX || k == NODE_ROWADDR ||
+               k == NODE_PINDEX) {
+        reg_walk(node_rhs[node]);
+    } else if (k == NODE_FORSTEP) {
+        reg_walk(node_val[node]);
+    } else if (k == NODE_IF || k == NODE_FOR ||
+               k == NODE_COND) {
+        /* val も子のリンク (else / 初期化 / 三項の枝) */
+        reg_walk(node_lhs[node]);
+        reg_walk(node_rhs[node]);
+        reg_walk(node_val[node]);
+    } else {
+        /* 二項演算・while / do-while・メモリ書き込み・
+         * 要素の読み書き・switch・間接呼び出し:
+         * lhs と rhs が子 */
+        reg_walk(node_lhs[node]);
+        reg_walk(node_rhs[node]);
+    }
+    reg_walk(node_next[node]);
+}
+
+/* 変数 v が関数 f の割り付け候補かどうか */
+static int reg_eligible(int v, int f) {
+    if (var_owner[v] != f)
+        return 0;
+    if (var_refcount[v] < 4)
+        return 0;
+    if (var_addrtaken[v])
+        return 0;
+    if (var_struct[v] > 0 && var_plevel[v] == 0)
+        return 0;  /* 構造体の値そのもの */
+    if (var_value_etype(v) & 64)
+        return 0;  /* double */
+    return 1;
+}
+
+/* 関数 f の割り付け計画 (一度だけ作り、使い回す) */
+static void func_reg_plan(int f) {
+    if (f < 0 || reg_plan_done[f])
+        return;
+    reg_plan_done[f] = 1;
+    func_saved_regs[f] = 0;
+    if (func_body[f] < 0)
+        return;  /* 宣言だけの関数 */
+    int v;
+    for (v = 0; v < nvar; v++) {
+        if (var_owner[v] == f) {
+            var_refcount[v] = 0;
+            var_addrtaken[v] = 0;
+            var_reg[v] = 0;
+        }
+    }
+    reg_walk(func_body[f]);
+    /* 参照の多い順に最大11個。同数なら変数番号の
+     * 小さい方を先に (決定的にするため) */
+    int assigned = 0;
+    while (assigned < 11) {
+        int best = -1;
+        for (v = 0; v < nvar; v++) {
+            if (!reg_eligible(v, f) || var_reg[v] != 0)
+                continue;
+            if (best < 0 ||
+                var_refcount[v] > var_refcount[best])
+                best = v;
+        }
+        if (best < 0)
+            break;
+        var_reg[best] = saved_reg_no(assigned);
+        assigned = assigned + 1;
+    }
+    func_saved_regs[f] = assigned;
+}
+
 static int func_frame_size(int f) {
-    int size = 16 + func_nlocals[f] * 8 + func_arr_bytes[f];
+    func_reg_plan(f);
+    int size = 16 + func_saved_regs[f] * 8 +
+               func_nlocals[f] * 8 + func_arr_bytes[f];
     return (size + 15) & ~15;
 }
 
@@ -790,6 +964,12 @@ static void gen_var_addr(int reg, int var) {
 /* 変数の値をレジスタに読む (v21)。読み先のレジスタだけを
  * 使うので、葉の読み出しから呼べる */
 static void gen_load_var(int reg, int var) {
+    /* レジスタ割り付け (v56): 値はいつも正規形で
+     * レジスタに保たれるので、そのまま移すだけ */
+    if (var_owner[var] >= 0 && var_reg[var] != 0) {
+        asm_push(OP_ADDI, reg, var_reg[var], 0, 0);
+        return;
+    }
     /* 読む幅は変数の型で決める (v35: 幅つきの型は
      * 幅の命令で読み、正規形でレジスタに入る。
      * それ以外は従来どおり 8バイト読み) */
@@ -805,7 +985,27 @@ static void gen_load_var(int reg, int var) {
 
 /* レジスタの値を変数に書く (v21)。グローバルの場合は
  * 住所作りに t2 を使う */
-static void gen_store_var(int var, int reg) {
+static void gen_store_var(int var, int reg, int value_et) {
+    /* レジスタ割り付け (v56): メモリ版の切り捨て
+     * (sb / sw 等) が無くなるので、幅つき型は移す前に
+     * 正規形へ直す。ただし値が既に変数と同じ型の
+     * 正規形で届いているとき (式の型付けがそう
+     * 保証する) は直す必要がない。value_et は値が
+     * どの型の正規形になっているかで、呼び側が
+     * 知っている。正規化は t1 に対する道具なので、
+     * 値が t1 でなければ寄せてから直す */
+    if (var_owner[var] >= 0 && var_reg[var] != 0) {
+        int et = var_value_etype(var);
+        if ((et & 32) && (et & 15) < 8 && value_et != et) {
+            if (reg != REG_T1)
+                asm_push(OP_ADDI, REG_T1, reg, 0, 0);
+            emit_canon(et);
+            asm_push(OP_ADDI, var_reg[var], REG_T1, 0, 0);
+        } else {
+            asm_push(OP_ADDI, var_reg[var], reg, 0, 0);
+        }
+        return;
+    }
     /* 書く幅は変数の型で決める (v35、gen_load_var
      * と対。幅つきの型は幅の命令で書き、上の桁は
      * 切り捨てられる) */
@@ -1684,8 +1884,34 @@ static int gen_expr(int node) {
                      node_kind[node] == NODE_POSTINC) ? 1 : -1;
         int pre = (node_kind[node] == NODE_PREINC ||
                    node_kind[node] == NODE_PREDEC);
-        gen_var_addr(REG_T2, node_val[node]);
         int vet = var_value_etype(node_val[node]);
+        /* 歩幅 (v49): ポインタ変数は指す先の大きさだけ
+         * 進める。それ以外は従来どおり 1 */
+        int vstep = delta;
+        int vpes = ptr_elem_size(node);
+        if (vpes > 1)
+            vstep = delta * vpes;
+        if (!(vet & 64) && var_reg[node_val[node]] != 0) {
+            /* レジスタ割り付け (v56): 住所を作らず、
+             * レジスタの中で増減する。前置は新しい値、
+             * 後置は古い値が結果 (t1) になる。後置の
+             * 入れ替えの置き場は t2 (住所作りに使って
+             * いた置き場で、この経路では空いている)。
+             * 大きな歩幅のとき emit_add_step が a0 を
+             * 使うが、この経路では a0 は使わない */
+            int sreg = var_reg[node_val[node]];
+            emit_add_step(REG_T1, sreg, vstep);
+            emit_canon(vet);
+            if (pre) {
+                asm_push(OP_ADDI, sreg, REG_T1, 0, 0);
+            } else {
+                asm_push(OP_ADDI, REG_T2, sreg, 0, 0);
+                asm_push(OP_ADDI, sreg, REG_T1, 0, 0);
+                asm_push(OP_ADDI, REG_T1, REG_T2, 0, 0);
+            }
+            return 1;
+        }
+        gen_var_addr(REG_T2, node_val[node]);
         if (vet & 64) {
             /* double の変数の増減 (v46): 1.0 を ft1 に
              * 作り、fadd.d / fsub.d で増減する。結果の
@@ -1707,12 +1933,6 @@ static int gen_expr(int node) {
         }
         asm_push((vet & 32) ? mem_load_op(vet) : OP_LD,
                  REG_T1, REG_T2, 0, 0);
-        /* 歩幅 (v49): ポインタ変数は指す先の大きさだけ
-         * 進める。それ以外は従来どおり 1 */
-        int vstep = delta;
-        int vpes = ptr_elem_size(node);
-        if (vpes > 1)
-            vstep = delta * vpes;
         if (pre) {
             emit_add_step(REG_T1, REG_T1, vstep);
             emit_canon(vet);

@@ -291,8 +291,11 @@ static int gen_stmt(int node) {
             asm_push(OP_FSD, 0, REG_T2, REG_FT0, 0);
             return 1;
         }
-        /* 結果 (t1) を変数の置き場所へ書く (代入、v21) */
-        gen_store_var(node_val[node], REG_T1);
+        /* 結果 (t1) を変数の置き場所へ書く (代入、v21)。
+         * 値がどの型の正規形かも渡す (v56: レジスタ
+         * 割り付けの書き込みで正規化を省く判断に使う) */
+        gen_store_var(node_val[node], REG_T1,
+                      node_etype[node_lhs[node]]);
         return 1;
     }
     if (kind == NODE_PUTC) {
@@ -779,6 +782,17 @@ static void emit_copy_fp(int dst_off, int src_off) {
     asm_push(OP_SD, 0, REG_FP, REG_T1, dst_off);
 }
 
+/* 引数領域 (fp 相対) からレジスタへ1スロット写す (v56)。
+ * レジスタ割り付けされた B方式の引数の受け取り用 */
+static void emit_copy_fp_reg(int reg, int src_off) {
+    if (src_off >= -2048 && src_off < 2048) {
+        asm_push(OP_LD, reg, REG_FP, 0, src_off);
+    } else {
+        emit_fp_addr(REG_T2, src_off);
+        asm_push(OP_LD, reg, REG_T2, 0, 0);
+    }
+}
+
 static int gen_func(int f) {
     /* オブジェクト出力 (v31) では、宣言だけの関数に
      * 中身を作らない (一括では空の体ができるが、
@@ -800,6 +814,12 @@ static int gen_func(int f) {
     asm_push(OP_SD, 0, REG_SP, REG_RA, frame - 8);
     asm_push(OP_SD, 0, REG_SP, REG_FP, frame - 16);
     asm_push(OP_ADDI, REG_FP, REG_SP, 0, frame);
+    /* レジスタ割り付け (v56): 使う s レジスタを
+     * fp-24 から下向きに退避する (呼び出し側の
+     * 値を守る callee-saved の約束) */
+    for (int i = 0; i < func_saved_regs[f]; i++)
+        asm_push(OP_SD, 0, REG_FP, saved_reg_no(i),
+                 -(24 + i * 8));
     if (call_b_mode(func_sig[f])) {
         /* B 方式の引数の受け取り (v45): 引数は呼び側が
          * スタックに積んであり、fp の真上 (引数領域) に
@@ -819,16 +839,28 @@ static int gen_func(int f) {
                 for (int j = 0; j < ns; j++)
                     emit_copy_fp(var_frame_off(var) + j * 8,
                                  (slot + j) * 16);
+            } else if (var_reg[var] != 0) {
+                /* レジスタ割り付け (v56): 枠でなく
+                 * レジスタへ写す */
+                emit_copy_fp_reg(var_reg[var], slot * 16);
             } else {
                 emit_copy_fp(var_frame_off(var), slot * 16);
             }
             slot += arg_slots(sig, k);
         }
     } else {
-        /* 引数を受け取る: a0〜a3 を引数の枠へ順に書く (v22) */
-        for (int k = 0; k < func_nparams[f]; k++)
-            asm_push(OP_SD, 0, REG_FP, REG_A0 + k,
-                     var_frame_off(func_param_var[f][k]));
+        /* 引数を受け取る: a0〜a3 を引数の枠へ順に書く (v22)。
+         * レジスタ割り付けの引数 (v56) は枠でなく
+         * レジスタへ移す */
+        for (int k = 0; k < func_nparams[f]; k++) {
+            int var = func_param_var[f][k];
+            if (var_reg[var] != 0)
+                asm_push(OP_ADDI, var_reg[var],
+                         REG_A0 + k, 0, 0);
+            else
+                asm_push(OP_SD, 0, REG_FP, REG_A0 + k,
+                         var_frame_off(var));
+        }
     }
     return_patch_head = -1;
     gen_in_func = 1;
@@ -842,6 +874,11 @@ static int gen_func(int f) {
     gen_cur_func = -1;
     /* 早期 return の飛び先はここ (後始末の頭) */
     apply_patches(return_patch_head, nasm);
+    /* レジスタ割り付け (v56): 退避した s レジスタを
+     * 戻す。fp がまだ自分のうちに読む */
+    for (int i = 0; i < func_saved_regs[f]; i++)
+        asm_push(OP_LD, saved_reg_no(i), REG_FP, 0,
+                 -(24 + i * 8));
     /* 後始末: ra と fp を戻し (fp の読みは古い fp で
      * 行う)、フレームを返して、呼び出し側へ戻る
      *   ld ra, -8(fp) / ld fp, -16(fp) / addi sp, sp, frame

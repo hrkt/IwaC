@@ -2723,6 +2723,125 @@ EOF
 "$IWAC" "$TMP/v55b.c" > "$TMP/v55b.bin"
 check_run "$TMP/v55b.bin" 6 "v55: 式評価の混ぜ合わせ (末尾の桁、答えは 436)"
 
+# --- v56: レジスタ割り付け (設計は doc/regalloc.md) ---
+# 参照の多いローカル変数が s レジスタに割り付き、
+# 序文で退避されること、住所を取る変数だけの関数
+# では割り付かないことを命令列で確かめる
+cat > "$TMP/v56a.c" <<'EOF'
+int accumulate(int n) {
+    int sum = 0;
+    int i = 0;
+    while (i < n) {
+        sum = sum + i;
+        i++;
+    }
+    return sum;
+}
+int withptr(void) {
+    int x = 5;
+    int *p = &x;
+    *p = 9;
+    return x;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v56a.c" > "$TMP/v56a.txt"
+save56=$(grep -c '^i sd 0 8 \(9\|1[89]\|2[0-7]\) -' "$TMP/v56a.txt" || true)
+cat > "$TMP/v56b.c" <<'EOF'
+int withptr(void) {
+    int x = 5;
+    int *p = &x;
+    *p = 9;
+    return x;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v56b.c" > "$TMP/v56b.txt"
+save56b=$(grep -c '^i sd 0 8 \(9\|1[89]\|2[0-7]\) -' "$TMP/v56b.txt" || true)
+if [ "$save56" -ge 1 ] && [ "$save56b" -eq 0 ]; then
+    echo "ok: v56: s レジスタの退避 $save56 か所 (住所を取る変数だけの関数では 0)"
+else
+    echo "FAIL: v56: 退避 $save56 か所 / 住所のみ $save56b か所"
+    NG=1
+fi
+# 機能面: 再帰・呼び出し跨ぎ・住所を取る変数・
+# 幅つき型の ++ (桁あふれ)・後置 -- を混ぜる
+cat > "$TMP/v56c.c" <<'EOF'
+typedef unsigned char u8;
+typedef unsigned int u32;
+int fib(int n) {
+    if (n < 2)
+        return n;
+    return fib(n - 1) + fib(n - 2);
+}
+int accumulate(int n) {
+    int sum = 0;
+    int i = 0;
+    while (i < n) {
+        sum = sum + i;
+        i++;
+    }
+    return sum;
+}
+int withptr(void) {
+    int x = 5;
+    int *p = &x;
+    *p = 9;
+    int y = 0;
+    int i = 0;
+    while (i < 10) {
+        y = y + x;
+        i++;
+    }
+    return y;
+}
+int u8wrap(void) {
+    u8 c = 0;
+    int i = 0;
+    while (i < 300) {
+        c++;
+        i++;
+    }
+    return c;
+}
+int postdec(void) {
+    u32 v = 100;
+    int total = 0;
+    int i = 0;
+    while (i < 4) {
+        total = total + (int)(v--);
+        i++;
+    }
+    return total;
+}
+int main(void) {
+    int r = fib(15);
+    putc('0' + r / 100 % 10);
+    putc('0' + r / 10 % 10);
+    putc('0' + r % 10);
+    putc(' ');
+    r = accumulate(100);
+    putc('0' + r / 1000 % 10);
+    putc('0' + r / 100 % 10);
+    putc('0' + r / 10 % 10);
+    putc('0' + r % 10);
+    putc(' ');
+    r = withptr();
+    putc('0' + r / 10 % 10);
+    putc('0' + r % 10);
+    putc(' ');
+    r = u8wrap();
+    putc('0' + r / 10 % 10);
+    putc('0' + r % 10);
+    putc(' ');
+    r = postdec();
+    putc('0' + r / 100 % 10);
+    putc('0' + r / 10 % 10);
+    putc('0' + r % 10);
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v56c.c" > "$TMP/v56c.bin"
+check_tail "$TMP/v56c.bin" "610 4950 90 44 394" "v56: レジスタ割り付けの機能一式"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに
