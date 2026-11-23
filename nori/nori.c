@@ -32,23 +32,19 @@ int ds_hexval(int c);
 /* ================= 大きさの約束 ================= */
 static int MAX_OBJ = 32;       /* オブジェクトの数 */
 static int MAX_SYM = 4096;     /* 名前表 */
-static int MAX_REL = 16384;    /* 穴の数 */
 static int MAX_AINIT = 262144; /* 配列の初期値の置き場 (v40) */
 static int MAX_SEQ = 4096;     /* 登録順の控え */
 /* バイト列の置き場 (静的データとして持つ) */
-/* in_buf と out_code は相乗り (v44): in_buf はオブジェクトを
-   読む間だけ、out_code は全部読み終わってから最終 ELF を
-   組む間だけ使うので、置き場所を共有できる。断片プロファイル
-   の 1MB 枠に収めるための手 (doc/notes.md の手札を実行) */
-static char share_buf[393216]; /* in_buf と out_code の共有置き場 */
-static char *in_buf;           /* オブジェクト1つの全文 (share_buf) */
-static char code_pool[294912]; /* 全オブジェクトのコード
-                                * (v46 で 262144 → 294912:
-                                * iwac のコード合計が
-                                * 262,660 になり溢れた) */
-static char str_pool[131072];  /* 全オブジェクトの文字列 */
+/* ストリーミング化 (doc/nori-streaming.md):
+ * オブジェクトは2回読む。パスA はシンボルと
+ * 大きさだけを集め、コードと文字列は溜めない。
+ * パスB は配置順に読み直して、穴を埋めて、
+ * そのまま書く。溜まるのは名前表と配列の
+ * 初期値だけで、share_buf は最大の
+ * オブジェクト1つの全文が入れば足りる */
+static char share_buf[393216]; /* オブジェクト1つの全文 */
+static char *in_buf;           /* = share_buf */
 static char ainit_buf[262144]; /* 配列の初期値のバイト列 (v40) */
-static char *out_code;         /* 並べた後のコード (share_buf) */
 static char name_pool[65536];  /* 名前の文字列 */
 
 /* 配置の約束 (KosabaOS のユーザープログラム) */
@@ -66,14 +62,14 @@ static int fail(char *msg) {
 
 /* ================= オブジェクトの控え ================= */
 static int nobj;
-static int obj_code_off[32];   /* code_pool の中での位置 */
+static char *obj_path[32];     /* パスB で読み直すための名前 */
+static long obj_file_len[32];  /* パスA で読んだ長さ (照合用) */
+static long obj_text_off[32];  /* ファイルの中の .text の位置 */
 static int obj_code_len[32];
 static int obj_entry[32];      /* 入口の長さ。無ければ -1 */
-static int obj_str_off[32];    /* str_pool の中での位置 */
+static long obj_str_foff[32];  /* ファイルの中の文字列節の位置 */
 static int obj_str_len[32];
 static int obj_str_final[32];  /* 配置後の文字列のずれ */
-static int code_used;          /* code_pool の使用量 */
-static int str_used;           /* str_pool の使用量 */
 
 /* ================= 名前表 =================
  * 種類: 0 = 未定 (参照だけ)、1 = 関数、2 = 変数、3 = 配列 */
@@ -95,6 +91,10 @@ static long sym_addr[4096];    /* 最終的な住所 */
 static int sym_ainit_off[4096];/* 配列: 初期値の置き場 (v40) */
 static int sym_ainit_len[4096];/* 配列: 初期値のバイト数。
                                 * -1 = 初期値なし */
+static int sym_called[4096];   /* 強い呼び出し (call) の相手に
+                                * なったか。未定義の点検用 */
+static int sym_addref[4096];   /* 住所作り (addr) の相手に
+                                * なったか。未定義の点検用 */
 static int ainit_used;         /* ainit_buf の使用量 */
 /* 関数ポインタ配列の初期値の穴埋め (v44):
  * .rela.iwac.arrays の記録。配置が決まってから
@@ -158,6 +158,8 @@ static int new_sym(char *name) {
     sym_addr[s] = 0;
     sym_ainit_off[s] = 0;
     sym_ainit_len[s] = -1;
+    sym_called[s] = 0;
+    sym_addref[s] = 0;
     return s;
 }
 
@@ -180,29 +182,9 @@ static int var_slots;
 static long arr_area;
 static int err_sym;            /* エラーが指す名前 (-1 = 無し) */
 
-/* ================= 登録順と穴の控え ================= */
+/* ================= 登録順の控え ================= */
 static int nseq;
 static int seq_sym[4096];
-
-static int nrel;
-static int rel_obj[16384];
-static int rel_off[16384];
-static int rel_kind[16384];    /* 1 call、2 callopt、3 addr、
-                                * 4 addrstr、5 addabs */
-static int rel_sym[16384];
-static long rel_val[16384];
-
-static int add_rel(int obj, int off, int kind, int sym, long val) {
-    if (nrel >= MAX_REL)
-        return fail("穴が多すぎます");
-    rel_obj[nrel] = obj;
-    rel_off[nrel] = off;
-    rel_kind[nrel] = kind;
-    rel_sym[nrel] = sym;
-    rel_val[nrel] = val;
-    nrel++;
-    return 1;
-}
 
 /* ================= オブジェクトを読む ================= */
 static long in_len;
@@ -327,6 +309,22 @@ static int ainit_reserve(int s, long need) {
     return 1;
 }
 
+/* .text のオフセットが入口か関数の中に収まるか
+ * (パスA の検証。穴の最終位置そのものは
+ * 配置が決まるまで分からないが、収まるか
+ * どうかは sym_off と sym_size で判定できる) */
+static int off_covered(int obj, long off) {
+    if (obj_entry[obj] >= 0 && off < obj_entry[obj])
+        return 1;
+    for (int s = 0; s < nsym; s++) {
+        if (sym_kind[s] == 1 && sym_obj[s] == obj &&
+            sym_off[s] <= off &&
+            off < (long)sym_off[s] + sym_size[s])
+            return 1;
+    }
+    return 0;
+}
+
 static int read_object_elf(int obj) {
     obj_arr_n = 0;
     if (eget8(4) != 2 || eget8(5) != 1)
@@ -365,24 +363,16 @@ static int read_object_elf(int obj) {
     if (text_i < 0 || symtab_i < 0)
         return fail("ELF に .text / .symtab がありません");
 
-    /* コードと文字列を写す */
+    /* コードと文字列は溜めない (ストリーミング化)。
+     * 大きさと、ファイルの中の位置だけ記録する。
+     * 実体はパスB で読み直す */
     eget_shdr(shoff, text_i);
+    obj_text_off[obj] = esec_off;
     obj_code_len[obj] = (int)esec_size;
-    for (long k = 0; k < esec_size; k++) {
-        if (code_used >= 294912)
-            return fail("コードが入りません");
-        code_pool[code_used] = in_buf[esec_off + k];
-        code_used++;
-    }
     if (strings_i >= 0) {
         eget_shdr(shoff, strings_i);
+        obj_str_foff[obj] = esec_off;
         obj_str_len[obj] = (int)esec_size;
-        for (long k = 0; k < esec_size; k++) {
-            if (str_used >= 131072)
-                return fail("文字列が入りません");
-            str_pool[str_used] = in_buf[esec_off + k];
-            str_used++;
-        }
     }
 
     /* シンボル表 */
@@ -617,39 +607,38 @@ static int read_object_elf(int obj) {
                 continue;
             }
             if (rtype == 17) {
-                /* R_RISCV_JAL: 関数呼び出し */
+                /* R_RISCV_JAL: 関数呼び出し。パスA では
+                 * 検証と印だけ (穴埋めはパスB) */
                 if (esym_tag[rsym] != 0 && esym_tag[rsym] != 4)
                     return fail("呼び出しの相手が違います");
-                int kind = esym_tag[rsym] == 4 ? 2 : 1;
-                if (!add_rel(obj, (int)roff, kind,
-                             esym_sym[rsym], 0))
-                    return 0;
+                if (!off_covered(obj, roff))
+                    return fail("穴の場所が決まりません");
+                if (esym_tag[rsym] == 0)
+                    sym_called[esym_sym[rsym]] = 1;
             } else if (rtype == 23) {
-                /* R_RISCV_PCREL_HI20: 住所作りの組の頭 */
-                if (esym_tag[rsym] == 1) {
-                    if (!add_rel(obj, (int)roff, 4, -1, radd))
-                        return 0;
-                } else if (esym_tag[rsym] == 0 ||
-                           esym_tag[rsym] == 4) {
-                    if (!add_rel(obj, (int)roff, 3,
-                                 esym_sym[rsym], radd))
-                        return 0;
-                } else
+                /* R_RISCV_PCREL_HI20: 住所作りの組の頭。
+                 * 組は2語なので、後半の収まりも見る */
+                if (esym_tag[rsym] != 1 &&
+                    esym_tag[rsym] != 0 && esym_tag[rsym] != 4)
                     return fail("住所作りの相手が違います");
+                if (!off_covered(obj, roff) ||
+                    !off_covered(obj, roff + 4))
+                    return fail("穴の場所が決まりません");
+                if (esym_tag[rsym] == 0 ||
+                    esym_tag[rsym] == 4)
+                    sym_addref[esym_sym[rsym]] = 1;
             } else if (rtype == 26) {
                 /* R_RISCV_HI20: 絶対アドレスの組の頭 */
-                long val = 0;
                 int found = 0;
                 for (int e = 0; e < neabs; e++) {
-                    if (eabs_idx[e] == (int)rsym) {
-                        val = eabs_val[e];
+                    if (eabs_idx[e] == (int)rsym)
                         found = 1;
-                    }
                 }
                 if (!found)
                     return fail("絶対アドレスが見つかりません");
-                if (!add_rel(obj, (int)roff, 5, -1, val))
-                    return 0;
+                if (!off_covered(obj, roff) ||
+                    !off_covered(obj, roff + 4))
+                    return fail("穴の場所が決まりません");
             }
             /* 24 / 27 (LO12) と 51 (RELAX) は組の後半
              * または印なので読み飛ばす */
@@ -669,8 +658,8 @@ static int read_object_elf(int obj) {
     return 1;
 }
 
-/* オブジェクト1つを読む (番号 obj) */
-static int read_object(int obj, char *path) {
+/* ファイルを share_buf に読み込む (in_len に長さ) */
+static int slurp(char *path) {
     int fd = open(path, 0);
     if (fd < 0)
         return fail("ファイルが開けません");
@@ -690,10 +679,16 @@ static int read_object(int obj, char *path) {
         }
     }
     close(fd);
+    return 1;
+}
 
+/* オブジェクト1つを読む (番号 obj、パスA) */
+static int read_object(int obj, char *path) {
+    if (!slurp(path))
+        return 0;
+    obj_file_len[obj] = in_len;
     obj_entry[obj] = -1;
-    obj_code_off[obj] = code_used;
-    obj_str_off[obj] = str_used;
+    obj_str_len[obj] = 0;
     /* 読めるのは ELF オブジェクトだけ (v42 で .iwo の
      * 読み口は引退。決定の記録は doc/iwo-retirement.md) */
     if (in_len >= 4 && eget8(0) == 0x7f && in_buf[1] == 'E' &&
@@ -702,15 +697,24 @@ static int read_object(int obj, char *path) {
     return fail("ELF オブジェクトではありません");
 }
 
+/* パスB 用に読み直す。パスA のときと長さが
+ * 同じか照合する (途中で変わっていたら止める) */
+static int load_file(int obj) {
+    if (!slurp(obj_path[obj]))
+        return 0;
+    if (in_len != obj_file_len[obj])
+        return fail("オブジェクトが変わっています");
+    return 1;
+}
+
 /* ================= 配置 ================= */
 static int entry_obj;
-static int out_len;            /* out_code の長さ */
+static int out_len;            /* 最終コードの長さ */
 static long str_total;
-
-static void copy_bytes(char *dst, int doff, char *src, int soff, int n) {
-    for (int i = 0; i < n; i++)
-        dst[doff + i] = src[soff + i];
-}
+static int big_link;           /* コードが JAL の届く
+                                * 範囲 (約1MB) を超えたか。
+                                * 超えたリンクだけ、呼び出しの
+                                * 届きをパスA2 で点検する */
 
 static int layout(void) {
     entry_obj = -1;
@@ -723,23 +727,18 @@ static int layout(void) {
     }
     if (entry_obj < 0)
         return fail("入口 (main など) のあるオブジェクトがありません");
-    /* コード: 入口の断片を先頭に、本体は登録順に */
-    out_len = 0;
-    copy_bytes(out_code, 0, code_pool, obj_code_off[entry_obj],
-               obj_entry[entry_obj]);
+    /* コード: 入口の断片を先頭に、本体は登録順に。
+     * ここでは位置決めだけ (実体はパスB が流す) */
     out_len = obj_entry[entry_obj];
     for (int i = 0; i < nseq; i++) {
         int s = seq_sym[i];
         if (sym_kind[s] != 1 || sym_obj[s] < 0 || sym_place[s] >= 0)
             continue;
-        if (out_len + sym_size[s] > 294912)
-            return fail("コードが大きすぎます");
         sym_place[s] = out_len;
         sym_addr[s] = CODE_BASE + out_len;  /* 0x40000000 */
-        copy_bytes(out_code, out_len, code_pool,
-                   obj_code_off[sym_obj[s]] + sym_off[s], sym_size[s]);
         out_len += sym_size[s];
     }
+    big_link = out_len > 1048572;
     /* 文字列: オブジェクトの並び順に */
     long spos = 0;
     for (int o = 0; o < nobj; o++) {
@@ -788,71 +787,19 @@ static int site_final(int obj, int off) {
     return -1;
 }
 
-/* ================= 穴埋め ================= */
-static long get32(int off) {
-    long b0 = out_code[off] & 0xff;
-    long b1 = out_code[off + 1] & 0xff;
-    long b2 = out_code[off + 2] & 0xff;
-    long b3 = out_code[off + 3] & 0xff;
-    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
-}
-
-static void put32(int off, long v) {
-    out_code[off] = (char)(v & 0xff);
-    out_code[off + 1] = (char)((v >> 8) & 0xff);
-    out_code[off + 2] = (char)((v >> 16) & 0xff);
-    out_code[off + 3] = (char)((v >> 24) & 0xff);
-}
-
-static int fill_all(void) {
-    for (int r = 0; r < nrel; r++) {
-        int place = site_final(rel_obj[r], rel_off[r]);
-        if (place < 0)
-            return fail("穴の場所が決まりません");
-        long pc = CODE_BASE + place;
-        int kind = rel_kind[r];
-        if (kind == 1 || kind == 2) {
-            int s = rel_sym[r];
-            if (sym_obj[s] < 0) {
-                if (kind == 1) {
-                    err_sym = s;
-                    return fail("未定義の関数が呼ばれています");
-                }
-                put32(place, 0x13);  /* nop (addi x0, x0, 0) */
-                continue;
-            }
-            long diff = sym_addr[s] - pc;
-            if (diff < -1048576L || diff > 1048572L)
-                return fail("呼び出しが届きません (約1MBまで)");
-            long w = get32(place) & 0xFFF;
-            w |= ((diff >> 20) & 1) << 31;
-            w |= ((diff >> 1) & 0x3FF) << 21;
-            w |= ((diff >> 11) & 1) << 20;
-            w |= ((diff >> 12) & 0xFF) << 12;
-            put32(place, w);
-        } else {
-            long target;
-            if (kind == 3) {
-                int s = rel_sym[r];
-                if (sym_kind[s] == 0) {
-                    err_sym = s;
-                    return fail("定義のない名前が使われています");
-                }
-                target = sym_addr[s] + rel_val[r];
-            } else if (kind == 4)
-                target = DATA_BASE + obj_str_final[rel_obj[r]] +
-                         rel_val[r];
-            else
-                target = rel_val[r];
-            long diff = target - pc;
-            long hi = (diff + 0x800) >> 12;
-            long lo = diff - (hi << 12);
-            long w0 = get32(place);
-            w0 = (w0 & 0xFFFFF) | ((hi & 0xFFFFF) << 12);
-            put32(place, w0);
-            long w1 = get32(place + 4);
-            w1 = (w1 & 0xFFFFF) | ((lo & 0xFFF) << 20);
-            put32(place + 4, w1);
+/* ================= 参照の点検 (配置の後) =================
+ * パスA で集めた印 (sym_called / sym_addref) を
+ * 最終的な名前表で点検する。穴埋め (パスB) が
+ * 失敗しないための門番 */
+static int check_refs(void) {
+    for (int s = 0; s < nsym; s++) {
+        if (sym_called[s] && sym_obj[s] < 0) {
+            err_sym = s;
+            return fail("未定義の関数が呼ばれています");
+        }
+        if (sym_addref[s] && sym_kind[s] == 0) {
+            err_sym = s;
+            return fail("定義のない名前が使われています");
         }
     }
     /* iptr の相手の点検 */
@@ -863,6 +810,271 @@ static int fill_all(void) {
             return fail("初期値の指す名前が定義されていません");
         }
     }
+    return 1;
+}
+
+/* ================= パスB の準備 =================
+ * 読み直したオブジェクトについて、穴埋めに要る
+ * 控え (esym の鏡と絶対アドレスの控え) を
+ * 作り直す。パスA のシンボル表の走査のうち、
+ * 再配置の解釈に要る部分だけの再現 */
+static long pb_text_off;       /* .text のファイル内位置 */
+
+static int passb_prepare(int obj) {
+    if (eget8(4) != 2 || eget8(5) != 1)
+        return fail("ELF の形が違います (64ビット LE のみ)");
+    long shoff = eget64(40);
+    int shnum = eget16(60);
+    int shstrndx = eget16(62);
+    eget_shdr(shoff, shstrndx);
+    long shstr_off = esec_off;
+    int text_i = -1;
+    int symtab_i = -1;
+    for (int i = 0; i < shnum; i++) {
+        char nm[32];
+        esec_name(shoff, shstr_off, i, nm);
+        if (ds_streq(nm, ".text"))
+            text_i = i;
+        eget_shdr(shoff, i);
+        if (esec_type == 2)
+            symtab_i = i;
+    }
+    if (text_i < 0 || symtab_i < 0)
+        return fail("ELF に .text / .symtab がありません");
+    eget_shdr(shoff, text_i);
+    pb_text_off = esec_off;
+    if (pb_text_off != obj_text_off[obj])
+        return fail("オブジェクトが変わっています");
+    eget_shdr(shoff, symtab_i);
+    long symtab_off = esec_off;
+    long nsym_e = esec_size / 24;
+    int strtab_i = (int)esec_link;
+    eget_shdr(shoff, strtab_i);
+    long strtab_off = esec_off;
+    if (nsym_e > 8192)
+        return fail("シンボルが多すぎます");
+    neabs = 0;
+    for (long si = 0; si < nsym_e; si++) {
+        long b = symtab_off + si * 24;
+        long name_off = eget32(b);
+        int info = eget8(b + 4);
+        int bind = info >> 4;
+        int type = info & 15;
+        int shndx = eget16(b + 6);
+        long value = eget64(b + 8);
+        esym_tag[si] = 3;
+        esym_sym[si] = -1;
+        if (type == 3) {
+            if (shndx >= 0 && shndx < shnum) {
+                char snm[32];
+                esec_name(shoff, shstr_off, shndx, snm);
+                if (ds_streq(snm, ".iwac.strings"))
+                    esym_tag[si] = 1;
+            }
+            continue;
+        }
+        if (shndx == 0xfff1) {
+            esym_tag[si] = 2;
+            if (neabs < 256) {
+                eabs_idx[neabs] = (int)si;
+                eabs_val[neabs] = value;
+                neabs++;
+            }
+            continue;
+        }
+        if (name_off == 0)
+            continue;
+        char *gnm = in_buf + strtab_off + name_off;
+        int s = find_sym(gnm);
+        if (s < 0)
+            continue;   /* iwac_entry など名前表に無いもの */
+        esym_sym[si] = s;
+        esym_tag[si] = bind == 2 ? 4 : 0;
+    }
+    return 1;
+}
+
+/* ================= 穴埋め (パスB) =================
+ * get32 / put32 は in_buf のファイル内位置で触る
+ * (読み直したオブジェクトの .text の中) */
+static long get32(long foff) {
+    long b0 = in_buf[foff] & 0xff;
+    long b1 = in_buf[foff + 1] & 0xff;
+    long b2 = in_buf[foff + 2] & 0xff;
+    long b3 = in_buf[foff + 3] & 0xff;
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+}
+
+static void put32(long foff, long v) {
+    in_buf[foff] = (char)(v & 0xff);
+    in_buf[foff + 1] = (char)((v >> 8) & 0xff);
+    in_buf[foff + 2] = (char)((v >> 16) & 0xff);
+    in_buf[foff + 3] = (char)((v >> 24) & 0xff);
+}
+
+/* 穴1つを埋める (obj の .text 内オフセット off、
+ * 最終位置 place、種類 kind、相手 s、加算値 val)。
+ * 埋め方は旧 fill_all と同じ */
+static int patch_one(int obj, long off, int place, int kind,
+                     int s, long val) {
+    long pc = CODE_BASE + place;
+    long foff = pb_text_off + off;
+    if (kind == 1 || kind == 2) {
+        if (sym_obj[s] < 0) {
+            if (kind == 1) {
+                err_sym = s;
+                return fail("未定義の関数が呼ばれています");
+            }
+            put32(foff, 0x13);  /* nop (addi x0, x0, 0) */
+            return 1;
+        }
+        long diff = sym_addr[s] - pc;
+        if (diff < -1048576L || diff > 1048572L)
+            return fail("呼び出しが届きません (約1MBまで)");
+        long w = get32(foff) & 0xFFF;
+        w |= ((diff >> 20) & 1) << 31;
+        w |= ((diff >> 1) & 0x3FF) << 21;
+        w |= ((diff >> 11) & 1) << 20;
+        w |= ((diff >> 12) & 0xFF) << 12;
+        put32(foff, w);
+        return 1;
+    }
+    long target;
+    if (kind == 3)
+        target = sym_addr[s] + val;
+    else if (kind == 4)
+        target = DATA_BASE + obj_str_final[obj] + val;
+    else
+        target = val;
+    long diff = target - pc;
+    long hi = (diff + 0x800) >> 12;
+    long lo = diff - (hi << 12);
+    long w0 = get32(foff);
+    w0 = (w0 & 0xFFFFF) | ((hi & 0xFFFFF) << 12);
+    put32(foff, w0);
+    long w1 = get32(foff + 4);
+    w1 = (w1 & 0xFFFFF) | ((lo & 0xFFF) << 20);
+    put32(foff + 4, w1);
+    return 1;
+}
+
+/* 読み直したオブジェクトの .text の穴を全部
+ * 埋める。再配置の読み方はパスA と同じで、
+ * .text 向けだけをその場で埋める */
+static int patch_object(int obj) {
+    long shoff = eget64(40);
+    int shnum = eget16(60);
+    int shstrndx = eget16(62);
+    eget_shdr(shoff, shstrndx);
+    long shstr_off = esec_off;
+    for (int i = 0; i < shnum; i++) {
+        eget_shdr(shoff, i);
+        if (esec_type != 4)
+            continue;
+        int target_i = (int)esec_info;
+        char tnm[32];
+        esec_name(shoff, shstr_off, target_i, tnm);
+        if (!ds_streq(tnm, ".text"))
+            continue;
+        long cnt = esec_size / 24;
+        for (long ri = 0; ri < cnt; ri++) {
+            long rb = esec_off + ri * 24;
+            long roff = eget64(rb);
+            long rinfo = eget64(rb + 8);
+            long rsym = rinfo / (1L << 32);
+            long rtype = rinfo % (1L << 32);
+            long radd = eget64(rb + 16);
+            if (rtype == 17) {
+                int place = site_final(obj, (int)roff);
+                if (place < 0)
+                    return fail("穴の場所が決まりません");
+                int kind = esym_tag[rsym] == 4 ? 2 : 1;
+                if (!patch_one(obj, roff, place, kind,
+                               esym_sym[rsym], 0))
+                    return 0;
+            } else if (rtype == 23) {
+                int place = site_final(obj, (int)roff);
+                if (place < 0)
+                    return fail("穴の場所が決まりません");
+                if (esym_tag[rsym] == 1) {
+                    if (!patch_one(obj, roff, place, 4, -1,
+                                   radd))
+                        return 0;
+                } else {
+                    if (!patch_one(obj, roff, place, 3,
+                                   esym_sym[rsym], radd))
+                        return 0;
+                }
+            } else if (rtype == 26) {
+                int place = site_final(obj, (int)roff);
+                if (place < 0)
+                    return fail("穴の場所が決まりません");
+                long val = 0;
+                for (int e = 0; e < neabs; e++)
+                    if (eabs_idx[e] == (int)rsym)
+                        val = eabs_val[e];
+                if (!patch_one(obj, roff, place, 5, -1, val))
+                    return 0;
+            }
+            /* 24 / 27 / 51 は組の後半または印 */
+        }
+    }
+    return 1;
+}
+
+/* 大きなリンク (big_link) だけの事前点検:
+ * 呼び出しの届きは場所ごとに違うので、全
+ * オブジェクトを読み直して穴埋めを試し、
+ * 結果は捨てる (本番は emit が読み直す)。
+ * 出力はまだ何も書いていない */
+static int range_validate(void) {
+    for (int o = 0; o < nobj; o++) {
+        if (!load_file(o) || !passb_prepare(o) ||
+            !patch_object(o))
+            return 0;
+    }
+    return 1;
+}
+
+/* ================= コードを流す (パスB) ================= */
+static int loaded_obj;         /* share_buf に穴埋め済みで
+                                * 入っているオブジェクト。
+                                * -1 = 無し */
+
+/* obj を読み直して穴を埋め、loaded_obj にする */
+static int ensure_obj(int obj) {
+    if (loaded_obj == obj)
+        return 1;
+    if (!load_file(obj) || !passb_prepare(obj) ||
+        !patch_object(obj))
+        return 0;
+    loaded_obj = obj;
+    return 1;
+}
+
+/* 入口 → seq 順に関数を流す。書く位置が配置と
+ * 一致するか、走りながら照合する (配置の順と
+ * seq の初出の順は一致する) */
+static int emit_code(void) {
+    loaded_obj = -1;
+    if (!ensure_obj(entry_obj))
+        return 0;
+    write(1, in_buf + obj_text_off[entry_obj],
+          obj_entry[entry_obj]);
+    int running = obj_entry[entry_obj];
+    for (int i = 0; i < nseq; i++) {
+        int s = seq_sym[i];
+        if (sym_kind[s] != 1 || sym_obj[s] < 0 ||
+            sym_place[s] != running)
+            continue;
+        if (!ensure_obj(sym_obj[s]))
+            return 0;
+        write(1, in_buf + obj_text_off[sym_obj[s]] + sym_off[s],
+              sym_size[s]);
+        running += sym_size[s];
+    }
+    if (running != out_len)
+        return fail("配置がずれました");
     return 1;
 }
 
@@ -900,7 +1112,7 @@ static void out_phdr(long flags, long off, long va, long fsz,
     out64(align);
 }
 
-static void write_elf(void) {
+static int write_elf(void) {
     int has_inits = 0;
     for (int s = 0; s < nsym; s++)
         if (sym_kind[s] == 2 && sym_hasinit[s])
@@ -951,11 +1163,22 @@ static void write_elf(void) {
              has_inits ? gbl_bytes : 0, gbl_bytes, 1);
     for (int i = 232; i < 4096; i++)
         out_byte(0);
-    write(1, out_code, out_len);
+    if (!emit_code())
+        return 0;
     for (long i = 4096L + out_len; i < data_off; i++)
         out_byte(0);
-    if (str_total > 0)
-        write(1, str_pool, str_total);
+    if (str_total > 0) {
+        /* 文字列: オブジェクトの並び順に、節を
+         * 読み直してそのまま流す (並びは旧
+         * str_pool の中身と一致する) */
+        for (int o = 0; o < nobj; o++) {
+            if (obj_str_len[o] <= 0)
+                continue;
+            if (!load_file(o))
+                return 0;
+            write(1, in_buf + obj_str_foff[o], obj_str_len[o]);
+        }
+    }
     if (ainit_span > 0) {
         /* 配列の初期値: 始まる位置まで 0 を埋め、
          * バイト列を置く、を並び順に繰り返す */
@@ -999,12 +1222,12 @@ static void write_elf(void) {
             out64(v);
         }
     }
+    return 1;
 }
 
 int main(int argc, char **argv) {
     int base;
     in_buf = share_buf;
-    out_code = share_buf;
     base = 1;
     /* nori --out <名前> obj... : OS 上での出力名 (v34) */
     if (argc >= 4 && ds_streq(argv[1], "--out")) {
@@ -1022,6 +1245,7 @@ int main(int argc, char **argv) {
     err_sym = -1;
     nobj = argc - base;
     for (int i = 0; i < nobj; i++) {
+        obj_path[i] = argv[i + base];
         if (!read_object(i, argv[i + base])) {
             ds_puts(2, "nori: ");
             ds_puts(2, errmsg);
@@ -1033,7 +1257,8 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    if (!layout() || !fill_all()) {
+    if (!layout() || !check_refs() ||
+        (big_link && !range_validate()) || !write_elf()) {
         ds_puts(2, "nori: ");
         ds_puts(2, errmsg);
         if (err_sym >= 0) {
@@ -1043,6 +1268,5 @@ int main(int argc, char **argv) {
         ds_puts(2, "\n");
         return 1;
     }
-    write_elf();
     return 0;
 }
