@@ -2218,10 +2218,40 @@ iwac2.elf と iwac3.elf がバイト単位で一致 ＝ 固定点！</pre>
   順番も設計のうちです。</p></div>
 </section>
 
+<!-- ================= v52 ================= -->
+<section class="phase" id="v52">
+  <div class="head"><span class="badge b-v4">v52</span><h2>peephole — 命令列の後始末（最適化の段1）</h2></div>
+  <p class="goal-line">目標：<b>生成と符号化の間にもう1段パスを入れ、明らかな無駄な命令を取り除く。</b></p>
+  <p>生成の最後に <code>peep_run</code> を走らせ、4つの形を
+  消します：nop な move、store の直後の同じ場所の load
+  （dead reload）、違うレジスタへの load を move への
+  付け替え（store forwarding）、load して戻すだけの
+  store-back。跳び先・呼び出し・store を窓の境界にして、
+  住所作りの組（再配置の印の付いた命令）は触りません。
+  nami では命令が約 1.1% 減り、load が 14% 減りました。</p>
+  <p>途中で、データ住所の組が「生成時に住所を焼き込む」
+  形だったため、削除で auipc の位置がずれると住所が
+  狂う不具合が出ました。関数の住所（dfaddr）と同じく
+  「組だけ置いて最後に埋める」（bake_daddr）に改めて
+  解決。あわせて、コンパイラ自身が育った分でリンカ
+  nori の断片プロファイルが 1MB 枠を超え、nori を
+  2パス読みのストリーミング形に作り替える寄り道が
+  入りました（nori 断片のデータは約 1,048K → 398K）。</p>
+  <div>
+    <span class="chip">命令列へのパス追加</span><span class="chip">住所は焼かずに遅延</span><span class="chip">nori はストリーミング化</span>
+  </div>
+  <div class="learn"><p><b class="title">ここでの学び：</b>
+  命令を消す最適化は、位置に依存する情報を全部洗い出す
+  ところが本体でした。焼き込み済みの住所が1種類でも
+  残っていると、削除した分だけ静かにずれます。
+  「後から位置が動く」ことを前提に、住所は最後に
+  埋める形へ寄せるのが答えでした。</p></div>
+</section>
+
 <footer>
   <p>IwaC プロジェクトの学習記録です。詳しい計画は <code>doc/roadmap.md</code>、
   設計は <code>doc/design.md</code>、日々の記録は <code>doc/progress.md</code> にあります。<br>
-  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-22（v51 時点）</p>
+  このファイルは単体で開けます（CSS はこの中に入っています）。最終更新：2026-11-23（v52 時点）</p>
 </footer>
 
 </div>

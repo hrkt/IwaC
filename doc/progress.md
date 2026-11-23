@@ -1,3 +1,40 @@
+## 2026-11-23: v52 peephole (最適化の段1)
+
+生成と符号化の間に peep_run を入れた (branch
+`v52`、設計と結果は doc/peephole.md)。消すのは
+4形: nop move、dead reload (store 直後の同じ
+場所の load)、store forwarding (違うレジスタへの
+load を move へ)、load→store-back。窓は
+跳び先・JAL/JALR/ECALL・store で切り、削除で
+ずれる索引 (分岐の imm、func_entry、dfaddr、
+再配置・絶対・flush の印、obj_prefix_insts) を
+一括で詰め直す。跳び先の印は patch_next の
+ビット集合を借りた (専用表は断片プロファイルの
+1MB 枠を破った)。
+
+途中の不具合: データ住所の auipc+addi は生成時に
+焼き込まれていたため、削除で auipc がずれると
+住所が狂った (v25 の三項演算子の検査で発覚)。
+関数の住所と同じく「組だけ置いて最後に埋める」
+形へ改めた (daddr_resolve / bake_daddr、印は
+obj_reloc の表を流用、TU あたり実測最大 1,493 /
+上限 6,144)。溢れたら焼き込みへ戻り peep は
+全体を諦める。
+
+効果 (nami_all.c): 命令 15,651 → 15,485
+(-1.1%)、load 3,263 → 2,802 (-14%)。検査は
+機能 (出力不変) と構造 (小片で命令 66・
+ロード 9 以下) の2本を test.sh に追加。
+
+副産物: コンパイラ自身の増加で nori 断片が
+1MB を超え、nori を2パス読みのストリーミング
+形に作り替えた (doc/nori-streaming.md、先に
+main へ)。nori 断片のデータは 1,048,390 →
+398,003 バイト。iwac 断片は 1,047,512 バイト
+(v51 と同値)。test.sh 360 ok PASS、iwac2 は
+319,614 バイトで固定点 (Misoni 経由でも
+バイト一致)。
+
 ## 2026-11-22: v51 #include
 
 プリプロセッサに #include を入れた (branch
