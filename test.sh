@@ -3416,6 +3416,72 @@ else
     echo "FAIL: v60: addw が無い"
     NG=1
 fi
+# v61: レジスタ変数の直接更新。対象の形 (即値・
+# 変数・式、int32 と 64 ビット) と対象外の型
+# (int16 は従来経路で正しいこと) を合計で見る
+cat > "$TMP/v61a.c" <<'EOF'
+int tab[4] = { 10, 20, 30, 40 };
+void pn(int n) {
+    if (n >= 10) pn(n / 10);
+    putc(48 + (n % 10));
+}
+int main() {
+    int32 a = 100;
+    a = a + 1;
+    a = a - 64;
+    a = a << 2;
+    int32 b = 3;
+    a = a * b;
+    a = a + tab[2];
+    a = a & 255;
+    a = a | 256;
+    int acc = 0;
+    int i = 0;
+    while (i < 4) {
+        acc = acc + tab[i] * 2;
+        i = i + 1;
+    }
+    int64 g = 5;
+    g = g + tab[1] * 3;
+    uint64 h = 16;
+    h = h >> 2;
+    int32 c = 7;
+    c = c + c;
+    int16 s = 1000;
+    s = s + 1;
+    int32 big = 2147483647;
+    big = big + 1;
+    int r = a + acc + (int)g + (int)h + c + s;
+    if (big < 0) r = r + 1;
+    pn(r);
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v61a.c" > "$TMP/v61a.bin"
+check_tail "$TMP/v61a.bin" "1759" "v61: 直接更新の一式"
+# 直接更新の形が実際に出ていることを Asari
+# テキストで見る (addi rd, rd, 1 の形)
+cat > "$TMP/v61b.c" <<'EOF'
+int f(int n) {
+    int s = 0;
+    int i = 0;
+    while (i < n) {
+        s = s + i;
+        i = i + 1;
+        s = s + 1;
+        i = i + 1;
+    }
+    return s + i;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v61b.c" > "$TMP/v61b.txt"
+d61=$(grep -cE '^i addi ([0-9]+) \1 0 1' "$TMP/v61b.txt" || true)
+if [ "$d61" -ge 2 ]; then
+    echo "ok: v61: 直接更新 (addi rd,rd,1) が出ている"
+else
+    echo "FAIL: v61: 直接更新が $d61 か所 (2以上の はず)"
+    NG=1
+fi
 
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と

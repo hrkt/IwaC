@@ -171,6 +171,150 @@ static int gen_cond_branch(int node, int *head, int sense) {
     return 1;
 }
 
+/* 部分木に副作用 (呼び出し・代入・増減・ストア・
+ * システムコール) があるか (v61)。辿る欄の規則は
+ * subtree_has_call と同じ */
+static int subtree_has_sidefx(int node) {
+    if (node <= 0)
+        return 0;
+    int k = node_kind[node];
+    if (k == NODE_CALL || k == NODE_ICALL ||
+        k == NODE_SYSCALL3 || k == NODE_ASSIGN ||
+        k == NODE_PREINC || k == NODE_POSTINC ||
+        k == NODE_PREDEC || k == NODE_POSTDEC ||
+        k == NODE_EPRE || k == NODE_EPOST ||
+        k == NODE_INDEX_STORE || k == NODE_STORE)
+        return 1;
+    if (subtree_has_sidefx(node_lhs[node]))
+        return 1;
+    if (subtree_has_sidefx(node_rhs[node]))
+        return 1;
+    if (k == NODE_COND &&
+        subtree_has_sidefx(node_val[node]))
+        return 1;
+    return 0;
+}
+
+/* 直接更新で使う演算の命令 (v61)。符号つき int32 は
+ * W 形式、64 ビット幅 (幅なし・int64・uint64) は
+ * 通常形式で、符号なしの割り算と右シフトだけ
+ * 符号なし形式にする */
+static int direct_opcode(int kind, int s32, int uns) {
+    if (kind == NODE_ADD) return s32 ? OP_ADDW : OP_ADD;
+    if (kind == NODE_SUB) return s32 ? OP_SUBW : OP_SUB;
+    if (kind == NODE_MUL) return s32 ? OP_MULW : OP_MUL;
+    if (kind == NODE_DIV)
+        return s32 ? OP_DIVW : (uns ? OP_DIVU : OP_DIV);
+    if (kind == NODE_MOD)
+        return s32 ? OP_REMW : (uns ? OP_REMU : OP_REM);
+    if (kind == NODE_AND) return OP_AND;
+    if (kind == NODE_OR) return OP_OR;
+    if (kind == NODE_XOR) return OP_XOR;
+    if (kind == NODE_SHL) return s32 ? OP_SLLW : OP_SLL;
+    if (kind == NODE_SHR)
+        return s32 ? OP_SRAW : (uns ? OP_SRL : OP_SRA);
+    return 0;
+}
+
+/* 文レベルの代入 v = v op x を、v のレジスタの中で
+ * 直接演算する (v61、設計は doc/direct-update.md)。
+ * 従来は値を t1 へ出して演算し、v へ戻す往復が
+ * あった。扱ったら 1、対象でなければ 0、生成に
+ * 失敗したら -1 を返す。対象は、レジスタ割り付け
+ * された非ポインタ変数で、型が符号つき int32 か
+ * 64 ビット幅のものだけ (正規化をレジスタ内で
+ * 完結できない型は従来経路に任せる) */
+int gen_direct_update(int node) {
+    int v = node_val[node];
+    if (var_reg[v] == 0 || var_plevel[v] > 0 ||
+        var_struct[v] > 0)
+        return 0;
+    int vet = var_value_etype(v);
+    if (vet & 64)
+        return 0;
+    int s32 = et_is_s32(vet);
+    /* 64 ビット幅 (幅なし・int64・uint64) も、通常
+     * 形式の演算で値がそのまま保てるので対象に
+     * する。それ以外の幅つき型は対象外 */
+    int wide = ((vet & 15) == 8);
+    if (!s32 && !wide)
+        return 0;
+    int uns = (vet & 16) != 0;
+    int rhs = node_lhs[node];
+    int k = node_kind[rhs];
+    if (k != NODE_ADD && k != NODE_SUB &&
+        k != NODE_MUL && k != NODE_DIV &&
+        k != NODE_MOD && k != NODE_AND &&
+        k != NODE_OR && k != NODE_XOR &&
+        k != NODE_SHL && k != NODE_SHR)
+        return 0;
+    if (node_etype[rhs] != vet)
+        return 0;
+    int l = node_lhs[rhs];
+    int r = node_rhs[rhs];
+    if (node_kind[l] != NODE_VAR || node_val[l] != v)
+        return 0;
+    if (ptr_elem_size(l) > 0 || ptr_elem_size(r) > 0)
+        return 0;
+    int sreg = var_reg[v];
+    if (node_kind[r] == NODE_NUM) {
+        /* 相手が即値: ADD/SUB/SHL/AND/OR/XOR だけ */
+        int nv = node_val[r];
+        long c = (nv >= 0) ? (long)nv
+                           : (long)(unsigned int)nv;
+        int op = 0;
+        int imm = 0;
+        if (k == NODE_ADD && c <= 2047) {
+            op = s32 ? OP_ADDIW : OP_ADDI; imm = (int)c;
+        } else if (k == NODE_SUB && c <= 2048) {
+            op = s32 ? OP_ADDIW : OP_ADDI; imm = (int)-c;
+        } else if (k == NODE_AND && c <= 2047) {
+            op = OP_ANDI; imm = (int)c;
+        } else if (k == NODE_OR && c <= 2047) {
+            op = OP_ORI; imm = (int)c;
+        } else if (k == NODE_XOR && c <= 2047) {
+            op = OP_XORI; imm = (int)c;
+        } else if (k == NODE_SHL &&
+                   c <= (s32 ? 31 : 63)) {
+            op = s32 ? OP_SLLIW : OP_SLLI; imm = (int)c;
+        } else {
+            return 0;
+        }
+        asm_push(op, sreg, sreg, 0, imm);
+        loop_xform_on_mod(node);
+        return 1;
+    }
+    if (node_kind[r] == NODE_VAR &&
+        var_reg[node_val[r]] != 0 &&
+        var_plevel[node_val[r]] == 0) {
+        /* 相手がレジスタ変数 */
+        if ((k == NODE_AND || k == NODE_OR ||
+             k == NODE_XOR) &&
+            s32 && !et_is_s32(node_etype[r]))
+            return 0;
+        asm_push(direct_opcode(k, s32, uns), sreg, sreg,
+                 var_reg[node_val[r]], 0);
+        loop_xform_on_mod(node);
+        return 1;
+    }
+    /* 相手が式: 評価中に v が変わらないものだけ。
+     * 先に式を t1 へ作ってから、v のレジスタで
+     * 演算する (従来は v を先に読んで保持する
+     * 往復があった) */
+    if (subtree_has_call(r) || subtree_has_sidefx(r))
+        return 0;
+    if ((k == NODE_AND || k == NODE_OR ||
+         k == NODE_XOR) &&
+        s32 && !et_is_s32(node_etype[r]))
+        return 0;
+    if (!gen_expr(r))
+        return -1;
+    asm_push(direct_opcode(k, s32, uns), sreg, sreg,
+             REG_T1, 0);
+    loop_xform_on_mod(node);
+    return 1;
+}
+
 static int gen_stmt(int node) {
     int kind = node_kind[node];
     if (kind == NODE_PREINC || kind == NODE_POSTINC ||
@@ -284,6 +428,16 @@ static int gen_stmt(int node) {
         /* 値は代入先の型に合わせて生成する (v46:
          * double の変数なら ft0 に残る) */
         int vet = var_value_etype(node_val[node]);
+        /* レジスタ変数の直接更新 (v61): v = v op x の
+         * 形は、値を t1 経由にせず v のレジスタの中で
+         * 演算する */
+        {
+            int du = gen_direct_update(node);
+            if (du < 0)
+                return 0;
+            if (du > 0)
+                return 1;
+        }
         if (!gen_value_as(node_lhs[node], vet))
             return 0;
         if (vet & 64) {
