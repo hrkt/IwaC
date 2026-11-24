@@ -444,6 +444,9 @@ static int reg_eligible(int v, int f) {
  * 割り付けが使わなかった分を、ループの入れ子の
  * 深さに合わせて使う。退避本数は func_saved_regs へ
  * 合算される (割り付け分より増えることがある)。
+ * 割り付けが使い切っているときは、本体で使われて
+ * いない変数を退避して席を貸す (v62、設計は
+ * doc/reg-pressure.md)。
  *
  * 安全の要: 帰納変数の変更は、ループの部分木の中の
  * 全部の箇所が「定数歩幅の代入と ++ / --」の形で
@@ -457,14 +460,27 @@ static int reg_eligible(int v, int f) {
 static int xform_loop_node[256];  /* ループのノード */
 static int xform_loop_first[256]; /* ポインタ表の先頭 */
 static char xform_loop_cnt[256];  /* ポインタの数 */
-static char xform_loop_slot[256]; /* 先頭の割り付け順 */
 static int xform_nloops;
 static int xform_ptr_base[512];   /* 基底 (配列番号か
                                    * ポインタ変数の番号) */
 static char xform_ptr_kind[512];  /* 0 = 配列、1 = 変数 */
 static int xform_ptr_ind[512];    /* 帰納変数 */
 static char xform_ptr_esz[512];   /* 要素の大きさ */
+static char xform_ptr_slot[512];  /* ポインタの割り付け順
+                                   * (v62: 末尾の空き席と
+                                   * 貸し出し席が混ざる
+                                   * ので、ポインタごとに
+                                   * 持つ) */
 static int xform_nptrs;
+/* レジスタ圧の緩和 (v62、設計は doc/reg-pressure.md):
+ * 割り付けが 11 本を使い切っているループでは、
+ * 本体で使われていない割り付け済み変数を入口で
+ * 自分の置き場所へ退避し、その席をポインタに貸す。
+ * 被害変数はループごとに貯める */
+static int xform_loop_vfirst[256]; /* 被害変数表の先頭 */
+static char xform_loop_vcnt[256];  /* 被害変数の数 */
+static int xform_vict_var[256];    /* 被害変数の番号 */
+static int xform_nvict;
 static int xform_mod_node[1024];  /* 変更箇所のノード */
 static int xform_mod_var[1024];   /* 帰納変数 */
 static int xform_mod_delta[1024]; /* 値の変化量 */
@@ -493,6 +509,10 @@ static int scan_ncand;
  * いる間の loop_scan が立てる */
 static char evict_hot_bits[160];
 static int scan_mark_hot;
+/* v62 の被害変数の見回りだけ、PINDEX (ポインタ変数
+ * の読み) も熱いものとして数える印。v59 の外し
+ * 判定の挙動は変えないよう、見回り側で立てる */
+static int scan_mark_pindex;
 
 static int evict_is_hot(int v) {
     if (v < 0 || v >= 1280)
@@ -628,7 +648,8 @@ static void loop_scan(int node) {
     if (scan_mark_hot &&
         (k == NODE_VAR || k == NODE_ASSIGN ||
          k == NODE_PREINC || k == NODE_POSTINC ||
-         k == NODE_PREDEC || k == NODE_POSTDEC)) {
+         k == NODE_PREDEC || k == NODE_POSTDEC ||
+         (k == NODE_PINDEX && scan_mark_pindex))) {
         /* 見回り中: この部分木 (= ループの中) で
          * 参照・変更される変数に印を付ける */
         int hv = node_val[node];
@@ -795,7 +816,10 @@ static int loop_plan_one(int node) {
 }
 
 /* 文の並びを歩いてループを探す。enclosing は
- * 外側の有効なループが使っているポインタ数 */
+ * 外側の有効なループが末尾の空き席に使っている
+ * ポインタ数、lent_mask は外側のループが貸し出し
+ * 中の席の印 (割り付け順のビット集合。見回りでは
+ * 使わない) */
 static int plan_assigned;
 static int plan_max_end;
 /* レジスタートレードオフ (v59): 見回りの状態。
@@ -804,21 +828,66 @@ static int plan_max_end;
 static int plan_survey;
 static int survey_need;
 
-static void loop_plan_visit(int head, int enclosing) {
+/* レジスタ番号から割り付け順 (0〜10) へ戻す */
+static int reg_slot_index(int reg) {
+    if (reg == REG_S1)
+        return 0;
+    return reg - 17;
+}
+
+/* ループ (node) の中で参照される割り付け済み変数の
+ * 席の印を返す (v62)。走査は loop_scan の見回りの
+ * 印 (evict_hot_bits) を使い回す。歩くポインタの
+ * 材料 (帰納変数と、基底になるポインタ変数) は
+ * 入口の初期化で読むので、熱いものとして足す */
+static int plan_loop_hotmask(int node) {
+    for (int b = 0; b < 160; b++)
+        evict_hot_bits[b] = 0;
+    scan_mark_hot = 1;
+    scan_mark_pindex = 1;
+    loop_scan(node_lhs[node]);
+    loop_scan(node_rhs[node]);
+    scan_mark_hot = 0;
+    scan_mark_pindex = 0;
+    int mask = 0;
+    for (int v = 0; v < nvar; v++) {
+        if (var_owner[v] != plan_f || var_reg[v] == 0)
+            continue;
+        if (evict_is_hot(v))
+            mask = mask | (1 << reg_slot_index(var_reg[v]));
+    }
+    for (int j = 0; j < st_np; j++) {
+        if (var_reg[st_pind[j]] != 0)
+            mask = mask |
+                (1 << reg_slot_index(var_reg[st_pind[j]]));
+        if (st_pkind[j] == 1 &&
+            var_reg[st_pbase[j]] != 0)
+            mask = mask |
+                (1 << reg_slot_index(var_reg[st_pbase[j]]));
+    }
+    return mask;
+}
+
+static void loop_plan_visit(int head, int enclosing,
+                            int lent_mask) {
     for (int s = head; s != -1; s = node_next[s]) {
         int k = node_kind[s];
         if (k == NODE_IF) {
-            loop_plan_visit(node_rhs[s], enclosing);
-            loop_plan_visit(node_val[s], enclosing);
+            loop_plan_visit(node_rhs[s], enclosing,
+                            lent_mask);
+            loop_plan_visit(node_val[s], enclosing,
+                            lent_mask);
         } else if (k == NODE_SWITCH) {
             for (int g = node_rhs[s]; g != -1;
                  g = node_next[g])
-                loop_plan_visit(node_lhs[g], enclosing);
+                loop_plan_visit(node_lhs[g], enclosing,
+                                lent_mask);
         } else if (k == NODE_WHILE ||
                    k == NODE_DOWHILE ||
                    k == NODE_FOR) {
             int np = loop_plan_one(s);
-            int add = 0;
+            int add_tail = 0;
+            int add_mask = 0;
             if (plan_survey) {
                 /* 見回り (v59): 不足分 = そのループと
                  * 祖先の np の合計 - 空き席、の最大値。
@@ -829,38 +898,105 @@ static void loop_plan_visit(int head, int enclosing) {
                         (11 - plan_assigned);
                     if (need > survey_need)
                         survey_need = need;
-                    add = np;
+                    add_tail = np;
                 }
             } else if (np > 0 &&
-                plan_assigned + enclosing + np <= 11 &&
                 xform_nloops < 256 &&
                 xform_nptrs + np <= 512) {
-                int li = xform_nloops;
-                xform_nloops = xform_nloops + 1;
-                xform_loop_node[li] = s;
-                xform_loop_first[li] = xform_nptrs;
-                xform_loop_cnt[li] = np;
-                xform_loop_slot[li] =
-                    plan_assigned + enclosing;
-                for (int j = 0; j < np; j++) {
-                    xform_ptr_kind[xform_nptrs] =
-                        st_pkind[j];
-                    xform_ptr_base[xform_nptrs] =
-                        st_pbase[j];
-                    xform_ptr_ind[xform_nptrs] =
-                        st_pind[j];
-                    xform_ptr_esz[xform_nptrs] =
-                        st_pesz[j];
-                    xform_nptrs = xform_nptrs + 1;
+                /* レジスタ圧の緩和 (v62): 末尾の空き席
+                 * で足りなければ、本体で使われて
+                 * いない割り付け済み変数を最大3個
+                 * 退避して席を貸す */
+                int freetail = 11 - plan_assigned -
+                    enclosing;
+                int tail_take = np;
+                if (tail_take > freetail)
+                    tail_take = freetail;
+                int need = np - tail_take;
+                int vict[3];
+                int nvict = 0;
+                int ok = 1;
+                if (need > 3)
+                    ok = 0;
+                if (ok && need > 0) {
+                    int hot = plan_loop_hotmask(s);
+                    while (nvict < need) {
+                        int best = -1;
+                        for (int v = 0; v < nvar; v++) {
+                            if (var_owner[v] != plan_f ||
+                                var_reg[v] == 0)
+                                continue;
+                            int si =
+                                reg_slot_index(var_reg[v]);
+                            if (si < 0 || si > 10)
+                                continue;
+                            if ((hot >> si) & 1)
+                                continue;
+                            if ((lent_mask >> si) & 1)
+                                continue;
+                            if ((add_mask >> si) & 1)
+                                continue;
+                            if (best < 0 ||
+                                var_refcount[v] <
+                                    var_refcount[best])
+                                best = v;
+                        }
+                        if (best < 0) {
+                            ok = 0;
+                            break;
+                        }
+                        vict[nvict] = best;
+                        nvict = nvict + 1;
+                        add_mask = add_mask |
+                            (1 << reg_slot_index(
+                                 var_reg[best]));
+                    }
+                    if (xform_nvict + nvict > 256)
+                        ok = 0;
                 }
-                if (plan_assigned + enclosing + np >
-                    plan_max_end)
-                    plan_max_end =
-                        plan_assigned + enclosing + np;
-                add = np;
+                if (ok) {
+                    int li = xform_nloops;
+                    xform_nloops = xform_nloops + 1;
+                    xform_loop_node[li] = s;
+                    xform_loop_first[li] = xform_nptrs;
+                    xform_loop_cnt[li] = np;
+                    xform_loop_vfirst[li] = xform_nvict;
+                    xform_loop_vcnt[li] = nvict;
+                    for (int j = 0; j < np; j++) {
+                        xform_ptr_kind[xform_nptrs] =
+                            st_pkind[j];
+                        xform_ptr_base[xform_nptrs] =
+                            st_pbase[j];
+                        xform_ptr_ind[xform_nptrs] =
+                            st_pind[j];
+                        xform_ptr_esz[xform_nptrs] =
+                            st_pesz[j];
+                        if (j < tail_take)
+                            xform_ptr_slot[xform_nptrs] =
+                                plan_assigned +
+                                enclosing + j;
+                        else
+                            xform_ptr_slot[xform_nptrs] =
+                                reg_slot_index(var_reg[
+                                    vict[j - tail_take]]);
+                        xform_nptrs = xform_nptrs + 1;
+                    }
+                    for (int j = 0; j < nvict; j++) {
+                        xform_vict_var[xform_nvict] =
+                            vict[j];
+                        xform_nvict = xform_nvict + 1;
+                    }
+                    if (plan_assigned + enclosing +
+                        tail_take > plan_max_end)
+                        plan_max_end = plan_assigned +
+                            enclosing + tail_take;
+                    add_tail = tail_take;
+                } else
+                    add_mask = 0;
             }
             loop_plan_visit(node_rhs[s],
-                            enclosing + add);
+                            enclosing + add_tail,
+                            lent_mask | add_mask);
         }
     }
 }
@@ -872,7 +1008,7 @@ static void loop_plan(int f, int assigned) {
     plan_f = f;
     plan_assigned = assigned;
     plan_max_end = assigned;
-    loop_plan_visit(func_body[f], 0);
+    loop_plan_visit(func_body[f], 0, 0);
     if (plan_max_end > assigned)
         func_saved_regs[f] = plan_max_end;
 }
@@ -939,7 +1075,7 @@ static void func_reg_plan(int f) {
         for (int b = 0; b < 160; b++)
             evict_hot_bits[b] = 0;
         scan_mark_hot = 1;
-        loop_plan_visit(func_body[f], 0);
+        loop_plan_visit(func_body[f], 0, 0);
         scan_mark_hot = 0;
         plan_survey = 0;
         if (survey_need > 0) {
@@ -1722,6 +1858,7 @@ static void apply_patches(int head, int target);
 
 /* 要素の住所を作る道具 (v23)。gen_expr と相互に使う */
 static int gen_elem_addr(int node);
+static int xform_try_addr(int node);
 
 /* ループ最適化 (v57): 帰納変数の変更の直後に
  * ポインタを進める道具。本体は gen_elem_addr の前 */
@@ -3064,14 +3201,22 @@ static int member_elem_size(int mi) {
 }
 
 /* ================================================================
- * ループ最適化の生成側 (v57、計画は上の loop_plan)
+ * ループ最適化の生成側 (v57、計画は 03-gen.c の
+ * loop_plan。v62 で 03-gen の断片上限の都合で
+ * この断片へ引っ越した)
  *
  * 生きている歩くポインタを表に持ち、ループの生成の
  * 頭で初期値を作って積み、末尾で戻す。帰納変数の
  * 変更の生成直後には loop_xform_on_mod が呼ばれ、
  * 記録された変化量 × 要素の大きさだけポインタを
  * 進める。要素の住所作り (gen_elem_addr) は、
- * 生きているポインタに合う要素ならそちらを使う
+ * 生きているポインタに合う要素ならそちらを使う。
+ *
+ * レジスタ圧の緩和 (v62): 計画が被害変数を貸して
+ * いたら、頭でその変数を自分の置き場所へ退避し
+ * (loop_xform_begin)、末尾の出口で復帰する
+ * (loop_xform_restore。条件の偽と break の飛び先は
+ * 復帰の先頭に合わせる)
  * ================================================================ */
 static int xact_n;                /* 生きている数 */
 static char xact_kind[16];
@@ -3105,21 +3250,34 @@ static void loop_xform_on_mod(int node) {
     }
 }
 
-/* ループの生成の頭で呼ばれ、ポインタの初期値を
- * 作って生きている表へ積む。戻り値は積む前の深さ
- * (loop_xform_end へ渡す) */
-static int loop_xform_begin(int node) {
-    int mark = xact_n;
+/* 計画表からループ (node) の番号を探す */
+static int xform_find_loop(int node) {
     int li = -1;
     for (int i = 0; i < xform_nloops; i++) {
         if (xform_loop_node[i] == node)
             li = i;
     }
+    return li;
+}
+
+/* ループの生成の頭で呼ばれ、ポインタの初期値を
+ * 作って生きている表へ積む。戻り値は積む前の深さ
+ * (loop_xform_end へ渡す)。被害変数の退避 (v62) は
+ * ポインタの初期化より先に置く (退避はレジスタから
+ * 読むだけで壊さないが、順序の意味を明確にする) */
+static int loop_xform_begin(int node) {
+    int mark = xact_n;
+    int li = xform_find_loop(node);
     if (li < 0)
         return mark;
+    for (int j = 0; j < xform_loop_vcnt[li]; j++) {
+        int v = xform_vict_var[xform_loop_vfirst[li] + j];
+        asm_push(OP_SD, 0, REG_FP, var_reg[v],
+                 var_frame_off(v));
+    }
     for (int j = 0; j < xform_loop_cnt[li]; j++) {
         int e = xform_loop_first[li] + j;
-        int reg = saved_reg_no(xform_loop_slot[li] + j);
+        int reg = saved_reg_no(xform_ptr_slot[e]);
         if (xform_ptr_kind[e] == 0)
             gen_load_arr_base(reg, xform_ptr_base[e]);
         else
@@ -3140,6 +3298,24 @@ static int loop_xform_begin(int node) {
 /* ループの生成の末尾: 生きている表を戻す */
 static void loop_xform_end(int mark) {
     xact_n = mark;
+}
+
+/* ループの出口で呼ばれ、被害変数 (v62) の復帰を
+ * 積む。積んだら復帰の先頭の命令番号を返し、
+ * 被害変数が無ければ -1 を返す。呼び側は条件の偽と
+ * break の飛び先を、戻り値があればそちらへ、
+ * 無ければ現在の末尾へ合わせる */
+static int loop_xform_restore(int node) {
+    int li = xform_find_loop(node);
+    if (li < 0 || xform_loop_vcnt[li] == 0)
+        return -1;
+    int at = nasm;
+    for (int j = 0; j < xform_loop_vcnt[li]; j++) {
+        int v = xform_vict_var[xform_loop_vfirst[li] + j];
+        asm_push(OP_LD, var_reg[v], REG_FP, 0,
+                 var_frame_off(v));
+    }
+    return at;
 }
 
 /* 要素ノードの住所を、生きている歩くポインタで
@@ -3212,126 +3388,6 @@ static int xform_try_addr(int node) {
     return 0;
 }
 
-static int gen_elem_addr(int node) {
-    /* ループ最適化 (v57): 歩くポインタで住所が
-     * 作れる要素は、そちらで作る */
-    if (xform_try_addr(node))
-        return 1;
-    int k = node_kind[node];
-    if (k == NODE_MEMBER) {
-        /* メンバの住所 (v37): . なら基底の住所、-> なら
-         * 基底の値 (ポインタ) に、メンバのオフセットを足す */
-        int mi = node_val[node];
-        if (node_rhs[node] == 1) {
-            if (!gen_expr(node_lhs[node]))
-                return 0;
-            asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
-        } else {
-            int b = node_lhs[node];
-            if (node_kind[b] == NODE_VAR)
-                gen_var_addr(REG_T2, node_val[b]);
-            else if (node_kind[b] == NODE_INDEX ||
-                     node_kind[b] == NODE_INDEX2 ||
-                     node_kind[b] == NODE_PINDEX ||
-                     node_kind[b] == NODE_MEMBER ||
-                     node_kind[b] == NODE_MELEM ||
-                     node_kind[b] == NODE_DEREF) {
-                if (!gen_elem_addr(b))
-                    return 0;
-            } else {
-                errmsg = "メンバアクセスの基底が変です";
-                return 0;
-            }
-        }
-        if (smem_off[mi] != 0) {
-            gen_load_const(REG_A0, smem_off[mi]);
-            asm_push(OP_ADD, REG_T2, REG_T2, REG_A0, 0);
-        }
-        return 1;
-    }
-    if (k == NODE_MELEM) {
-        /* 配列メンバの要素の住所 (v37): メンバの住所 +
-         * 添字 × 要素の大きさ。添字の計算で基底 (t2) を
-         * 壊さないよう、スタックへ退避する */
-        if (!gen_elem_addr(node_lhs[node]))
-            return 0;
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
-        asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
-        if (!gen_expr(node_rhs[node]))
-            return 0;
-        int esz = member_elem_size(node_val[node]);
-        if (esz > 1) {
-            int shift = 0;
-            int e = esz;
-            while ((e & 1) == 0) {
-                e >>= 1;
-                shift++;
-            }
-            if (e == 1) {
-                asm_push(OP_SLLI, REG_T1, REG_T1, 0, shift);
-            } else {
-                gen_load_const(REG_A0, esz);
-                asm_push(OP_MUL, REG_T1, REG_T1, REG_A0, 0);
-            }
-        }
-        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
-        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
-        return 1;
-    }
-    if (k == NODE_DEREF) {
-        /* *p の住所は、p の値そのもの (v37 で追加。
-         * (*p).メンバ の基底に使う) */
-        if (!gen_expr(node_lhs[node]))
-            return 0;
-        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
-        return 1;
-    }
-    if (k == NODE_INDEX2) {
-        int a = node_val[node];
-        if (!gen_expr(node_lhs[node]))
-            return 0;  /* 行 → t1 */
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
-        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
-        if (!gen_expr(node_rhs[node])) {
-            return 0;  /* 列 → t1 */
-        }
-        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
-        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
-        if (arr_cols[a] > 1) {
-            gen_load_const(REG_A0, arr_cols[a]);
-            asm_push(OP_MUL, REG_T2, REG_T2, REG_A0, 0);
-        }
-        asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
-        /* t1 = 線形添字 (行 × 列数 + 列) */
-        emit_scale(arr_esize[a]);
-        gen_load_arr_base(REG_T2, a);
-        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
-        return 1;
-    }
-    if (k == NODE_PINDEX) {
-        /* ポインタの値 (住所) は t2 へ。添字を先に t1 で
-         * 計算する (変数の読みが t2 を使うため) */
-        if (!gen_expr(node_rhs[node]))
-            return 0;
-        emit_scale(elem_esize(node));
-        gen_load_var(REG_T2, node_val[node]);
-        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
-        return 1;
-    }
-    /* INDEX (添字は rhs) と INDEX_STORE (添字は lhs)。
-     * 形は違うが、住所の作り方は同じ */
-    {
-        int idx = (k == NODE_INDEX) ? node_rhs[node]
-                                    : node_lhs[node];
-        if (!gen_expr(idx))
-            return 0;
-        emit_scale(elem_esize(node));
-        gen_load_arr_base(REG_T2, node_val[node]);
-        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
-        return 1;
-    }
-}
 
 /* 左辺値の住所を t2 に作る (v45): 構造体の複写の
  * 送り先・送り元に使う。変数は gen_var_addr、メンバと

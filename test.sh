@@ -3483,6 +3483,159 @@ else
     NG=1
 fi
 
+
+# --- v62: レジスタ圧の緩和 (被害変数の退避と貸し出し) ---
+# 割り付けが 11 本を使い切り、v59 の外しも効かない
+# (全変数がどこかのループで熱い) 関数で、内側ループへ
+# ポインタの席を貸す。被害変数の値が通常出口・break・
+# ループ内 return・ゼロ回実行のどれでも保たれることを
+# 実行結果で確かめる (期待値はホスト gcc の実行結果)
+cat > "$TMP/v62a.c" <<'EOF'
+int arr[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+int brr[16] = { 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 };
+void pn(int n) {
+    if (n >= 10) pn(n / 10);
+    putc(48 + (n % 10));
+}
+int f(int n) {
+    int a1 = 3;
+    int a2 = 5;
+    int a3 = 7;
+    int a4 = 11;
+    int a5 = 13;
+    int a6 = 17;
+    int a7 = 19;
+    int a8 = 23;
+    int a9 = 29;
+    int a10 = 31;
+    int a11 = 37;
+    int a12 = 41;
+    int sum = 0;
+    int i = 0;
+    sum = sum + a1 + a2 + a3 + a4 + a5;
+    sum = sum + a6 + a7 + a8 + a9 + a10;
+    sum = sum + a11 + a12 + a11 * a12;
+    sum = sum + a1 * a2 + a3 * a4 + a5 * a6;
+    sum = sum + a7 * a8 + a9 * a10;
+    int w = 0;
+    while (w < 2) {
+        sum = sum + a1 + a2 + a3 + a4 + a5 + a6;
+        sum = sum + a7 + a8 + a9 + a10 + a11 + a12;
+        w = w + 1;
+    }
+    while (i < n) {
+        int j = 0;
+        int inner = 0;
+        while (j < 16) {
+            inner = inner + arr[j] * brr[j];
+            j = j + 1;
+        }
+        sum = sum + inner;
+        i = i + 1;
+    }
+    sum = sum + a1 + a2 + a3 + a4 + a5;
+    sum = sum + a6 + a7 + a8 + a9 + a10;
+    sum = sum + a11 * a1 + a12 * a2 + a11 + a12;
+    sum = sum + a1 * a10 + a2 * a9 + a3 * a8 + a4 * a7 + a5 * a6;
+    return sum;
+}
+int g(int n) {
+    int a1 = 2;
+    int a2 = 4;
+    int a3 = 6;
+    int a4 = 8;
+    int a5 = 10;
+    int a6 = 12;
+    int a7 = 14;
+    int a8 = 16;
+    int a9 = 18;
+    int a10 = 20;
+    int a11 = 22;
+    int a12 = 24;
+    int total = 0;
+    int i = 0;
+    total = total + a1 + a2 + a3 + a4 + a5;
+    total = total + a6 + a7 + a8 + a9 + a10;
+    total = total + a11 + a12 + a11 * a12;
+    total = total + a1 * a2 + a3 * a4 + a5 * a6;
+    total = total + a7 * a8 + a9 * a10;
+    int w = 0;
+    while (w < 2) {
+        total = total + a1 + a2 + a3 + a4 + a5 + a6;
+        total = total + a7 + a8 + a9 + a10 + a11 + a12;
+        w = w + 1;
+    }
+    while (i < n) {
+        int j = 0;
+        while (j < 16) {
+            if (j == 5) break;
+            total = total + arr[j] + brr[j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    total = total + a1 + a10 + a2 * a9 + a3 * a8;
+    total = total + a4 * a7 + a5 * a6 + a6 + a7;
+    total = total + a11 * a3 + a12 * a4 + a11 + a12;
+    return total;
+}
+int h(int n) {
+    int a1 = 1;
+    int a2 = 2;
+    int a3 = 3;
+    int a4 = 4;
+    int a5 = 5;
+    int a6 = 6;
+    int a7 = 7;
+    int a8 = 8;
+    int a9 = 9;
+    int a10 = 10;
+    int a11 = 11;
+    int a12 = 12;
+    int acc = 0;
+    int i = 0;
+    acc = acc + a1 + a2 + a3 + a4 + a5;
+    acc = acc + a6 + a7 + a8 + a9 + a10;
+    acc = acc + a11 + a12 + a11 * a12;
+    acc = acc + a1 * a2 + a3 * a4 + a5 * a6;
+    acc = acc + a7 * a8 + a9 * a10;
+    int w = 0;
+    while (w < 2) {
+        acc = acc + a1 + a2 + a3 + a4 + a5 + a6;
+        acc = acc + a7 + a8 + a9 + a10 + a11 + a12;
+        w = w + 1;
+    }
+    while (i < n) {
+        int j = 0;
+        while (j < 16) {
+            acc = acc + arr[j] * brr[j];
+            if (j == 3) return acc + a1 + a2;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+int main() {
+    int r = f(3) + g(2) * 3 + h(5) * 7 + g(0);
+    pn(r);
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v62a.c" > "$TMP/v62a.bin"
+check_tail "$TMP/v62a.bin" "23402" "v62: 貸し出しと被害変数の生存"
+# 貸し出しの退避 (s レジスタを fp 相対へ書く短い連なり)
+# が出ていることを Asari テキストで見る。序文の退避は
+# 長い連なりになるので、3 本以下の連なりを数える
+"$IWAC" --kosaba --asari "$TMP/v62a.c" > "$TMP/v62a.txt"
+d62=$(awk '/^i sd 0 8 (9|1[89]|2[0-7]) -/ { run++; next } { if (run > 0 && run <= 3) found++; run = 0 } END { if (run > 0 && run <= 3) found++; print found + 0 }' "$TMP/v62a.txt")
+if [ "$d62" -ge 3 ]; then
+    echo "ok: v62: 貸し出しの退避が $d62 か所に出ている"
+else
+    echo "FAIL: v62: 貸し出しの退避が $d62 か所 (3以上の はず)"
+    NG=1
+fi
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに

@@ -315,6 +315,127 @@ int gen_direct_update(int node) {
     return 1;
 }
 
+static int gen_elem_addr(int node) {
+    /* ループ最適化 (v57): 歩くポインタで住所が
+     * 作れる要素は、そちらで作る */
+    if (xform_try_addr(node))
+        return 1;
+    int k = node_kind[node];
+    if (k == NODE_MEMBER) {
+        /* メンバの住所 (v37): . なら基底の住所、-> なら
+         * 基底の値 (ポインタ) に、メンバのオフセットを足す */
+        int mi = node_val[node];
+        if (node_rhs[node] == 1) {
+            if (!gen_expr(node_lhs[node]))
+                return 0;
+            asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        } else {
+            int b = node_lhs[node];
+            if (node_kind[b] == NODE_VAR)
+                gen_var_addr(REG_T2, node_val[b]);
+            else if (node_kind[b] == NODE_INDEX ||
+                     node_kind[b] == NODE_INDEX2 ||
+                     node_kind[b] == NODE_PINDEX ||
+                     node_kind[b] == NODE_MEMBER ||
+                     node_kind[b] == NODE_MELEM ||
+                     node_kind[b] == NODE_DEREF) {
+                if (!gen_elem_addr(b))
+                    return 0;
+            } else {
+                errmsg = "メンバアクセスの基底が変です";
+                return 0;
+            }
+        }
+        if (smem_off[mi] != 0) {
+            gen_load_const(REG_A0, smem_off[mi]);
+            asm_push(OP_ADD, REG_T2, REG_T2, REG_A0, 0);
+        }
+        return 1;
+    }
+    if (k == NODE_MELEM) {
+        /* 配列メンバの要素の住所 (v37): メンバの住所 +
+         * 添字 × 要素の大きさ。添字の計算で基底 (t2) を
+         * 壊さないよう、スタックへ退避する */
+        if (!gen_elem_addr(node_lhs[node]))
+            return 0;
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T2, 0);
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        int esz = member_elem_size(node_val[node]);
+        if (esz > 1) {
+            int shift = 0;
+            int e = esz;
+            while ((e & 1) == 0) {
+                e >>= 1;
+                shift++;
+            }
+            if (e == 1) {
+                asm_push(OP_SLLI, REG_T1, REG_T1, 0, shift);
+            } else {
+                gen_load_const(REG_A0, esz);
+                asm_push(OP_MUL, REG_T1, REG_T1, REG_A0, 0);
+            }
+        }
+        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    if (k == NODE_DEREF) {
+        /* *p の住所は、p の値そのもの (v37 で追加。
+         * (*p).メンバ の基底に使う) */
+        if (!gen_expr(node_lhs[node]))
+            return 0;
+        asm_push(OP_ADDI, REG_T2, REG_T1, 0, 0);
+        return 1;
+    }
+    if (k == NODE_INDEX2) {
+        int a = node_val[node];
+        if (!gen_expr(node_lhs[node]))
+            return 0;  /* 行 → t1 */
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, -16);
+        asm_push(OP_SD, 0, REG_SP, REG_T1, 0);
+        if (!gen_expr(node_rhs[node])) {
+            return 0;  /* 列 → t1 */
+        }
+        asm_push(OP_LD, REG_T2, REG_SP, 0, 0);
+        asm_push(OP_ADDI, REG_SP, REG_SP, 0, 16);
+        if (arr_cols[a] > 1) {
+            gen_load_const(REG_A0, arr_cols[a]);
+            asm_push(OP_MUL, REG_T2, REG_T2, REG_A0, 0);
+        }
+        asm_push(OP_ADD, REG_T1, REG_T2, REG_T1, 0);
+        /* t1 = 線形添字 (行 × 列数 + 列) */
+        emit_scale(arr_esize[a]);
+        gen_load_arr_base(REG_T2, a);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    if (k == NODE_PINDEX) {
+        /* ポインタの値 (住所) は t2 へ。添字を先に t1 で
+         * 計算する (変数の読みが t2 を使うため) */
+        if (!gen_expr(node_rhs[node]))
+            return 0;
+        emit_scale(elem_esize(node));
+        gen_load_var(REG_T2, node_val[node]);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+    /* INDEX (添字は rhs) と INDEX_STORE (添字は lhs)。
+     * 形は違うが、住所の作り方は同じ */
+    {
+        int idx = (k == NODE_INDEX) ? node_rhs[node]
+                                    : node_lhs[node];
+        if (!gen_expr(idx))
+            return 0;
+        emit_scale(elem_esize(node));
+        gen_load_arr_base(REG_T2, node_val[node]);
+        asm_push(OP_ADD, REG_T2, REG_T2, REG_T1, 0);
+        return 1;
+    }
+}
+
 static int gen_stmt(int node) {
     int kind = node_kind[node];
     if (kind == NODE_PREINC || kind == NODE_POSTINC ||
@@ -599,10 +720,12 @@ static int gen_stmt(int node) {
         apply_patches(loop_cont_head[loop_depth], l_cond);
         /* jal zero, L_cond -- 条件の判定に戻る */
         asm_push(OP_JAL, 0, 0, 0, l_cond);
-        /* ここ (末尾) が L_end。条件と break の飛び先を
-         * 書き直す */
-        apply_patches(c_head, nasm);
-        apply_patches(loop_break_head[loop_depth], nasm);
+        /* 被害変数の復帰 (v62): 出口は全部ここを通る。
+         * 条件の偽も break も復帰の先頭へ合わせる */
+        int lend = loop_xform_restore(node);
+        int l_end = (lend >= 0) ? lend : nasm;
+        apply_patches(c_head, l_end);
+        apply_patches(loop_break_head[loop_depth], l_end);
         ctrl_depth--;
         loop_depth--;
         loop_xform_end(xmark);
@@ -639,9 +762,12 @@ static int gen_stmt(int node) {
             return 0;
         /* jal zero, L_top -- 条件が真なら本体へ戻る */
         asm_push(OP_JAL, 0, 0, 0, l_top);
-        /* ここ (末尾) が L_end。条件と break の飛び先 */
-        apply_patches(c_head, nasm);
-        apply_patches(loop_break_head[loop_depth], nasm);
+        /* 被害変数の復帰 (v62): 条件の偽も break も
+         * 復帰の先頭へ合わせる */
+        int lend = loop_xform_restore(node);
+        int l_end = (lend >= 0) ? lend : nasm;
+        apply_patches(c_head, l_end);
+        apply_patches(loop_break_head[loop_depth], l_end);
         ctrl_depth--;
         loop_depth--;
         loop_xform_end(xmark);
@@ -699,8 +825,12 @@ static int gen_stmt(int node) {
             /* 更新が無い for: continue は条件判定へ直行 */
             apply_patches(loop_cont_head[loop_depth], l_cond);
         asm_push(OP_JAL, 0, 0, 0, l_cond);
-        apply_patches(c_head, nasm);
-        apply_patches(loop_break_head[loop_depth], nasm);
+        /* 被害変数の復帰 (v62): 条件の偽も break も
+         * 復帰の先頭へ合わせる */
+        int lend = loop_xform_restore(node);
+        int l_end = (lend >= 0) ? lend : nasm;
+        apply_patches(c_head, l_end);
+        apply_patches(loop_break_head[loop_depth], l_end);
         ctrl_depth--;
         loop_depth--;
         loop_xform_end(xmark);

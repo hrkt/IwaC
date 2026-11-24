@@ -30,11 +30,17 @@
 #                   03-gen、対して +3.3%。インライン化
 #                   (v58) の表と変数表の引き上げの
 #                   置き場を捻出するため)
-#   ループ最適化表   ループ 256 → 48、ポインタ
-#                   512 → 80、変更箇所 1024 → 64
+#   ループ最適化表   ループ 256 → 64、ポインタ
+#                   512 → 128、変更箇所 1024 → 64、
+#                   被害変数プール 256 → 64
 #                   (v57: 実測ピークはループ 34・
-#                   ポインタ 58・変更 45、すべて
-#                   02-parse か 04-encode の TU)
+#                   ポインタ 58・変更 45。v62 で
+#                   再実測: ループ 41・ポインタ 86・
+#                   変更 45・被害変数 45、すべて
+#                   04-encode の TU が最大。ポインタ
+#                   80 では 04-encode の後半のループが
+#                   断片側だけ落ちて標準と生成が割れた
+#                   ため引き上げた)
 #   再配置表         6144 → 2304 (v46 で 2048 から引き上げ:
 #                   実測ピーク 1,493 は 02-parse)
 #   変数表           1280 → 640 (v46 で 512 から引き上げ、
@@ -128,16 +134,20 @@ apply 03-gen.c '[1280]' '[640]' 3
 # ループ最適化の表 (v57): ループ・ポインタ・変更箇所の
 # 表を TU の実測ピークに合わせて絞る (ピークは
 # ループ 34・ポインタ 58・変更 45)
-apply 03-gen.c 'xform_loop_node[256]' 'xform_loop_node[48]' 1
-apply 03-gen.c 'xform_loop_first[256]' 'xform_loop_first[48]' 1
-apply 03-gen.c 'xform_loop_cnt[256]' 'xform_loop_cnt[48]' 1
-apply 03-gen.c 'xform_loop_slot[256]' 'xform_loop_slot[48]' 1
-apply 03-gen.c 'xform_nloops < 256' 'xform_nloops < 48' 1
-apply 03-gen.c 'xform_ptr_base[512]' 'xform_ptr_base[80]' 1
-apply 03-gen.c 'xform_ptr_kind[512]' 'xform_ptr_kind[80]' 1
-apply 03-gen.c 'xform_ptr_ind[512]' 'xform_ptr_ind[80]' 1
-apply 03-gen.c 'xform_ptr_esz[512]' 'xform_ptr_esz[80]' 1
-apply 03-gen.c 'xform_nptrs + np <= 512' 'xform_nptrs + np <= 80' 1
+apply 03-gen.c 'xform_loop_node[256]' 'xform_loop_node[64]' 1
+apply 03-gen.c 'xform_loop_first[256]' 'xform_loop_first[64]' 1
+apply 03-gen.c 'xform_loop_cnt[256]' 'xform_loop_cnt[64]' 1
+apply 03-gen.c 'xform_nloops < 256' 'xform_nloops < 64' 1
+apply 03-gen.c 'xform_ptr_base[512]' 'xform_ptr_base[128]' 1
+apply 03-gen.c 'xform_ptr_kind[512]' 'xform_ptr_kind[128]' 1
+apply 03-gen.c 'xform_ptr_ind[512]' 'xform_ptr_ind[128]' 1
+apply 03-gen.c 'xform_ptr_esz[512]' 'xform_ptr_esz[128]' 1
+apply 03-gen.c 'xform_ptr_slot[512]' 'xform_ptr_slot[128]' 1
+apply 03-gen.c 'xform_loop_vfirst[256]' 'xform_loop_vfirst[64]' 1
+apply 03-gen.c 'xform_loop_vcnt[256]' 'xform_loop_vcnt[64]' 1
+apply 03-gen.c 'xform_vict_var[256]' 'xform_vict_var[64]' 1
+apply 03-gen.c 'xform_nvict + nvict > 256' 'xform_nvict + nvict > 64' 1
+apply 03-gen.c 'xform_nptrs + np <= 512' 'xform_nptrs + np <= 128' 1
 apply 03-gen.c 'xform_mod_node[1024]' 'xform_mod_node[64]' 1
 apply 03-gen.c 'xform_mod_var[1024]' 'xform_mod_var[64]' 1
 apply 03-gen.c 'xform_mod_delta[1024]' 'xform_mod_delta[64]' 1
