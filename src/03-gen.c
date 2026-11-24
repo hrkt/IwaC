@@ -757,6 +757,11 @@ static int loop_plan_one(int node) {
  * 外側の有効なループが使っているポインタ数 */
 static int plan_assigned;
 static int plan_max_end;
+/* レジスタートレードオフ (v59): 見回りの状態。
+ * 見回り中はポインタ表へ入れず、予算で落ちる
+ * ループの不足分 (survey_need) だけを数える */
+static int plan_survey;
+static int survey_need;
 
 static void loop_plan_visit(int head, int enclosing) {
     for (int s = head; s != -1; s = node_next[s]) {
@@ -773,7 +778,19 @@ static void loop_plan_visit(int head, int enclosing) {
                    k == NODE_FOR) {
             int np = loop_plan_one(s);
             int add = 0;
-            if (np > 0 &&
+            if (plan_survey) {
+                /* 見回り (v59): 不足分 = そのループと
+                 * 祖先の np の合計 - 空き席、の最大値。
+                 * enclosing は祖先の np の合計として
+                 * 渡ってくる (上限の見積もり) */
+                if (np > 0) {
+                    int need = enclosing + np -
+                        (11 - plan_assigned);
+                    if (need > survey_need)
+                        survey_need = need;
+                    add = np;
+                }
+            } else if (np > 0 &&
                 plan_assigned + enclosing + np <= 11 &&
                 xform_nloops < 256 &&
                 xform_nptrs + np <= 512) {
@@ -864,6 +881,82 @@ static void func_reg_plan(int f) {
         assigned = assigned + 1;
     }
     func_saved_regs[f] = assigned;
+    /* レジスタートレードオフ (v59、設計は
+     * doc/reg-tradeoff.md): 割り付けが場所を
+     * 使い切って歩くポインタが入らないとき、
+     * 帰納変数ではない割り付けを参照の少ない
+     * 順に最大2個外し、席を詰め直してポインタに
+     * 明け渡す。まず見回りで不足分を数える
+     * (変更箇所の記録は見回りの副作用で残り、
+     * 外す相手の判定に使う) */
+    if (assigned > 0) {
+        int mark = xform_nmods;
+        plan_f = f;
+        plan_assigned = assigned;
+        plan_survey = 1;
+        survey_need = 0;
+        loop_plan_visit(func_body[f], 0);
+        plan_survey = 0;
+        if (survey_need > 0) {
+            int want = survey_need;
+            if (want > 2)
+                want = 2;
+            int evicted = 0;
+            while (evicted < want) {
+                int best = -1;
+                for (v = 0; v < nvar; v++) {
+                    if (var_owner[v] != f ||
+                        var_reg[v] == 0)
+                        continue;
+                    /* 帰納変数は外さない (ループの
+                     * 中で毎周触るので、メモリへ
+                     * 落とす損がポインタの得を
+                     * 食い潰す) */
+                    int is_ind = 0;
+                    for (int e = mark;
+                         e < xform_nmods; e++) {
+                        if (xform_mod_var[e] == v)
+                            is_ind = 1;
+                    }
+                    if (is_ind)
+                        continue;
+                    if (best < 0 ||
+                        var_refcount[v] <
+                            var_refcount[best] ||
+                        (var_refcount[v] ==
+                             var_refcount[best] &&
+                         var_reg[v] > var_reg[best]))
+                        best = v;
+                }
+                if (best < 0)
+                    break;
+                var_reg[best] = 0;
+                evicted = evicted + 1;
+            }
+            if (evicted > 0) {
+                /* 席を詰め直す: 序文・終文は
+                 * saved_reg_no(0..本数-1) を連続で
+                 * 退避する決まりなので、穴を残せない。
+                 * レジスタ番号の大小は割り付け順と
+                 * 一致する (s1=9、s2..s11=18..27) ので、
+                 * 番号の小さい順に詰めれば順序が保てる */
+                int slot = 0;
+                for (int s2 = 0; s2 < assigned; s2++) {
+                    for (v = 0; v < nvar; v++) {
+                        if (var_owner[v] == f &&
+                            var_reg[v] ==
+                                saved_reg_no(s2)) {
+                            var_reg[v] =
+                                saved_reg_no(slot);
+                            slot = slot + 1;
+                        }
+                    }
+                }
+                assigned = slot;
+                func_saved_regs[f] = assigned;
+            }
+        }
+    }
     /* ループ最適化 (v57): 歩くポインタの計画。
      * 退避本数が増えることがある */
     loop_plan(f, assigned);

@@ -3219,6 +3219,112 @@ EOF
 "$IWAC" "$TMP/v58c.c" > "$TMP/v58c.bin"
 check_tail "$TMP/v58c.bin" "16384 1073741824 2147483647 -2147483648 1 115 16384 610 11 55 42 2 7 33 42 65 42 1110 1510" "v58: インライン化の機能一式"
 
+# --- v59: レジスタートレードオフ (設計は doc/reg-tradeoff.md) ---
+# 割り付けが 11 本満杯でも、帰納変数でない割り付けを
+# 外して歩くポインタが入ること (ポインタの前進
+# addi r r 0 8 が 1 か所出る。v58 では 0 か所) と、
+# 外した変数を含めて機能が不変なことを見る
+cat > "$TMP/v59a.c" <<'EOF'
+int g[16];
+int hot(void) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    int d = 4;
+    int e = 5;
+    int f = 6;
+    int h = 7;
+    int j = 8;
+    int k = 9;
+    int l = 10;
+    int m = 11;
+    a = a + 1; a = a + 2; a = a + 3;
+    b = b + 1; b = b + 2; b = b + 3;
+    c = c + 1; c = c + 2; c = c + 3;
+    d = d + 1; d = d + 2; d = d + 3;
+    e = e + 1; e = e + 2; e = e + 3;
+    f = f + 1; f = f + 2; f = f + 3;
+    h = h + 1; h = h + 2; h = h + 3;
+    j = j + 1; j = j + 2; j = j + 3;
+    k = k + 1; k = k + 2; k = k + 3;
+    l = l + 1; l = l + 2; l = l + 3;
+    m = m + 1; m = m + 2; m = m + 3;
+    int i = 0;
+    int s = 0;
+    while (i < 16) {
+        s = s + g[i];
+        i = i + 1;
+    }
+    return s + a + b + c + d + e + f + h + j + k + l + m;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v59a.c" > "$TMP/v59a.txt"
+adv59=$(grep -cE '^i addi ([0-9]+) \1 0 8' "$TMP/v59a.txt" || true)
+if [ "$adv59" -eq 1 ]; then
+    echo "ok: v59: 満杯でも歩くポインタが入る (前進が1か所)"
+else
+    echo "FAIL: v59: ポインタの前進が $adv59 か所 (1のはず)"
+    NG=1
+fi
+# 機能面: synth_granule の形のミニチュア (寄せ集め
+# ループ + m ループ配下の tau 2 連ループで di が
+# 歩く)。割り付け満杯のまま、外した変数の値も
+# 含めて結果が合うこと
+cat > "$TMP/v59b.c" <<'EOF'
+int tab[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+int coef[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+void printint(int v) {
+    if (v >= 10) {
+        printint(v / 10);
+    }
+    putc('0' + v % 10);
+}
+int work(int seed) {
+    int a = seed;
+    int b = seed + 1;
+    int c = seed + 2;
+    int d = seed + 3;
+    int e = seed + 4;
+    int f = seed + 5;
+    int h = seed + 6;
+    int j = seed + 7;
+    int k = seed + 8;
+    int l = seed + 9;
+    a = a + b; a = a + c; a = a + d;
+    b = b + e; b = b + f; b = b + h;
+    c = c + j; c = c + k; c = c + l;
+    int i = 0;
+    int s = 0;
+    while (i < 16) {
+        s = s + tab[i];
+        i = i + 1;
+    }
+    int m = 0;
+    while (m < 4) {
+        int di = 0;
+        int tau = 0;
+        while (tau <= m) {
+            s = s + coef[di];
+            di = di + 1;
+            tau = tau + 1;
+        }
+        while (tau < 8) {
+            s = s + coef[di];
+            di = di + 1;
+            tau = tau + 1;
+        }
+        m = m + 1;
+    }
+    return s + a + b + c;
+}
+int main(void) {
+    printint(work(3));
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v59b.c" > "$TMP/v59b.bin"
+check_tail "$TMP/v59b.bin" "364" "v59: トレードオフ後の機能一式"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに
