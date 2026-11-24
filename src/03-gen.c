@@ -141,6 +141,22 @@ static int OP_ORI = 63;       /* ori (v55): 即値との OR。
                                * funct3 は 6 */
 static int OP_SLTI = 64;      /* slti (v55): 即値との符号付き
                                * 比較。funct3 は 2 */
+static int OP_ADDW = 65;      /* addw (v60): 32ビット加算。
+                               * R 形式、opcode 0x3B、funct3 は 0。
+                               * 結果は符号拡張される */
+static int OP_SUBW = 66;      /* subw (v60): funct7 が 0x20 */
+static int OP_MULW = 67;      /* mulw (v60): M 拡張、funct7 が
+                               * 1、funct3 は 0 */
+static int OP_DIVW = 68;      /* divw (v60): funct3 は 4 */
+static int OP_REMW = 69;      /* remw (v60): funct3 は 6 */
+static int OP_SLLW = 70;      /* sllw (v60): funct3 は 1。
+                               * シフト量は下位5ビット */
+static int OP_SRAW = 71;      /* sraw (v60): funct7 が 0x20、
+                               * funct3 は 5 */
+static int OP_SLLIW = 72;     /* slliw (v60): I 形式、opcode
+                               * 0x1B、funct3 は 1 */
+static int OP_SRAIW = 73;     /* sraiw (v60): funct3 は 5、
+                               * 即値の上位に funct7 (0x20) */
 
 /* 命令表の上限は 24576 (v39 で 40960 → 49152、
  * v44 で → 57344、v45 で → 59392 と増量し、
@@ -1472,6 +1488,16 @@ static void emit_canon(int et) {
         asm_push(OP_SRAI, REG_T1, REG_T1, 0, sh);
 }
 
+/* 結果の型が「符号つき・幅つき・32ビット」か (v60、
+ * 設計は doc/wform.md)。この形の演算は W 形式命令が
+ * 下位32ビットで計算して符号拡張まで済ませるので、
+ * 64ビット演算 + emit_canon のペアを 1 命令にできる。
+ * W 形式は相手の下位32ビットしか見ないため、相手の
+ * 正規形の形 (符号拡張か 0 埋めか) は問わない */
+static int et_is_s32(int et) {
+    return (et & 48) == 32 && (et & 15) == 4;
+}
+
 /* 整数と double の変換 (fcvt) と、double の真偽化の
  * 本体は src/03b-genfp.c にある (前方宣言だけを元の
  * 位置に残す) */
@@ -2415,8 +2441,13 @@ static int gen_expr(int node) {
             asm_push(OP_FNEG_D, REG_FT0, REG_FT0, REG_FT0, 0);
             return 1;
         }
-        asm_push(OP_SUB, REG_T1, REG_ZERO, REG_T1, 0);
-        emit_canon(node_etype[node]);
+        /* 符号つき int32 は subw 1 命令 (v60) */
+        if (et_is_s32(node_etype[node])) {
+            asm_push(OP_SUBW, REG_T1, REG_ZERO, REG_T1, 0);
+        } else {
+            asm_push(OP_SUB, REG_T1, REG_ZERO, REG_T1, 0);
+            emit_canon(node_etype[node]);
+        }
         return 1;
     }
     if (node_kind[node] == NODE_ADDR) {
@@ -2465,8 +2496,14 @@ static int gen_expr(int node) {
              * 大きな歩幅のとき emit_add_step が a0 を
              * 使うが、この経路では a0 は使わない */
             int sreg = var_reg[node_val[node]];
-            emit_add_step(REG_T1, sreg, vstep);
-            emit_canon(vet);
+            /* 符号つき int32 は addiw で正規化まで済む (v60) */
+            if (et_is_s32(vet) && vstep >= -2048 &&
+                vstep <= 2047) {
+                asm_push(OP_ADDIW, REG_T1, sreg, 0, vstep);
+            } else {
+                emit_add_step(REG_T1, sreg, vstep);
+                emit_canon(vet);
+            }
             if (pre) {
                 asm_push(OP_ADDI, sreg, REG_T1, 0, 0);
             } else {
@@ -2501,8 +2538,13 @@ static int gen_expr(int node) {
         asm_push((vet & 32) ? mem_load_op(vet) : OP_LD,
                  REG_T1, REG_T2, 0, 0);
         if (pre) {
-            emit_add_step(REG_T1, REG_T1, vstep);
-            emit_canon(vet);
+            if (et_is_s32(vet) && vstep >= -2048 &&
+                vstep <= 2047) {
+                asm_push(OP_ADDIW, REG_T1, REG_T1, 0, vstep);
+            } else {
+                emit_add_step(REG_T1, REG_T1, vstep);
+                emit_canon(vet);
+            }
             asm_push((vet & 32) ? mem_store_op(vet) : OP_SD,
                      0, REG_T2, REG_T1, 0);
         } else {
@@ -2550,8 +2592,13 @@ static int gen_expr(int node) {
         if (epes > 1)
             estep = estep * epes;
         if (node_kind[node] == NODE_EPRE) {
-            emit_add_step(REG_T1, REG_T1, estep);
-            emit_canon(eet);
+            if (et_is_s32(eet) && estep >= -2048 &&
+                estep <= 2047) {
+                asm_push(OP_ADDIW, REG_T1, REG_T1, 0, estep);
+            } else {
+                emit_add_step(REG_T1, REG_T1, estep);
+                emit_canon(eet);
+            }
             asm_push(mem_store_op(eet), 0, REG_T2, REG_T1, 0);
         } else {
             emit_add_step(REG_A0, REG_T1, estep);
@@ -2605,12 +2652,19 @@ static int gen_expr(int node) {
                (node_etype[rhs] == (8 + 16 + 32));
     int cmpop = ucmp ? OP_SLTU : OP_SLT;
     if (node_kind[node] == NODE_ADD) {
-        asm_push(OP_ADD, REG_T1, REG_T1, REG_T2, 0);
-        if (lpes == 0 && rpes == 0)
+        /* 符号つき int32 は addw 1 命令 (v60) */
+        int w32 = et_is_s32(node_etype[node]) &&
+                  lpes == 0 && rpes == 0;
+        asm_push(w32 ? OP_ADDW : OP_ADD,
+                 REG_T1, REG_T1, REG_T2, 0);
+        if (!w32 && lpes == 0 && rpes == 0)
             emit_canon(node_etype[node]);
     }
     else if (node_kind[node] == NODE_SUB) {
-        asm_push(OP_SUB, REG_T1, REG_T1, REG_T2, 0);
+        int w32 = et_is_s32(node_etype[node]) &&
+                  lpes == 0 && rpes == 0 && pdiff == 0;
+        asm_push(w32 ? OP_SUBW : OP_SUB,
+                 REG_T1, REG_T1, REG_T2, 0);
         if (pdiff > 1) {
             /* バイト差 → 要素数: 2の冪なら算術
              * シフト、それ以外は定数との割り算 */
@@ -2627,41 +2681,69 @@ static int gen_expr(int node) {
                 asm_push(OP_DIV, REG_T1, REG_T1, REG_A0, 0);
             }
         }
-        if (lpes == 0 && rpes == 0)
+        if (!w32 && lpes == 0 && rpes == 0)
             emit_canon(node_etype[node]);
     }
     else if (node_kind[node] == NODE_AND) {
         asm_push(OP_AND, REG_T1, REG_T1, REG_T2, 0);
-        emit_canon(node_etype[node]);
+        /* ビット演算は、正規形同士なら結果も正規形
+         * (符号ビット同士の演算が拡張と一致する)。
+         * 両辺とも符号つき int32 のときだけ正規化を
+         * 省く (v60)。数リテラルは 0 埋めで作られる
+         * ことがあり、その場合は従来どおり要る */
+        if (!(et_is_s32(node_etype[node]) &&
+              et_is_s32(node_etype[node_lhs[node]]) &&
+              et_is_s32(node_etype[node_rhs[node]])))
+            emit_canon(node_etype[node]);
     }
     else if (node_kind[node] == NODE_MUL) {
-        asm_push(OP_MUL, REG_T1, REG_T1, REG_T2, 0);
-        emit_canon(node_etype[node]);
+        int w32 = et_is_s32(node_etype[node]);
+        asm_push(w32 ? OP_MULW : OP_MUL,
+                 REG_T1, REG_T1, REG_T2, 0);
+        if (!w32)
+            emit_canon(node_etype[node]);
     }
     else if (node_kind[node] == NODE_DIV)
         /* 割り算は型の符号で命令を出す (v35)。結果は
-         * 正規形の範囲に収まるので正規化は要らない */
-        asm_push((node_etype[node] & 48) == 48 ? OP_DIVU : OP_DIV,
+         * 正規形の範囲に収まるので正規化は要らない。
+         * 符号つき int32 は divw (v60): 64ビットの
+         * div では INT_MIN / -1 が溢れて正規形から
+         * 外れるが、divw は 32 ビットで折り返す */
+        asm_push((node_etype[node] & 48) == 48 ? OP_DIVU :
+                 et_is_s32(node_etype[node]) ? OP_DIVW : OP_DIV,
                  REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_MOD)
-        asm_push((node_etype[node] & 48) == 48 ? OP_REMU : OP_REM,
+        asm_push((node_etype[node] & 48) == 48 ? OP_REMU :
+                 et_is_s32(node_etype[node]) ? OP_REMW : OP_REM,
                  REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_SHL) {
-        asm_push(OP_SLL, REG_T1, REG_T1, REG_T2, 0);
-        emit_canon(node_etype[node]);
+        int w32 = et_is_s32(node_etype[node]);
+        asm_push(w32 ? OP_SLLW : OP_SLL,
+                 REG_T1, REG_T1, REG_T2, 0);
+        if (!w32)
+            emit_canon(node_etype[node]);
     }
     else if (node_kind[node] == NODE_SHR)
         /* >> は型の符号で出す (v35): 符号なしは論理
-         * シフト、それ以外は算術シフト (符号を保つ) */
-        asm_push((node_etype[node] & 48) == 48 ? OP_SRL : OP_SRA,
+         * シフト、それ以外は算術シフト (符号を保つ)。
+         * 符号つき int32 は sraw (v60、シフト量は
+         * 下位5ビット = int32 の意味どおり) */
+        asm_push((node_etype[node] & 48) == 48 ? OP_SRL :
+                 et_is_s32(node_etype[node]) ? OP_SRAW : OP_SRA,
                  REG_T1, REG_T1, REG_T2, 0);
     else if (node_kind[node] == NODE_OR) {
         asm_push(OP_OR, REG_T1, REG_T1, REG_T2, 0);
-        emit_canon(node_etype[node]);
+        if (!(et_is_s32(node_etype[node]) &&
+              et_is_s32(node_etype[node_lhs[node]]) &&
+              et_is_s32(node_etype[node_rhs[node]])))
+            emit_canon(node_etype[node]);
     }
     else if (node_kind[node] == NODE_XOR) {
         asm_push(OP_XOR, REG_T1, REG_T1, REG_T2, 0);
-        emit_canon(node_etype[node]);
+        if (!(et_is_s32(node_etype[node]) &&
+              et_is_s32(node_etype[node_lhs[node]]) &&
+              et_is_s32(node_etype[node_rhs[node]])))
+            emit_canon(node_etype[node]);
     }
     else if (node_kind[node] == NODE_LT)
         /* slt: 左 (t1) < 右 (t2) なら 1 */
@@ -2802,20 +2884,43 @@ static int gen_imm_binop(int node) {
     int canon = 1;
     int mode = 0;  /* 0 = t1 への即値命令、1 = 0 を置く、
                     * 2 = 演算なし (1 倍) */
+    int s32 = et_is_s32(node_etype[node]);
     if (k == NODE_ADD && c <= 2047) {
-        op = OP_ADDI; imm = (int)c;
+        /* 符号つき int32 は addiw で正規化まで済む (v60) */
+        op = s32 ? OP_ADDIW : OP_ADDI; imm = (int)c;
+        if (s32)
+            canon = 0;
     } else if (k == NODE_SUB && c <= 2048) {
-        op = OP_ADDI; imm = (int)-c;
+        op = s32 ? OP_ADDIW : OP_ADDI; imm = (int)-c;
+        if (s32)
+            canon = 0;
     } else if (k == NODE_AND && c <= 2047) {
         op = OP_ANDI; imm = (int)c;
+        /* 即値の符号拡張と左辺の正規形の組み合わせで
+         * 結果は常に正規形になる (v60) */
+        if (s32)
+            canon = 0;
     } else if (k == NODE_OR && c <= 2047) {
         op = OP_ORI; imm = (int)c;
+        if (s32)
+            canon = 0;
     } else if (k == NODE_XOR && c <= 2047) {
         op = OP_XORI; imm = (int)c;
+        if (s32)
+            canon = 0;
     } else if (k == NODE_SHL && c <= 63) {
-        op = OP_SLLI; imm = (int)c;
+        if (s32 && c <= 31) {
+            op = OP_SLLIW; canon = 0;
+        } else {
+            op = OP_SLLI;
+        }
+        imm = (int)c;
     } else if (k == NODE_SHR && c <= 63) {
-        op = ((node_etype[node] & 48) == 48) ? OP_SRLI : OP_SRAI;
+        if (s32 && c <= 31) {
+            op = OP_SRAIW;
+        } else {
+            op = ((node_etype[node] & 48) == 48) ? OP_SRLI : OP_SRAI;
+        }
         imm = (int)c; canon = 0;
     } else if (k == NODE_LT && c <= 2047) {
         int ucmp = (node_etype[node_lhs[node]] == (8 + 16 + 32)) ||
@@ -2827,9 +2932,14 @@ static int gen_imm_binop(int node) {
     } else if (k == NODE_MUL && c == 1) {
         mode = 2;
     } else if (k == NODE_MUL && c > 1 && (c & (c - 1)) == 0) {
-        op = OP_SLLI; imm = 0;
+        imm = 0;
         while ((1L << imm) < c)
             imm++;
+        if (s32) {
+            op = OP_SLLIW; canon = 0;
+        } else {
+            op = OP_SLLI;
+        }
     } else {
         return 0;
     }

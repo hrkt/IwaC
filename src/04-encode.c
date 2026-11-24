@@ -141,6 +141,66 @@ static unsigned int encode_inst(int i) {
                ((unsigned int)rs1 << 15) | (4u << 12) |
                ((unsigned int)rd << 7) | 0x33u;
     }
+    if (op == OP_ADDW) {
+        /* addw rd, rs1, rs2 -- R 形式 (v60)。W 形式は
+         * opcode が 0x3B で、下位32ビットで計算して
+         * 結果を符号拡張する。funct3 は 0 */
+        return ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x3Bu;
+    }
+    if (op == OP_SUBW) {
+        /* subw (v60): addw との違いは funct7 が 0x20 */
+        return (0x20u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x3Bu;
+    }
+    if (op == OP_MULW) {
+        /* mulw (v60): M 拡張、funct7 が 1、funct3 は 0 */
+        return (1u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) |
+               ((unsigned int)rd << 7) | 0x3Bu;
+    }
+    if (op == OP_DIVW) {
+        /* divw (v60): funct7 が 1、funct3 は 4 */
+        return (1u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (4u << 12) |
+               ((unsigned int)rd << 7) | 0x3Bu;
+    }
+    if (op == OP_REMW) {
+        /* remw (v60): funct7 が 1、funct3 は 6 */
+        return (1u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (6u << 12) |
+               ((unsigned int)rd << 7) | 0x3Bu;
+    }
+    if (op == OP_SLLW) {
+        /* sllw (v60): funct3 は 1。シフト量は rs2 の
+         * 下位5ビット (32ビット幅の決まり) */
+        return ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (1u << 12) |
+               ((unsigned int)rd << 7) | 0x3Bu;
+    }
+    if (op == OP_SRAW) {
+        /* sraw (v60): funct7 が 0x20、funct3 は 5 */
+        return (0x20u << 25) | ((unsigned int)rs2 << 20) |
+               ((unsigned int)rs1 << 15) | (5u << 12) |
+               ((unsigned int)rd << 7) | 0x3Bu;
+    }
+    if (op == OP_SLLIW) {
+        /* slliw rd, rs1, shamt -- I 形式 (v60)。
+         * opcode が 0x1B で funct3 は 1。シフト量は
+         * 5 ビット */
+        return ((unsigned int)(imm & 31) << 20) |
+               ((unsigned int)rs1 << 15) | (1u << 12) |
+               ((unsigned int)rd << 7) | 0x1Bu;
+    }
+    if (op == OP_SRAIW) {
+        /* sraiw (v60): funct3 は 5 で、即値の上位に
+         * funct7 (0x20) が入る (srai の W 版) */
+        return ((unsigned int)(0x400 | (imm & 31)) << 20) |
+               ((unsigned int)rs1 << 15) | (5u << 12) |
+               ((unsigned int)rd << 7) | 0x1Bu;
+    }
     if (op == OP_AND) {
         /* and rd, rs1, rs2 -- R 形式。add との違いは funct3 が 7 */
         return ((unsigned int)rs2 << 20) | ((unsigned int)rs1 << 15) |
@@ -737,6 +797,15 @@ static char *op_name(int op) {
     if (op == OP_BGE) return "bge";
     if (op == OP_BLTU) return "bltu";
     if (op == OP_BGEU) return "bgeu";
+    if (op == OP_ADDW) return "addw";
+    if (op == OP_SUBW) return "subw";
+    if (op == OP_MULW) return "mulw";
+    if (op == OP_DIVW) return "divw";
+    if (op == OP_REMW) return "remw";
+    if (op == OP_SLLW) return "sllw";
+    if (op == OP_SRAW) return "sraw";
+    if (op == OP_SLLIW) return "slliw";
+    if (op == OP_SRAIW) return "sraiw";
     if (op == OP_ANDI) return "andi";
     if (op == OP_ORI) return "ori";
     if (op == OP_SLTI) return "slti";

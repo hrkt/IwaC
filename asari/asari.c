@@ -110,10 +110,19 @@ static int OP_BGEU = 61;
 static int OP_ANDI = 62;
 static int OP_ORI = 63;
 static int OP_SLTI = 64;
+static int OP_ADDW = 65;
+static int OP_SUBW = 66;
+static int OP_MULW = 67;
+static int OP_DIVW = 68;
+static int OP_REMW = 69;
+static int OP_SLLW = 70;
+static int OP_SRAW = 71;
+static int OP_SLLIW = 72;
+static int OP_SRAIW = 73;
 
 /* op の名前 → 番号。名前の表は iwac 本体の
  * op_name (src/04-encode.c) と対になる */
-static char *op_names[72];  /* OP の最大 (64 = OP_SLTI) + 余り */
+static char *op_names[80];  /* OP の最大 (73 = OP_SRAIW) + 余り */
 static int op_inited;
 static void op_init(void) {
     op_names[OP_LUI] = "lui";
@@ -181,6 +190,15 @@ static void op_init(void) {
     op_names[OP_ANDI] = "andi";
     op_names[OP_ORI] = "ori";
     op_names[OP_SLTI] = "slti";
+    op_names[OP_ADDW] = "addw";
+    op_names[OP_SUBW] = "subw";
+    op_names[OP_MULW] = "mulw";
+    op_names[OP_DIVW] = "divw";
+    op_names[OP_REMW] = "remw";
+    op_names[OP_SLLW] = "sllw";
+    op_names[OP_SRAW] = "sraw";
+    op_names[OP_SLLIW] = "slliw";
+    op_names[OP_SRAIW] = "sraiw";
     op_inited = 1;
 }
 
@@ -626,6 +644,32 @@ static long encode_inst(int i) {
     } else if (op == OP_SUB) {
         w = (0x20 << 25) | (rs2 << 20) | (rs1 << 15) |
             (rd << 7) | 0x33;
+    } else if (op == OP_ADDW) {
+        w = (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x3B;
+    } else if (op == OP_SUBW) {
+        w = (0x20 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (rd << 7) | 0x3B;
+    } else if (op == OP_MULW) {
+        w = (1 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (rd << 7) | 0x3B;
+    } else if (op == OP_DIVW) {
+        w = (1 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (4 << 12) | (rd << 7) | 0x3B;
+    } else if (op == OP_REMW) {
+        w = (1 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (6 << 12) | (rd << 7) | 0x3B;
+    } else if (op == OP_SLLW) {
+        w = (rs2 << 20) | (rs1 << 15) | (1 << 12) |
+            (rd << 7) | 0x3B;
+    } else if (op == OP_SRAW) {
+        w = (0x20 << 25) | (rs2 << 20) | (rs1 << 15) |
+            (5 << 12) | (rd << 7) | 0x3B;
+    } else if (op == OP_SLLIW) {
+        w = ((imm & 31) << 20) | (rs1 << 15) | (1 << 12) |
+            (rd << 7) | 0x1B;
+    } else if (op == OP_SRAIW) {
+        w = ((0x400 | (imm & 31)) << 20) | (rs1 << 15) |
+            (5 << 12) | (rd << 7) | 0x1B;
     } else if (op == OP_AND) {
         w = (rs2 << 20) | (rs1 << 15) | (7 << 12) |
             (rd << 7) | 0x33;

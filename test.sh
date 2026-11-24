@@ -3370,6 +3370,52 @@ else
     echo "FAIL: v59: 前進が $adv59c か所 (0のはず)"
     NG=1
 fi
+# v60: int32 の W 形式化。境界の折り返しが
+# 32 ビットの意味どおりになることを、ビット
+# 和のチェックサムで見る (全部立って 1023)
+cat > "$TMP/v60a.c" <<'EOF'
+void pn(int n) {
+    if (n >= 10) pn(n / 10);
+    putc(48 + (n % 10));
+}
+int main() {
+    int r = 0;
+    int32 a = 2147483647;
+    int32 b = -2147483647 - 1;
+    if (a + 1 < 0) r = r + 1;
+    if (b - 1 > 0) r = r + 2;
+    if (-b < 0) r = r + 4;
+    if (b / -1 == b) r = r + 8;
+    if (b % -1 == 0) r = r + 16;
+    int32 x = 65536;
+    if (x * x == 0) r = r + 32;
+    int32 z = 100000;
+    if (z * z == 1410065408) r = r + 64;
+    int32 s = 1;
+    if ((s << 31) < 0) r = r + 128;
+    if ((b >> 31) == -1) r = r + 256;
+    if ((a & b) == 0) r = r + 512;
+    pn(r);
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v60a.c" > "$TMP/v60a.bin"
+check_tail "$TMP/v60a.bin" "1023" "v60: W形式の境界一式"
+# W 形式の命令が実際に出ていることを Asari
+# テキストで見る
+cat > "$TMP/v60b.c" <<'EOF'
+int32 f(int32 a, int32 b) {
+    return a + b * 2 - (a << 1);
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v60b.c" > "$TMP/v60b.txt"
+w60=$(grep -c '^i addw ' "$TMP/v60b.txt" || true)
+if [ "$w60" -ge 1 ]; then
+    echo "ok: v60: addw が出ている"
+else
+    echo "FAIL: v60: addw が無い"
+    NG=1
+fi
 
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
