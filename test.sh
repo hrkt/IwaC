@@ -3324,6 +3324,52 @@ int main(void) {
 EOF
 "$IWAC" "$TMP/v59b.c" > "$TMP/v59b.bin"
 check_tail "$TMP/v59b.bin" "364" "v59: トレードオフ後の機能一式"
+# 全ての割り付けがループの中で参照される関数では
+# 明け渡しをしない (実測の教訓: ループ内で熱い
+# 変数を外すと逆効果)。ポインタの前進が出ない
+# ことで見る
+cat > "$TMP/v59c.c" <<'EOF'
+int g[16];
+int allhot(void) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    int d = 4;
+    int e = 5;
+    int f = 6;
+    int h = 7;
+    int j = 8;
+    int k = 9;
+    int l = 10;
+    int m = 11;
+    a = a + 1; a = a + 2; a = a + 3;
+    b = b + 1; b = b + 2; b = b + 3;
+    c = c + 1; c = c + 2; c = c + 3;
+    d = d + 1; d = d + 2; d = d + 3;
+    e = e + 1; e = e + 2; e = e + 3;
+    f = f + 1; f = f + 2; f = f + 3;
+    h = h + 1; h = h + 2; h = h + 3;
+    j = j + 1; j = j + 2; j = j + 3;
+    k = k + 1; k = k + 2; k = k + 3;
+    l = l + 1; l = l + 2; l = l + 3;
+    m = m + 1; m = m + 2; m = m + 3;
+    int i = 0;
+    int s = 0;
+    while (i < 16) {
+        s = s + g[i] + a + b + c + d + e + f + h + j + k + l + m;
+        i = i + 1;
+    }
+    return s;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v59c.c" > "$TMP/v59c.txt"
+adv59c=$(grep -cE '^i addi ([0-9]+) \1 0 8' "$TMP/v59c.txt" || true)
+if [ "$adv59c" -eq 0 ]; then
+    echo "ok: v59: 全員がループ内で熱いと明け渡しをしない"
+else
+    echo "FAIL: v59: 前進が $adv59c か所 (0のはず)"
+    NG=1
+fi
 
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と

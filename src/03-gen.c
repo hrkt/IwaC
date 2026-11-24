@@ -471,6 +471,19 @@ static char scan_besz[8];
 static int scan_cand[24];
 static int scan_ncand;
 
+/* トレードオフの見回り用: ループの中で参照される
+ * 変数の印 (ビット集合。変数表 1280 件分でも
+ * 160 バイトで収まる)。scan_mark_hot が立って
+ * いる間の loop_scan が立てる */
+static char evict_hot_bits[160];
+static int scan_mark_hot;
+
+static int evict_is_hot(int v) {
+    if (v < 0 || v >= 1280)
+        return 0;
+    return (evict_hot_bits[v >> 3] >> (v & 7)) & 1;
+}
+
 /* 変更される変数を候補として控える (取りこぼしは
  * 安全側: 最適化を諦めるだけ) */
 static void scan_add_cand(int v) {
@@ -596,6 +609,18 @@ static void loop_scan(int node) {
     if (node < 0)
         return;
     int k = node_kind[node];
+    if (scan_mark_hot &&
+        (k == NODE_VAR || k == NODE_ASSIGN ||
+         k == NODE_PREINC || k == NODE_POSTINC ||
+         k == NODE_PREDEC || k == NODE_POSTDEC)) {
+        /* 見回り中: この部分木 (= ループの中) で
+         * 参照・変更される変数に印を付ける */
+        int hv = node_val[node];
+        if (hv >= 0 && hv < 1280)
+            evict_hot_bits[hv >> 3] =
+                (char)(evict_hot_bits[hv >> 3] |
+                       (1 << (hv & 7)));
+    }
     if (k == NODE_ASSIGN) {
         if (scan_var < 0)
             scan_add_cand(node_val[node]);
@@ -895,7 +920,11 @@ static void func_reg_plan(int f) {
         plan_assigned = assigned;
         plan_survey = 1;
         survey_need = 0;
+        for (int b = 0; b < 160; b++)
+            evict_hot_bits[b] = 0;
+        scan_mark_hot = 1;
         loop_plan_visit(func_body[f], 0);
+        scan_mark_hot = 0;
         plan_survey = 0;
         if (survey_need > 0) {
             int want = survey_need;
@@ -919,6 +948,15 @@ static void func_reg_plan(int f) {
                             is_ind = 1;
                     }
                     if (is_ind)
+                        continue;
+                    /* ループの中で参照される変数も
+                     * 外さない (v59 の実測の教訓:
+                     * 静的な参照回数が少なくても、
+                     * 参照がループの中にあれば動的な
+                     * 交通が多く、メモリへ落とす損が
+                     * ポインタの得を食い潰す。
+                     * doc/reg-tradeoff.md の実測節) */
+                    if (evict_is_hot(v))
                         continue;
                     if (best < 0 ||
                         var_refcount[v] <
