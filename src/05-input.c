@@ -99,7 +99,8 @@ static int load_file(char *path) {
 static char *load_failed_name;
 
 /* 複数のファイルを順につないで src_buf へ読む (v17)。
- * 境目には改行を1つ挟む (トークンがくっつかないように)。
+ * 境目には改行と印コメントを挟む (トークンが
+ * くっつかないように + ファイル番号の境目、v58)。
  * こちらは全ファイルが必須: 1つでも開けなければ 0 を
  * 返し、名前を load_failed_name に置く。読みの失敗は -1 */
 static int load_files(char **paths, int count) {
@@ -107,11 +108,16 @@ static int load_files(char **paths, int count) {
     load_failed_name = 0;
     for (int i = 0; i < count; i++) {
         if (used > 0) {
-            if (used >= 475135) {
+            if (used >= 475120) {
                 errmsg = "ファイルが大きすぎます (約464KBまで)";
                 return -1;
             }
-            src_buf[used++] = '\n';
+            /* 境目には改行と、ファイル番号を進める
+             * 印コメント (v58、02-parse の skip_spaces
+             * が見る) を挟む */
+            char *sep = "\n/*iwac:file*/\n";
+            for (int j = 0; sep[j] != '\0'; j++)
+                src_buf[used++] = sep[j];
         }
         int r = append_file(paths[i], &used);
         if (r == 0) {

@@ -819,11 +819,21 @@ static void loop_plan(int f, int assigned) {
         func_saved_regs[f] = plan_max_end;
 }
 
+/* インライン化 (v58): 本体は 03-geninl.c。
+ * func_reg_plan の頭で計画し、gen_expr の呼び出しで
+ * 展開する (設計は doc/inline.md) */
+static void inline_plan(int f);
+static int inline_find(int node);
+static int gen_inline_call(int node, int ie);
+
 /* 関数 f の割り付け計画 (一度だけ作り、使い回す) */
 static void func_reg_plan(int f) {
     if (f < 0 || reg_plan_done[f])
         return;
     reg_plan_done[f] = 1;
+    /* インライン化 (v58): 複製変数でフレームが
+     * 増えるので、割り付けより先に計画する */
+    inline_plan(f);
     func_saved_regs[f] = 0;
     if (func_body[f] < 0)
         return;  /* 宣言だけの関数 */
@@ -2013,6 +2023,16 @@ static int gen_expr(int node) {
         return 1;
     }
     if (node_kind[node] == NODE_CALL) {
+        /* インライン化 (v58): 計画で展開が決まって
+         * いる呼び出しは、本体をその場に広げる。
+         * 展開の生成が深くなりすぎたとき (引数の中の
+         * 呼び出しが重なったとき) は inline_find が
+         * -1 を返し、通常の呼び出しに落ちる */
+        {
+            int ie = inline_find(node);
+            if (ie >= 0)
+                return gen_inline_call(node, ie);
+        }
         if (call_b_mode(func_sig[node_val[node]])) {
             /* B 方式 (v45): 構造体が絡む呼び出し。
              * 構造体の戻り値は式の値にはならないので、

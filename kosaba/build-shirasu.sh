@@ -81,11 +81,11 @@ apply 02-parse.c 'str_pool[24576]' 'str_pool[4096]' 1
 apply 02-parse.c '[12288]' '[2048]' 6
 apply 02-parse.c 'nnode >= 12288' 'nnode >= 2048' 1
 apply 02-parse.c 'str_used >= 24575' 'str_used >= 4095' 1
-apply 02-parse.c '[1280]' '[256]' 11
+apply 02-parse.c '[1280]' '[256]' 12
 apply 02-parse.c '[1024]' '[256]' 3
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 256' 1
 apply 02-parse.c 'fp_nbits >= 1024' 'fp_nbits >= 256' 1
-apply 02-parse.c 'nvar >= 1280' 'nvar >= 256' 1
+apply 02-parse.c 'nvar >= 1280' 'nvar >= 256' 2
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[1024]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
 # 03-gen.c: 命令表 (5つ+緩和の印)。パッチ表は v49 で
@@ -98,7 +98,8 @@ apply 03-genstmt.c 'i < 24576' 'i < 4096' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)。
 # エラー表示の数字も合わせる (2か所)
 apply 05-input.c 'src_buf[475136]' 'src_buf[32768]' 1
-apply 05-input.c '475135' '32767' 4
+apply 05-input.c '475135' '32767' 3
+apply 05-input.c '475120' '32752' 1
 apply 05-input.c '約464KBまで' '約32KBまで' 3
 # 06-preproc.c: 展開バッファと上限のガード。#define の表は
 # 標準は利用者分 64 + 定義済み 2 = 66 だが、iwac 自身の

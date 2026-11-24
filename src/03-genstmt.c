@@ -586,6 +586,21 @@ static int gen_stmt(int node) {
             errmsg = "return は関数の中でだけ使えます";
             return 0;
         }
+        if (inl_depth > 0) {
+            /* インライン展開の中の return (v58):
+             * 値を戻り値変数へ書き、展開の終端へ
+             * 跳ぶ (gen_inline_call が後始末する) */
+            if (node_lhs[node] >= 0) {
+                int rv = inl_ret_var[inl_depth - 1];
+                if (!gen_value_as(node_lhs[node],
+                                  var_etype[rv]))
+                    return 0;
+                gen_store_var(rv, REG_T1,
+                              node_etype[node_lhs[node]]);
+            }
+            emit_patch_jump(&inl_patch_head[inl_depth - 1]);
+            return 1;
+        }
         if (gen_cur_func >= 0 &&
             func_ret_struct[gen_cur_func] > 0) {
             /* 構造体の値返し (v45): sret (fp の真上、
@@ -1567,6 +1582,10 @@ static int gen_all(void) {
  *   2回目: 確定した住所で作り直す。これが最終成果になる */
 static int gen_program(void) {
     code_insts = 0;
+    /* インライン化 (v58): 生成の前に一括で計画する
+     * (複製変数でフレームが増えるため、どの関数の
+     * 生成よりも先に済ませる) */
+    inline_plan_all();
     /* 宣言だけで定義のない関数が呼ばれていたら、ここで
      * 止める (v24)。行き先のない呼び出しは作れない。
      * 外部の関数は、ソースの連結で定義が一緒に入って

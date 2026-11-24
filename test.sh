@@ -828,11 +828,11 @@ echo "ok: v33: 再宣言は合併し、初期値の二重は止まる"
 # TU 基準化で一括セルフコンパイルが上限超えになった
 # ため引退した
 if [ -x "$TMP/nori" ]; then
-    for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+    for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-geninl 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
         "$IWAC" --kosaba --elf "src/decls.c" "src/$f.c" > "$TMP/v33-$f.eo" || fail "v33: 断片 $f のオブジェクト化に失敗"
     done
     "$IWAC" --kosaba --elf kosaba/kosaba_rt.c > "$TMP/v33-rt.eo" || fail "v33: rt のオブジェクト化に失敗"
-    "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-02c-fpconv.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-03-genstmt.eo" "$TMP/v33-03b-genfp.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
+    "$TMP/nori" "$TMP/v33-01-head.eo" "$TMP/v33-02-parse.eo" "$TMP/v33-02b-decl.eo" "$TMP/v33-02c-fpconv.eo" "$TMP/v33-03-gen.eo" "$TMP/v33-03-geninl.eo" "$TMP/v33-03-genstmt.eo" "$TMP/v33-03b-genfp.eo" "$TMP/v33-04-encode.eo" "$TMP/v33-05-input.eo" "$TMP/v33-06-preproc.eo" "$TMP/v33-07-main.eo" "$TMP/v33-rt.eo" > "$TMP/v33split.elf" || fail "v33: 分割リンクに失敗"
     size=$(wc -c < "$TMP/v33split.elf")
     [ "$size" -gt 100000 ] || fail "v33: 分割セルフホストの出力が小さすぎる ($size バイト)"
     [ "$size" -lt 1000000 ] || fail "v33: 分割セルフホストの出力が大きすぎる ($size バイト)"
@@ -962,7 +962,7 @@ asari_check() {
     cmp -s "$TMP/v38.eo" "$TMP/v38a.eo" || fail "v38: Asari の出力が内部 encode と違う ($label)"
 }
 asari_check hello examples/hello-kosaba.c
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-geninl 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     asari_check "断片 $f" src/decls.c "src/$f.c"
 done
 echo "ok: v38: Asari が全断片で内部 encode とバイト一致"
@@ -1004,7 +1004,7 @@ elf_check() {
 elf_check hello examples/hello-kosaba.c
 # 全断片 (rt と組でリンクし、一括版と比べる)
 V39_OBJS_EO=""
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-geninl 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$IWAC" --kosaba --elf src/decls.c "src/$f.c" > "$TMP/v39-$f.eo" || fail "v39: 断片 $f の ELF 出力に失敗"
     V39_OBJS_EO="$V39_OBJS_EO $TMP/v39-$f.eo"
 done
@@ -3037,6 +3037,188 @@ EOF
 "$IWAC" "$TMP/v57c.c" > "$TMP/v57c.bin"
 check_tail "$TMP/v57c.bin" "31 55 31 28 33 20 30 25 9 14 335 84" "v57: ループ最適化の機能一式"
 
+# --- v58: インライン化 (設計は doc/inline.md) ---
+# 構造: 対象の呼び出しでは jal が出ないこと。
+# 前置きの jal (main への入口) だけが残る
+cat > "$TMP/v58a.c" <<'EOF'
+int sq(int x) { return x * x; }
+int main() {
+    int s = 0;
+    int i = 0;
+    for (i = 0; i < 4; i++)
+        s = s + sq(i);
+    return s;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v58a.c" > "$TMP/v58a.txt"
+jal58=$(grep -c '^i jal 1 ' "$TMP/v58a.txt" || true)
+if [ "$jal58" -eq 1 ]; then
+    echo "ok: v58: 展開した呼び出しに jal が無い"
+else
+    echo "FAIL: v58: jal が $jal58 か所 (1のはず)"
+    NG=1
+fi
+# 構造: 入れ子 (mulp → sat32) も両段とも広がること
+cat > "$TMP/v58b.c" <<'EOF'
+int32 sat32(int64 v)
+{
+    if (v > 2147483647) {
+        return 2147483647;
+    }
+    if (v < -2147483647 - 1) {
+        return -2147483647 - 1;
+    }
+    return (int32)v;
+}
+int32 mulp(int32 a, int32 c)
+{
+    int64 v;
+    v = ((int64)a * c + ((int64)1 << 29)) >> 30;
+    return sat32(v);
+}
+int32 acc;
+int main()
+{
+    int32 s;
+    int i;
+    s = 0;
+    for (i = 0; i < 100; i++) {
+        s = s + mulp(s + i, 1234567);
+    }
+    acc = s;
+    return 0;
+}
+EOF
+"$IWAC" --kosaba --asari "$TMP/v58b.c" > "$TMP/v58b.txt"
+jal58b=$(grep -c '^i jal 1 ' "$TMP/v58b.txt" || true)
+if [ "$jal58b" -eq 1 ]; then
+    echo "ok: v58: 入れ子の展開でも jal が無い"
+else
+    echo "FAIL: v58: 入れ子の jal が $jal58b か所 (1のはず)"
+    NG=1
+fi
+# 機能面: mulp の飽和・丸め、入れ子の引数、再帰と
+# 相互再帰 (対象外で従来の呼び出し)、ループを含む
+# 本体、ポインタ引数、文としての void 呼び出し、
+# 早期 return、double と配列ローカル (対象外)、
+# 引数を書き換える関数と引数の住所を取る関数
+# (直結されても意味が変わらないこと)
+cat > "$TMP/v58c.c" <<'EOF'
+int32 sat32(int64 v)
+{
+    if (v > 2147483647) {
+        return 2147483647;
+    }
+    if (v < -2147483647 - 1) {
+        return -2147483647 - 1;
+    }
+    return (int32)v;
+}
+int32 mulp(int32 a, int32 c)
+{
+    int64 v;
+    v = ((int64)a * c + ((int64)1 << 29)) >> 30;
+    return sat32(v);
+}
+void print64(int64 v) {
+    int64 d[24];
+    int n = 0;
+    if (v == 0) {
+        putc('0');
+        return;
+    }
+    if (v < 0) {
+        putc('-');
+        v = -v;
+    }
+    while (v > 0) {
+        d[n] = v % 10;
+        n++;
+        v = v / 10;
+    }
+    while (n > 0) {
+        n--;
+        putc('0' + (int)d[n]);
+    }
+}
+void sp() { putc(' '); }
+int fib(int n) {
+    if (n < 2) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+int is_even(int n);
+int is_odd(int n) {
+    if (n == 0) return 0;
+    return is_even(n - 1);
+}
+int is_even(int n) {
+    if (n == 0) return 1;
+    return is_odd(n - 1);
+}
+int sum_to(int n) {
+    int s = 0;
+    int i = 0;
+    for (i = 1; i <= n; i++)
+        s = s + i;
+    return s;
+}
+int gx;
+int getv(int *p) { return *p + 1; }
+int cnt;
+void bump(void) { cnt = cnt + 1; }
+void setg(int v) {
+    if (v < 0) return;
+    gx = v;
+}
+double dh(double x) { return x * 2.0; }
+char chv(void) { return 65; }
+int arrf(void) {
+    int a[4];
+    a[0] = 10;
+    a[1] = 20;
+    a[2] = 12;
+    return a[0] + a[1] + a[2];
+}
+int incw(int x) { x = x + 1; return x; }
+int via_ptr(int x) {
+    int *p = &x;
+    *p = *p + 5;
+    return x;
+}
+int main() {
+    print64(mulp(16384, 1073741824)); sp();
+    print64(mulp(1073741824, 1073741824)); sp();
+    print64(mulp(2147483647, 1073741824)); sp();
+    print64(mulp(-2147483647 - 1, 1073741824)); sp();
+    print64(mulp(1000, 1234567)); sp();
+    print64(mulp(100000, 1234567)); sp();
+    print64(mulp(mulp(16384, 1073741824), 1073741824)); sp();
+    print64(fib(15)); sp();
+    print64(is_even(10) * 10 + is_odd(7)); sp();
+    print64(sum_to(10)); sp();
+    gx = 41;
+    print64(getv(&gx)); sp();
+    cnt = 0;
+    bump();
+    bump();
+    print64(cnt); sp();
+    gx = 7;
+    setg(-1);
+    print64(gx); sp();
+    setg(33);
+    print64(gx); sp();
+    print64((int)dh(21)); sp();
+    print64(chv()); sp();
+    print64(arrf()); sp();
+    gx = 10;
+    print64(incw(gx) * 100 + gx); sp();
+    print64(via_ptr(gx) * 100 + gx);
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v58c.c" > "$TMP/v58c.bin"
+check_tail "$TMP/v58c.bin" "16384 1073741824 2147483647 -2147483648 1 115 16384 610 11 55 42 2 7 33 42 65 42 1110 1510" "v58: インライン化の機能一式"
+
 # --- 容量レポート: --stats で使用量を集め、上限との余りを出す ---
 # 合否ではなく点検のための表示。一括の代表 (nori 本体) と
 # 断片 TU (decls.c + 各断片) の両方を測り、項目ごとに
@@ -3044,7 +3226,7 @@ check_tail "$TMP/v57c.bin" "31 55 31 28 33 20 30 25 9 14 335 84" "v57: ループ
 # (段3で上限が TU 基準になり、iwac 自身の一括は上限
 # 超えになったため、一括側は nori 本体で代表する)
 "$IWAC" --kosaba --stats nori/nori.c libdashi/libdashi.c kosaba/kosaba_rt.c > /dev/null 2> "$TMP/cap-all.txt"
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-geninl 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$IWAC" --kosaba --elf --stats src/decls.c "src/$f.c" > /dev/null 2> "$TMP/cap-$f.txt"
 done
 capmax() {

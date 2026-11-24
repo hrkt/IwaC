@@ -194,6 +194,14 @@ static int nnode;  /* 作ったノードの数 */
 static char var_names[1280][32];
 static int var_name_len[1280];
 static int var_owner[1280];
+/* 変数が定義された入力ファイルの番号 (v58、
+ * func_file と同じ印コメントの数え方)。
+ * インライン化の変数予算をファイルごとに
+ * 数えるために使う */
+static char var_file[1280];
+/* 入力ファイルの番号 (v58): load_files が挟む
+ * 印コメントを skip_spaces が数える */
+static int parse_file_idx;
 static int var_slot[1280];
 static int var_bsize[1280];
 /* 型タグ (v35): 基本サイズ (1/2/4/8) に、符号なし
@@ -297,6 +305,15 @@ static int find_array(char *name, int len);
 static int find_enum_tag(char *name, int len);
 static int find_enum_const(char *name, int len);
 
+/* 変数表が一杯か (上限の数字は define_var_full の
+ * ガードと同じで、プロファイルで一緒に書き換わる)。
+ * 生成段が変数を足すときの安全弁 (v58) */
+int var_table_full(void) {
+    if (nvar >= 1280)
+        return 1;
+    return 0;
+}
+
 /* 名前を名簿に登録し、番号を返す。失敗したら -1。
  * is_decl が 1 (宣言から) のときは「今のスコープの変数」
  * として作る: 同じスコープに同名があればそれを返し、
@@ -345,6 +362,7 @@ static int define_var_full(char *name, int len, int bsize,
         var_names[i][j] = name[j];
     var_name_len[i] = len;
     var_owner[i] = parse_cur_func;
+    var_file[i] = (char)parse_file_idx;
     var_bsize[i] = bsize;
     var_etype[i] = etype;
     var_struct[i] = strct + 1;
@@ -417,6 +435,16 @@ static int func_entry[288];
  *                     本体が無い関数が呼ばれていたら、
  *                     生成の入口でエラーにする */
 static int func_has_body[288];
+/* 関数が定義された入力ファイルの番号 (v58)。
+ * 複数ファイル入力は連結して読むため、境目には
+ * load_files が iwac:file と書いた印コメントを
+ * 挟み、skip_spaces がそれを見て
+ * parse_file_idx を進める。
+ * インライン化は同じファイル内の呼び出しだけに
+ * 限る (分割コンパイルと一括で生成が食い違わない
+ * ようにするため) */
+static char func_file[288];
+/* parse_file_idx は var_file の所で宣言した */
 static int func_called[288];
 static int func_sig[288];     /* その関数の署名番号 (v44) */
 /* func_nlocals[288] : フレームの枠数 (引数を含む、v21)。
@@ -896,7 +924,21 @@ static void skip_spaces(void) {
             /* ブロックコメント (v16): 閉じの印まで飛ばす。
              * 閉じが無ければ黙って終わりにせず字句の
              * エラーにする。この関数は戻り値で失敗を
-             * 伝えられないので、印 (lex_failed) で伝える */
+             * 伝えられないので、印 (lex_failed) で伝える。
+             * 中身がちょうど iwac:file のコメントは
+             * 複数ファイル入力の境目の印 (v58):
+             * ファイル番号を1つ進める */
+            if (cur[2] == 'i' && cur[3] == 'w' &&
+                cur[4] == 'a' && cur[5] == 'c' &&
+                cur[6] == ':' && cur[7] == 'f' &&
+                cur[8] == 'i' && cur[9] == 'l' &&
+                cur[10] == 'e' && cur[11] == '*' &&
+                cur[12] == '/') {
+                if (parse_file_idx < 120)
+                    parse_file_idx++;
+                cur += 13;
+                continue;
+            }
             cur += 2;
             while (*cur != '\0' &&
                    !(cur[0] == '*' && cur[1] == '/'))
@@ -2932,6 +2974,7 @@ static int parse_funcdef(void) {
         func_nlocals[f] = 0;
         func_arr_bytes[f] = 0;
         func_has_body[f] = 0;
+        func_file[f] = (char)parse_file_idx;
         func_called[f] = 0;
     }
     func_ret_etype[f] = parse_type_etype;  /* 戻り値の型 (v35) */
@@ -3103,6 +3146,7 @@ static int parse_funcdef(void) {
         return 0;
     func_body[f] = body;
     func_has_body[f] = 1;
+    func_file[f] = (char)parse_file_idx;
     return 1;
 }
 

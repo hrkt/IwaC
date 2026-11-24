@@ -19,12 +19,12 @@
 # 容量プロファイル (標準 → 断片):
 #   ノード表        12288 → 9216 (v48 で 8448 から引き上げ:
 #                   実測ピーク 9,047 は 02-parse)
-#   命令表          24576 → 23040 (v48 で初めて下げて
-#                   24064、v56 で 23552 へ微減、v57 で
-#                   さらに微減: 実測ピーク 18,418 は
-#                   02-parse、対して +25.1%。レジスタ
-#                   割り付け (v56) とループ最適化
-#                   (v57) の表の置き場を捻出するため)
+#   命令表          24576 → 21504 (v48 で初めて下げて
+#                   24064、v56・v57 で微減、v58 で
+#                   さらに微減: 実測ピーク 20,824 は
+#                   03-gen、対して +3.3%。インライン化
+#                   (v58) の表と変数表の引き上げの
+#                   置き場を捻出するため)
 #   ループ最適化表   ループ 256 → 48、ポインタ
 #                   512 → 80、変更箇所 1024 → 64
 #                   (v57: 実測ピークはループ 34・
@@ -32,12 +32,15 @@
 #                   02-parse か 04-encode の TU)
 #   再配置表         6144 → 2304 (v46 で 2048 から引き上げ:
 #                   実測ピーク 1,493 は 02-parse)
-#   変数表           1280 → 576 (v46 で 512 から引き上げ:
-#                   実測ピーク 556 は 02-parse)
+#   変数表           1280 → 640 (v46 で 512 から引き上げ、
+#                   v58 で 640 へ: インライン化の複製
+#                   変数の絶対上限に合わせる。実測ピーク
+#                   570 は 02-parse の素の変数)
 #   文字列プール    24576 → 8192 バイト
-#   ソース上限      約464KB → 168KB (v48 で 160KB から
-#                   引き上げ: 実測ピーク 168,913)
-#   展開バッファ    約464KB → 168KB (同上)
+#   ソース上限      約464KB → 169KB (v48 で 160KB から
+#                   引き上げ、v58 で 169KB へ: 実測
+#                   ピーク 172,281 は decls + 02-parse)
+#   展開バッファ    約464KB → 169KB (同上)
 #   配列初期値プール 49152 → 1024 要素 (v48 で 4096 から
 #                   下げる: iwac 自身のソースでは現れず、
 #                   shirasu と同じ値。相殺の残り)
@@ -89,7 +92,7 @@ apply 02-parse.c 'str_pool[24576]' 'str_pool[8192]' 1
 apply 02-parse.c '[12288]' '[9216]' 6
 apply 02-parse.c 'nnode >= 12288' 'nnode >= 9216' 1
 apply 02-parse.c 'str_used >= 24575' 'str_used >= 8191' 1
-apply 02-parse.c '[1280]' '[576]' 11
+apply 02-parse.c '[1280]' '[640]' 12
 apply 02-parse.c '[1024]' '[512]' 3
 apply 02b-decl.c 'arr_nfref >= 1024' 'arr_nfref >= 512' 1
 apply 02-parse.c 'fp_nbits >= 1024' 'fp_nbits >= 512' 1
@@ -100,7 +103,7 @@ apply 02-parse.c 'econ_names[256]' 'econ_names[32]' 1
 apply 02-parse.c 'econ_name_len[256]' 'econ_name_len[32]' 1
 apply 02-parse.c 'econ_val[256]' 'econ_val[32]' 1
 apply 02b-decl.c 'necon >= 256' 'necon >= 32' 1
-apply 02-parse.c 'nvar >= 1280' 'nvar >= 576' 1
+apply 02-parse.c 'nvar >= 1280' 'nvar >= 640' 2
 # 配列初期値プール (v40): 表と 02b 側のガードを一緒に
 apply 02-parse.c 'arr_init_pool[49152]' 'arr_init_pool[1024]' 1
 apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
@@ -108,15 +111,15 @@ apply 02b-decl.c 'arr_init_used >= 49152' 'arr_init_used >= 1024' 3
 # その掃引は v49 で 03-genstmt.c へ分かれた
 apply 03-gen.c '[6144]' '[2304]' 3
 apply 03-gen.c 'obj_nreloc < 6144' 'obj_nreloc < 2304' 2
-apply 03-gen.c '[24576]' '[23040]' 6
-apply 03-gen.c 'nasm >= 24576' 'nasm >= 23040' 1
-apply 03-genstmt.c '[24576]' '[23040]' 1
-apply 03-genstmt.c 'nasm >= 24576' 'nasm >= 23040' 1
-apply 03-genstmt.c 'i < 24576' 'i < 23040' 1
+apply 03-gen.c '[24576]' '[21504]' 6
+apply 03-gen.c 'nasm >= 24576' 'nasm >= 21504' 1
+apply 03-genstmt.c '[24576]' '[21504]' 1
+apply 03-genstmt.c 'nasm >= 24576' 'nasm >= 21504' 1
+apply 03-genstmt.c 'i < 24576' 'i < 21504' 1
 # レジスタ割り付けの表 (v56): 変数番号で引く3つの表は、
-# 変数表と同じ 576 に絞る (実測ピーク 570 は TU 最大。
+# 変数表と同じ 640 に絞る (実測ピーク 570 は TU 最大。
 # nvar のガードが先に止めるので安全)
-apply 03-gen.c '[1280]' '[576]' 3
+apply 03-gen.c '[1280]' '[640]' 3
 # ループ最適化の表 (v57): ループ・ポインタ・変更箇所の
 # 表を TU の実測ピークに合わせて絞る (ピークは
 # ループ 34・ポインタ 58・変更 45)
@@ -135,15 +138,16 @@ apply 03-gen.c 'xform_mod_var[1024]' 'xform_mod_var[64]' 1
 apply 03-gen.c 'xform_mod_delta[1024]' 'xform_mod_delta[64]' 1
 apply 03-gen.c 'xform_nmods + scan_nmod > 1024' 'xform_nmods + scan_nmod > 64' 1
 # 05-input.c: ソースの箱と上限のガード (3か所)、表示 (2か所)
-apply 05-input.c 'src_buf[475136]' 'src_buf[172032]' 1
-apply 05-input.c '475135' '172031' 4
-apply 05-input.c '約464KBまで' '約168KBまで' 3
+apply 05-input.c 'src_buf[475136]' 'src_buf[173056]' 1
+apply 05-input.c '475135' '173055' 3
+apply 05-input.c '475120' '173040' 1
+apply 05-input.c '約464KBまで' '約169KBまで' 3
 # 06-preproc.c: 展開バッファと上限のガード。#define の表は
 # 標準は利用者分 64 + 定義済み 2 = 66 だが、iwac 自身の
 # ソースは #define を使わないので利用者分 16 + 2 = 18 に
 # 絞る (v50)
-apply 06-preproc.c 'exp_buf[475136]' 'exp_buf[172032]' 1
-apply 06-preproc.c 'exp_len >= 475135' 'exp_len >= 172031' 1
+apply 06-preproc.c 'exp_buf[475136]' 'exp_buf[173056]' 1
+apply 06-preproc.c 'exp_len >= 475135' 'exp_len >= 173055' 1
 apply 06-preproc.c 'def_names[66]' 'def_names[18]' 1
 apply 06-preproc.c 'def_name_len[66]' 'def_name_len[18]' 1
 apply 06-preproc.c 'def_text[66]' 'def_text[18]' 1
@@ -163,7 +167,7 @@ cat ../src/0*.c > "$WORK/iwac_std_all.c"
 # 容量だけが違うことの確認: 全断片のオブジェクトが
 # 標準と一致すること (断片プロファイルの本分)
 mkdir -p "$WORK/objs"
-for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
+for f in 01-head 02-parse 02b-decl 02c-fpconv 03-gen 03-geninl 03-genstmt 03b-genfp 04-encode 05-input 06-preproc 07-main; do
     "$WORK/iwac-std" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-std.eo"
     "$WORK/iwac-frag" --kosaba --elf ../src/decls.c ../src/$f.c > "$WORK/objs/$f-frag.eo"
     if ! cmp -s "$WORK/objs/$f-std.eo" "$WORK/objs/$f-frag.eo"; then
