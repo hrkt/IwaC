@@ -513,10 +513,14 @@ static void write_elf_header(void) {
      * 初期値があるときは、その末尾までが 2本目の
      * 実体に入り、3本目のファイル位置も後ろへずれる
      * (v40。arr_init_end は初期値が無ければ 0) */
-    unsigned long data_filesz = (unsigned long)str_used +
+    /* 配列領域の基底と締めは 8 バイト境界 (v63、
+     * doc/data-align.md。gen 側の str_padded と
+     * 揃える) */
+    unsigned long str_padded = ((unsigned long)str_used + 7ul) & ~7ul;
+    unsigned long data_filesz = str_padded +
                                 (unsigned long)arr_init_end;
-    unsigned long data_memsz = (unsigned long)str_used +
-                               (unsigned long)arr_used;
+    unsigned long data_memsz = str_padded +
+                               (((unsigned long)arr_used + 7ul) & ~7ul);
     unsigned long gbl_filesz = 0;
     if (has_var_inits)
         gbl_filesz = (unsigned long)var_nglobal * 8ul;
@@ -567,7 +571,7 @@ static void write_elf_header(void) {
     out32le(1);       /* p_type = PT_LOAD */
     out32le(6);       /* p_flags = 読み＋書き (R+W) */
     out64le((unsigned long)elf_data_offset() +
-            (unsigned long)str_used +
+            str_padded +
             (unsigned long)arr_init_end);
     /* p_offset (文字列と配列の初期値の直後、v40) */
     out64le(0x40200000ul + data_memsz);  /* p_vaddr (配列の直後) */
@@ -645,7 +649,9 @@ static void write_var_image(void) {
  * メモリイメージなので、ゼロも含めて全部書く。
  * 配列の初期値は v40 でイメージに含まれる) */
 static void write_global_image(void) {
-    write_arr_image(arr_used);
+    /* 配列領域の締めも 8 境界まで 0 で埋める
+     * (v63。グローバルの基底と合わせる) */
+    write_arr_image((arr_used + 7) & ~7);
     write_var_image();
 }
 
@@ -1684,6 +1690,11 @@ static void write_binary(void) {
     }
     for (int i = 0; i < str_used; i++)
         out_byte((unsigned char)str_pool[i]);
+    /* 配列領域の基底までの詰め物 (v63)。後の像は
+     * 全部切り上げ後の基底基準なので、初期値が
+     * 無いときも含めて必ず出す */
+    for (int i = str_used; i < ((str_used + 7) & ~7); i++)
+        out_byte(0);
     /* 初期値つきグローバルがあるときだけ初期イメージを
      * 付ける (v24)。ベアメタル版はバイナリそのものが
      * メモリイメージなので配列のゼロも全部書く。

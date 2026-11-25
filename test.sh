@@ -3759,4 +3759,73 @@ else
     echo "skip: 小容量ビルド (shirasu、RISC-V 用 gcc が無いため)"
 fi
 
+# --- v63: データ配置のアライメント (doc/data-align.md) ---
+# グローバル配列の先頭・配列領域の基底と締めを 8 バイト
+# 境界に揃える。ずれると実機 (K210) でワードアクセスが
+# misaligned のトラップエミュレーションに落ちる
+# (synth のバイトパック問題の根)。ベアメタルではデータ
+# 開始がコード長次第なので、プール先頭の文字列からの
+# 相対位置で確かめる (kosaba では基底がページ境界
+# なので相対 = 絶対)
+cat > "$TMP/v63a.c" <<'EOF'
+char c1[3] = { 1, 2, 3 };
+int32 w1[4] = { 10, 20, 30, 40 };
+char c2[5] = { 1, 2, 3, 4, 5 };
+int64 q1[2] = { 100, 200 };
+int32 w2[3];
+int gv = 7;
+char *msg = "ABCDE";
+int bad = 0;
+long base = 0;
+void chk(long p) { if ((p - base) % 8 != 0) bad = 1; }
+int main() {
+    base = (long)msg;
+    chk((long)c1);
+    chk((long)w1);
+    chk((long)c2);
+    chk((long)q1);
+    chk((long)w2);
+    chk((long)&gv);
+    int s = c1[0] + c1[2] + w1[0] + w1[3] + c2[4] + (int)q1[0] + (int)q1[1] + gv + msg[1];
+    if (bad) { putc(66); return 0; }
+    if (s != 432) { putc(67); return 0; }
+    putc(65);
+    return 0;
+}
+EOF
+"$IWAC" "$TMP/v63a.c" > "$TMP/v63a.bin" || fail "v63: ベアメタルのコンパイルに失敗"
+check_tail "$TMP/v63a.bin" "A" "v63: 全配列とグローバルが 8 境界 (ベアメタル実行時)"
+# kosaba 側は一括と nori 経由のバイト一致で両経路の配置が
+# 同じことを確かめ、データ像の詰め物をバイト列でも見る
+cat > "$TMP/v63b.c" <<'EOF'
+char c1[3] = { 1, 2, 3 };
+int32 w1[4] = { 10, 20, 30, 40 };
+char c2[5] = { 1, 2, 3, 4, 5 };
+int64 q1[2] = { 100, 200 };
+char *msg = "ABCDE";
+int main() { return w1[0] + (int)q1[0] + msg[1]; }
+EOF
+"$IWAC" --kosaba "$TMP/v63b.c" > "$TMP/v63b-one.elf" || fail "v63: 一括 (kosaba) に失敗"
+if [ -x "$TMP/nori" ]; then
+    "$IWAC" --kosaba --elf "$TMP/v63b.c" > "$TMP/v63b.eo" || fail "v63: オブジェクト化に失敗"
+    "$TMP/nori" "$TMP/v63b.eo" > "$TMP/v63b.elf" || fail "v63: nori リンクに失敗"
+    cmp -s "$TMP/v63b-one.elf" "$TMP/v63b.elf" || fail "v63: nori と一括 (kosaba) で配置が違う"
+    hex=$(od -An -tx1 -v "$TMP/v63b.elf" | tr -d ' \n')
+    case "$hex" in
+        *4142434445000000010203*) : ;;
+        *) fail "v63: 文字列プールの後ろの詰め物が無い" ;;
+    esac
+    case "$hex" in
+        *01020300000000000a000000140000001e0000002800*) : ;;
+        *) fail "v63: c1 と w1 の間の詰め物が無い" ;;
+    esac
+    case "$hex" in
+        *010203040500000064000000000000*) : ;;
+        *) fail "v63: c2 と q1 の間の詰め物が無い" ;;
+    esac
+    echo "ok: v63: nori と一括 (kosaba) の両経路で配列が 8 境界"
+else
+    echo "skip: v63: nori 経路 (nori が組み立てられなかったため)"
+fi
+
 echo "PASS"

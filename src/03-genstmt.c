@@ -1934,15 +1934,22 @@ static int gen_program(void) {
     if (target_kosaba)
         data_base = 0x40200000u;
     else
+        /* ベアメタル版はコードの直後がデータ開始。
+         * 開始位置そのものはコード長次第で、v63 の
+         * 揃えはデータ領域の中の相対配置に効く
+         * (doc/data-align.md) */
         data_base = LOAD_BASE + (unsigned int)nasm * 4u;
     for (int i = 0; i < nstr; i++)
         str_addr[i] = data_base + (unsigned int)str_off[i];
     /* グローバル配列の領域は文字列の後ろに置く。
      * ローカル配列はフレームの中なので住所は持たない
      * (gen_load_arr_base が fp 相対で作る、v26) */
+    /* 配列領域の基底は文字列プールの末尾を 8 に
+     * 切り上げた位置 (v63、doc/data-align.md) */
+    unsigned int str_padded = (unsigned int)((str_used + 7) & ~7);
     for (int i = 0; i < narr; i++)
         arr_addr[i] = arr_owner[i] < 0
-            ? data_base + (unsigned int)str_used +
+            ? data_base + str_padded +
               (unsigned int)arr_off[i]
             : 0u;
     /* グローバル変数の領域は配列の後ろ (v21)。
@@ -1952,8 +1959,8 @@ static int gen_program(void) {
      * ベアメタルでは初期イメージが無い場合、RAM の
      * 更地なので 0 とは限らない。プログラムは代入
      * してから使う約束) */
-    globals_base = data_base + (unsigned int)str_used +
-                   (unsigned int)arr_used;
+    globals_base = data_base + str_padded +
+                   (unsigned int)((arr_used + 7) & ~7);
     {
         /* スタックは静的領域の後ろ 4KB 先から下へ伸ばす。
          * 16 バイト単位に切り上げておく (置き場所の約束)。

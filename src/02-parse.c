@@ -792,13 +792,11 @@ static int define_array_s(char *name, int len, int rows, int cols,
     arr_plevel[i] = plevel;
     arr_owner[i] = parse_cur_func;
     if (parse_cur_func < 0) {
-        if (strct >= 0) {
-            /* 構造体の配列は先頭を要素のアラインメントに
-             * 揃える (v37。他の配列は従来どおり詰める) */
-            int al = stag_align[strct];
-            if (arr_used % al)
-                arr_used += al - (arr_used % al);
-        }
+        /* グローバル配列の先頭は 8 バイト境界に
+         * 揃える (v63、doc/data-align.md。v37 の
+         * 構造体だけの揃えを一律にした) */
+        if (arr_used % 8)
+            arr_used += 8 - (arr_used % 8);
         arr_off[i] = arr_used;
         arr_used += bytes;
         arr_foff[i] = 0;

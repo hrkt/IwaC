@@ -504,6 +504,12 @@ static int read_object_elf(int obj) {
             } else {
                 sym_obj[s] = obj;
                 sym_size[s] = (int)size;
+                /* 配列の先頭は 8 バイト境界に揃える
+                 * (v63、doc/data-align.md)。詰めた
+                 * ままでは実機 (K210) でワード
+                 * アクセスが misaligned のトラップ
+                 * エミュレーションに落ちる */
+                arr_area = (arr_area + 7) & ~7L;
                 sym_off[s] = (int)arr_area;
                 arr_area += size;
             }
@@ -711,6 +717,9 @@ static int load_file(int obj) {
 static int entry_obj;
 static int out_len;            /* 最終コードの長さ */
 static long str_total;
+static long arr_base;          /* 配列領域の基底
+                                * (str_total を 8 に
+                                * 切り上げたもの、v63) */
 static int big_link;           /* コードが JAL の届く
                                 * 範囲 (約1MB) を超えたか。
                                 * 超えたリンクだけ、呼び出しの
@@ -746,13 +755,18 @@ static int layout(void) {
         spos += obj_str_len[o];
     }
     str_total = spos;
+    /* 配列領域の基底と締めを 8 バイト境界に揃える
+     * (v63)。文字列自身の住所は従来どおりで、
+     * ずれるのは後ろの領域だけ */
+    arr_base = (str_total + 7) & ~7L;
+    arr_area = (arr_area + 7) & ~7L;
     /* データの住所 */
     for (int s = 0; s < nsym; s++) {
         if (sym_kind[s] == 3)
-            sym_addr[s] = DATA_BASE + str_total + sym_off[s];
+            sym_addr[s] = DATA_BASE + arr_base + sym_off[s];
         /*                              0x40200000 */
         else if (sym_kind[s] == 2)
-            sym_addr[s] = DATA_BASE + str_total + arr_area +
+            sym_addr[s] = DATA_BASE + arr_base + arr_area +
                           (long)sym_off[s] * 8;
     }
     /* 関数ポインタ配列の初期値 (v44): 関数の住所が
@@ -1156,10 +1170,10 @@ static int write_elf(void) {
     out16(0);
     out16(0);
     out_phdr(5, 4096, code_base, out_len, out_len, 0x1000);
-    out_phdr(6, data_off, data_base, str_total + ainit_span,
-             str_total + arr_area, 0x1000);
-    out_phdr(6, data_off + str_total + ainit_span,
-             data_base + str_total + arr_area,
+    out_phdr(6, data_off, data_base, arr_base + ainit_span,
+             arr_base + arr_area, 0x1000);
+    out_phdr(6, data_off + arr_base + ainit_span,
+             data_base + arr_base + arr_area,
              has_inits ? gbl_bytes : 0, gbl_bytes, 1);
     for (int i = 232; i < 4096; i++)
         out_byte(0);
@@ -1179,6 +1193,11 @@ static int write_elf(void) {
             write(1, in_buf + obj_str_foff[o], obj_str_len[o]);
         }
     }
+    /* 配列領域の基底までの詰め物 (v63)。後の像は
+     * 全部 arr_base 基準なので、初期値が無い
+     * ときも含めて必ず出す */
+    for (long i = str_total; i < arr_base; i++)
+        out_byte(0);
     if (ainit_span > 0) {
         /* 配列の初期値: 始まる位置まで 0 を埋め、
          * バイト列を置く、を並び順に繰り返す */
