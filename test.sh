@@ -3828,4 +3828,67 @@ else
     echo "skip: v63: nori 経路 (nori が組み立てられなかったため)"
 fi
 
+# --- libdashi フォント (doc/libdashi.md) ---
+# 字形データと ds_glyph の対応を、ホスト実行の
+# ASCII アートで検品する (A と > と、表に無い
+# 小文字が blank になること)。kosaba 側は消費者
+# プログラムのコンパイルで確かめる
+cat > "$TMP/dsfont.c" <<'EOF'
+#include <stdio.h>
+char *ds_glyph(int c);
+int main() {
+    const char *probe;
+    int i, col, row;
+    probe = "A>a";
+    for (i = 0; probe[i]; i++) {
+        char *g;
+        g = ds_glyph(probe[i]);
+        for (row = 0; row < 7; row++) {
+            for (col = 0; col < 5; col++)
+                putchar((g[col] >> (6 - row)) & 1 ? '#' : '.');
+            putchar('\n');
+        }
+    }
+    return 0;
+}
+EOF
+if cc -std=c11 -O2 -o "$TMP/dsfont" "$TMP/dsfont.c" libdashi/dsfont.c 2>/dev/null; then
+    out=$("$TMP/dsfont")
+    want='.###.
+#...#
+#...#
+#####
+#...#
+#...#
+#...#
+#....
+.#...
+..#..
+...#.
+..#..
+.#...
+#....
+.....
+.....
+.....
+.....
+.....
+.....
+.....'
+    [ "$out" = "$want" ] || fail "libdashi フォント: 字形が期待と違う"
+    echo "ok: libdashi フォント: 字形と ds_glyph の対応 (ホスト実行)"
+else
+    echo "skip: libdashi フォント: ホスト確認 (cc が無いため)"
+fi
+cat > "$TMP/dsfont-k.c" <<'EOF'
+char *ds_glyph(int c);
+int main() {
+    char *g;
+    g = ds_glyph(65);
+    return g[0] + g[4];
+}
+EOF
+"$IWAC" --kosaba "$TMP/dsfont-k.c" libdashi/libdashi.c libdashi/dsfont.c kosaba/kosaba_rt.c > "$TMP/dsfont.elf" || fail "libdashi フォント: kosaba コンパイルに失敗"
+echo "ok: libdashi フォント: kosaba コンパイル"
+
 echo "PASS"
